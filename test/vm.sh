@@ -105,8 +105,8 @@ for g in g1-install.sh g2-setup-login.sh g3-check.sh; do
     "$VM/scp-vm.sh" "$VM/$g" '~/' >/dev/null || fail "scp of $g failed"
 done
 ssh_vm "bash ~/g1-install.sh $(basename "$DEB")" 2>&1 | tail -20
-ssh_vm 'dpkg -s starling-desktop >/dev/null 2>&1' \
-    || fail "starling-desktop is not installed after apt install"
+ssh_vm 'dpkg -s starling >/dev/null 2>&1' \
+    || fail "starling is not installed after apt install"
 
 # ── 4. a real login, through the display manager ─────────────────────────────
 step "set up the GDM login and reboot into it (g2)"
