@@ -1,9 +1,12 @@
-# starling-desktop
+# Starling
 
-The Starling desktop: a Wayland desktop environment whose shell, compositor,
-framework, and apps are written in Swift (the framework is a full port of
-Flutter's Dart framework to Swift — no Dart VM). Runs on the Flutter engine's
-C core via the sibling repo **starling-engine**.
+**[starling.build](https://starling.build)**
+
+A new Linux desktop environment, whose shell, compositor, framework, and apps
+are written in Swift (the framework is a full port of Flutter's Dart framework
+to Swift — no Dart VM). It brings its own Wayland compositor and its own X11
+server, so it runs native Wayland clients and X11 apps alike. Runs on the
+Flutter engine's C core via the sibling repo **starling-engine**.
 
 ```
 sdk/     the Flutter→Swift framework port (SwiftPM package "FlutterSwift")
