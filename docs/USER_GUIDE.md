@@ -139,18 +139,18 @@ v0.2.
 
 ## Settings
 
-The Settings app has these sections:
+The Settings app has five sections in its sidebar:
 
-- **Appearance** — the **Dark Mode** switch (the same light/dark choice as the
-  desktop right-click menu), and **Tiling Windows** to switch between floating
-  and tiling window management.
+- **General** — **System Information**: the Starling version, your Ubuntu
+  release, kernel, and Mesa version.
+- **Network** — see and join **Wi-Fi** networks.
 - **Displays** — display information. Note: **scaling is pinned to 2.0** in
   this release, and there is no display-mode selection yet.
-- **Network / Wi-Fi** — see and join networks.
-- **Sound & Brightness**.
-- **Notifications** — the toggle is present but **does nothing yet**; there is
-  no notification service behind it.
-- **About / System Information** — version and system details.
+- **Appearance** — the **Dark Mode** switch (the same light/dark choice as the
+  desktop right-click menu), **Tiling Windows** to switch between floating and
+  tiling window management, **Sound & Brightness**, and a **Notifications**
+  toggle (present but inert — there is no notification service behind it yet).
+- **About** — about the desktop.
 
 ---
 
