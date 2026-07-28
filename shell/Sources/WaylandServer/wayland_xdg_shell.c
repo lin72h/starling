@@ -140,7 +140,10 @@ static const struct xdg_positioner_interface xdg_positioner_impl = {
 static void xdg_toplevel_destroy_handler(struct wl_client* client,
                                          struct wl_resource* resource) {
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
-    if (surface) {
+    /* Only act if this resource is still THE toplevel of the surface. An
+     * unconditional clear would drop the record of a live role object and
+     * leave it dangling past the surface's own free. */
+    if (surface && surface->xdg_toplevel == resource) {
         struct WaylandServer* server = surface->server;
         /* Unmapping: the surface leaves the output. */
         wayland_output_send_leave(server, surface);
@@ -151,6 +154,15 @@ static void xdg_toplevel_destroy_handler(struct wl_client* client,
         surface->xdg_toplevel = NULL;
     }
     wl_resource_destroy(resource);
+}
+
+/* Runs on explicit destroy AND on client disconnect, where libwayland frees
+ * resources in id order — so a role object can outlive its wl_surface. */
+static void xdg_toplevel_resource_destroy(struct wl_resource* resource) {
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (surface && surface->xdg_toplevel == resource) {
+        surface->xdg_toplevel = NULL;
+    }
 }
 
 static void xdg_toplevel_set_parent_handler(struct wl_client* client,
@@ -322,10 +334,18 @@ static const struct xdg_toplevel_interface xdg_toplevel_impl = {
 static void xdg_surface_destroy_handler(struct wl_client* client,
                                         struct wl_resource* resource) {
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
-    if (surface) {
+    if (surface && surface->xdg_surface == resource) {
         surface->xdg_surface = NULL;
     }
     wl_resource_destroy(resource);
+}
+
+/* Same reasoning as xdg_toplevel_resource_destroy: also runs on disconnect. */
+static void xdg_surface_resource_destroy(struct wl_resource* resource) {
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (surface && surface->xdg_surface == resource) {
+        surface->xdg_surface = NULL;
+    }
 }
 
 static void xdg_surface_get_toplevel(struct wl_client* client,
@@ -335,13 +355,25 @@ static void xdg_surface_get_toplevel(struct wl_client* client,
     if (!surface) return;
     struct WaylandServer* server = surface->server;
 
+    /* The spec makes a second role on one xdg_surface a protocol error, and
+     * enforcing it is load-bearing here: without this, both role objects kept
+     * a pointer to the surface while only the newer was recorded, so
+     * destroying the older one cleared the record of the live one and left it
+     * pointing at memory freed with the surface. */
+    if (surface->xdg_toplevel || surface->xdg_popup) {
+        wl_resource_post_error(resource, XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED,
+                               "xdg_surface already has a role");
+        return;
+    }
+
     struct wl_resource* toplevel = wl_resource_create(client,
         &xdg_toplevel_interface, wl_resource_get_version(resource), id);
     if (!toplevel) {
         wl_client_post_no_memory(client);
         return;
     }
-    wl_resource_set_implementation(toplevel, &xdg_toplevel_impl, surface, NULL);
+    wl_resource_set_implementation(toplevel, &xdg_toplevel_impl, surface,
+                                   xdg_toplevel_resource_destroy);
     surface->xdg_toplevel = toplevel;
     surface->had_role = 1;
 
@@ -423,6 +455,13 @@ static void xdg_surface_get_popup_handler(struct wl_client* client,
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
     if (!surface) return;
     struct WaylandServer* server = surface->server;
+
+    /* One role per xdg_surface — see xdg_surface_get_toplevel. */
+    if (surface->xdg_toplevel || surface->xdg_popup) {
+        wl_resource_post_error(resource, XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED,
+                               "xdg_surface already has a role");
+        return;
+    }
 
     /* Compute popup position from positioner. */
     int32_t popup_x = 0, popup_y = 0;
@@ -557,7 +596,8 @@ static void xdg_wm_base_get_xdg_surface_handler(struct wl_client* client,
         wl_client_post_no_memory(client);
         return;
     }
-    wl_resource_set_implementation(xdg_surface, &xdg_surface_impl, surface, NULL);
+    wl_resource_set_implementation(xdg_surface, &xdg_surface_impl, surface,
+                                   xdg_surface_resource_destroy);
     surface->xdg_surface = xdg_surface;
 }
 

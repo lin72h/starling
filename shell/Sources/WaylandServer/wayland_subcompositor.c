@@ -77,6 +77,19 @@ static const struct wl_subsurface_interface subsurface_impl = {
     .set_desync    = subsurface_set_desync,
 };
 
+/* Runs on explicit destroy AND on client disconnect. Clear the surface's
+ * back-pointer only if it still names THIS resource: the surface may already
+ * have been re-roled, and blindly clearing would drop a live one. */
+static void subsurface_resource_destroy(struct wl_resource* resource) {
+    struct WaylandSurface* s = wl_resource_get_user_data(resource);
+    if (!s) return;                       /* surface died first — already handled */
+    if (s->subsurface_resource == resource) {
+        s->subsurface_resource = NULL;
+        s->is_subsurface = 0;
+        s->subsurface_parent = NULL;
+    }
+}
+
 /* ========================================================================== */
 /* wl_subcompositor                                                           */
 /* ========================================================================== */
@@ -112,8 +125,16 @@ static void subcompositor_get_subsurface(struct wl_client* client,
         s->subsurface_parent = p;
         s->subsurface_x = 0;
         s->subsurface_y = 0;
+        s->subsurface_resource = subsurface;
     }
-    wl_resource_set_implementation(subsurface, &subsurface_impl, s, NULL);
+    /* Destructor, not NULL: destroying the wl_surface first while keeping
+     * this object alive is a legal client ordering, and it also happens on
+     * disconnect, where libwayland frees resources in id order. Without one,
+     * set_position wrote two attacker-chosen int32 through a freed
+     * WaylandSurface. surface_destroy_resource() nulls this user_data from
+     * the other side; this clears the surface's back-pointer from ours. */
+    wl_resource_set_implementation(subsurface, &subsurface_impl, s,
+                                   subsurface_resource_destroy);
 }
 
 /*

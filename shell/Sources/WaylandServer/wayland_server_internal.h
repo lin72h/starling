@@ -53,6 +53,12 @@ struct WaylandSurface {
     int is_subsurface;
     struct WaylandSurface* subsurface_parent;
     int32_t subsurface_x, subsurface_y;   // position relative to parent
+    // The wl_subsurface role object, tracked for exactly one reason: it
+    // stores a raw pointer to this surface, and a client may legally destroy
+    // the wl_surface while keeping the wl_subsurface alive. Recording it lets
+    // surface_destroy_resource() null its user_data instead of leaving it
+    // dangling (set_position then wrote through the freed surface).
+    struct wl_resource* subsurface_resource;
 
     // Double-buffered pending state (applied atomically on commit)
     struct {

@@ -441,6 +441,30 @@ static void surface_destroy_resource(struct wl_resource* resource) {
     if (surface->decoration) {
         wl_resource_set_user_data(surface->decoration, NULL);
     }
+    if (surface->subsurface_resource) {
+        wl_resource_set_user_data(surface->subsurface_resource, NULL);
+    }
+
+    /* Children hold a raw pointer to us. Destroying a parent while a
+     * subsurface still references it left that pointer dangling, and the
+     * commit path walks it (and writes through it), so clear every child
+     * that points here before the free below. */
+    {
+        struct WaylandSurface* other;
+        wl_list_for_each(other, &surface->server->surfaces, link) {
+            if (other->subsurface_parent == surface) {
+                other->subsurface_parent = NULL;
+                other->is_subsurface = 0;
+            }
+        }
+    }
+
+    /* Text-input focus holds a raw surface pointer too. This cleanup hook
+     * was declared, defined and exported but never called from anywhere,
+     * so a focused client that destroyed its surface left server->ti_focus
+     * pointing at freed memory — read back to clients through
+     * zwp_text_input_v3.enter. */
+    wayland_text_input_surface_destroyed(surface->server, surface);
 
     /* Clean up buffer destroy listeners. */
     if (surface->committed_buffer) {
