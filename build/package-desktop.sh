@@ -132,12 +132,33 @@ export FLUTTER_DRM_DEVICE="${FLUTTER_DRM_DEVICE:-/dev/dri/card0}"
 # then serves only its backend-less interfaces — FileChooser needs an
 # impl.portal.desktop.* backend and none declares Starling, so file dialogs
 # break in every Chromium/Electron/GTK app.
+# $XDG is a fixed name in a world-writable /tmp, so before trusting it we
+# have to prove it is ours: a second local user can create it first, and
+# `mkdir -p` succeeds just the same on someone else's directory. Owning it
+# would mean owning every socket the session puts inside — the Wayland
+# socket, the agent broker, the bus. A symlink there is the same attack with
+# an extra hop, so reject anything that is not a real directory we own, and
+# keep it 0700 so nobody can reach in afterwards.
 XDG=/tmp/xdg-starling
+mkdir -p "$XDG" 2>/dev/null
+if [ -L "$XDG" ] || [ ! -d "$XDG" ] || [ ! -O "$XDG" ]; then
+    echo "starling-session: $XDG is not a directory owned by $(id -un) —" \
+         "refusing to start (someone else may have created it)" >&2
+    exit 1
+fi
+chmod 700 "$XDG"
 mkdir -p "$XDG/data/dbus-1/services"
 for n in org.freedesktop.secrets org.freedesktop.portal.Desktop; do
     printf '[D-BUS Service]\nName=%s\nExec=/usr/bin/false\n' "$n" \
         > "$XDG/data/dbus-1/services/$n.service"
 done
+# Never adopt a bus socket we did not create. The old `[ ! -S ]` test meant a
+# pre-planted socket was taken as the session bus, which hands every app's
+# D-Bus traffic — and the portal name behind every file dialog — to whoever
+# planted it. Ours or nothing: drop a stale one and start our own.
+if [ -e "$XDG/bus" ] && { [ ! -S "$XDG/bus" ] || [ ! -O "$XDG/bus" ]; }; then
+    rm -f "$XDG/bus"
+fi
 if [ ! -S "$XDG/bus" ]; then
     setsid env XDG_DATA_HOME="$XDG/data" \
         dbus-daemon --session --address="unix:path=$XDG/bus" --nofork \

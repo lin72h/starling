@@ -109,21 +109,34 @@ echo "seat:   $SEAT"
 # "No such interface org.freedesktop.portal.FileChooser" and fall back to
 # their own file dialog — which is what made VS Code's Open dialog come up
 # empty. Masking it keeps our portal the owner for the life of the session.
+# Owned by the invoking user and 0700 in both modes: /tmp is world-writable,
+# and whoever owns this dir owns every session socket inside it. Root can
+# still reach in, which is all the root-shell dev path needs.
 XDG=/tmp/xdg-starling
 if [ "$SEAT" = direct ]; then
     # Root shell: the portal thread drops euid to this user before connecting,
     # so the dir must be owned by them, not by root.
     sudo mkdir -p "$XDG"
     sudo chown "$(id -u):$(id -g)" "$XDG"
-    sudo chmod 755 "$XDG"
+    sudo chmod 700 "$XDG"
 else
     mkdir -p "$XDG"
+    chmod 700 "$XDG"
+fi
+if [ -L "$XDG" ] || [ ! -d "$XDG" ] || [ ! -O "$XDG" ]; then
+    echo "run-desktop: $XDG is not a directory owned by $(id -un) — refusing" >&2
+    exit 1
 fi
 mkdir -p "$XDG/data/dbus-1/services"
 for n in org.freedesktop.secrets org.freedesktop.portal.Desktop; do
     printf '[D-BUS Service]\nName=%s\nExec=/usr/bin/false\n' "$n" \
         > "$XDG/data/dbus-1/services/$n.service"
 done
+# Ours or nothing — never adopt a bus socket we did not create (see the
+# packaged launcher in build/package-desktop.sh for why).
+if [ -e "$XDG/bus" ] && { [ ! -S "$XDG/bus" ] || [ ! -O "$XDG/bus" ]; }; then
+    rm -f "$XDG/bus"
+fi
 if [ ! -S "$XDG/bus" ]; then
     setsid env XDG_DATA_HOME="$XDG/data" \
         dbus-daemon --session --address="unix:path=$XDG/bus" --nofork \

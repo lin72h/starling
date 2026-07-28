@@ -66,16 +66,33 @@ public final class AgentSemanticsEndpoint: @unchecked Sendable {
             close(fd)
             return false
         }
-        chmod(path, 0o666)
+        // `perform_action` invokes the widget's real handler — the same code
+        // path as a human gesture — so this socket must not be world
+        // reachable. The broker gates its proxied calls on window ownership;
+        // a mode of 0666 here let anything on the box skip that entirely by
+        // connecting straight to the enumerable path.
+        chmod(path, 0o600)
         listenFd = fd
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             while let self, self.listenFd >= 0 {
                 let client = accept(self.listenFd, nil, nil)
                 guard client >= 0 else { break }
+                guard Self.peerIsSameUser(client) else { close(client); continue }
                 self.serve(client)
             }
         }
         return true
+    }
+
+    /// Only this app's own user (or root) may drive the widget tree. The uid
+    /// comes from the kernel, so a client cannot claim someone else's.
+    private static func peerIsSameUser(_ fd: Int32) -> Bool {
+        var cred = ucred()
+        var len = socklen_t(MemoryLayout<ucred>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 else {
+            return false          // cannot prove the peer — fail closed
+        }
+        return cred.uid == getuid() || cred.uid == 0
     }
 
     private func serve(_ fd: Int32) {

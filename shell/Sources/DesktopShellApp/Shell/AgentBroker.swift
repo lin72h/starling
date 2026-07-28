@@ -149,8 +149,17 @@ final class AgentBroker: @unchecked Sendable {
             close(fd)
             return
         }
-        // Dev mode runs the shell as root; agents connect as the user.
-        chmod(socketPath, 0o666)
+        // This socket drives the session: `launch` starts processes and
+        // `inject` types into them, so reaching it IS code execution as the
+        // login user. It is owner-only, and every accepted peer is checked
+        // against that owner below — filesystem mode alone is not the gate.
+        //
+        // Dev mode runs the shell as root while agents connect as the user,
+        // so hand the socket to the login user rather than widening the mode
+        // (0666 here was how any local uid, and every app that gets
+        // XDG_RUNTIME_DIR bind-mounted in, could drive the whole session).
+        chmod(socketPath, 0o600)
+        if getuid() == 0 { _ = chown(socketPath, LoginUser.uid, gid_t(bitPattern: -1)) }
         listenFd = fd
 
         // Frame-quiet raw material for await_settled.
@@ -168,9 +177,35 @@ final class AgentBroker: @unchecked Sendable {
             while let self, self.listenFd >= 0 {
                 let clientFd = accept(self.listenFd, nil, nil)
                 guard clientFd >= 0 else { break }
+                // Authenticate the peer by uid before it can say anything.
+                // The kernel supplies this; it cannot be forged by the
+                // client, which is why it — not the socket mode — is the
+                // security boundary.
+                guard Self.peerIsSessionOwner(clientFd) else {
+                    close(clientFd)
+                    continue
+                }
                 self.serveConnection(BrokerConn(fd: clientFd))
             }
         }
+    }
+
+    /// True when the connected peer runs as the session's own user (or root,
+    /// which could take the session anyway). Rejects every other local uid.
+    private static func peerIsSessionOwner(_ fd: Int32) -> Bool {
+        var cred = ucred()
+        var len = socklen_t(MemoryLayout<ucred>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 else {
+            // No credentials means we cannot prove who this is — fail closed.
+            FileHandle.standardError.write(Data(
+                "[AgentBroker] rejected a peer with no credentials\n".utf8))
+            return false
+        }
+        let owner = LoginUser.uid
+        if cred.uid == owner || cred.uid == 0 { return true }
+        FileHandle.standardError.write(Data(
+            "[AgentBroker] rejected connection from uid \(cred.uid) (session owner is \(owner))\n".utf8))
+        return false
     }
 
     private func serveConnection(_ conn: BrokerConn) {

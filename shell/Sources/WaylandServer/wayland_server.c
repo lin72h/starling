@@ -77,14 +77,30 @@ WaylandServer* wayland_server_create(const WaylandServerConfig* config) {
     }
     snprintf(server->socket_name, sizeof(server->socket_name), "%s", socket);
 
-    /* When running as root, make the socket world-accessible so clients
-     * launched as the normal user (via runuser) can connect. */
+    /* This socket is the session's keyboard and its screen: any client that
+     * connects can receive key events and read window content. It is
+     * owner-only.
+     *
+     * Dev mode runs the compositor as root while clients run as the login
+     * user, which is what the old unconditional 0777 was for — but it also
+     * applied to the packaged unprivileged session, leaving every local uid
+     * able to attach. Hand the socket to whoever owns XDG_RUNTIME_DIR
+     * instead (the launcher chowns that dir to the login user for exactly
+     * this reason) and keep the mode closed. */
     {
         const char *xdg = getenv("XDG_RUNTIME_DIR");
         if (xdg) {
             char path[256];
             snprintf(path, sizeof(path), "%s/%s", xdg, socket);
-            chmod(path, 0777);
+            if (geteuid() == 0) {
+                struct stat st;
+                if (stat(xdg, &st) == 0 && st.st_uid != 0) {
+                    if (chown(path, st.st_uid, st.st_gid) != 0) {
+                        fprintf(stderr, "wayland_server: chown(%s) failed\n", path);
+                    }
+                }
+            }
+            chmod(path, 0700);
         }
     }
 
