@@ -1,0 +1,175 @@
+# Installing Starling
+
+Starling ships as a single Debian package. Install it, log out, and pick
+**Starling** at the login screen. This guide covers the requirements, the
+install, upgrades and removal, and what to do when something does not come up.
+
+For building from source instead, see [BUILDING.md](BUILDING.md). For using
+the desktop once it is running, see the [User Guide](USER_GUIDE.md).
+
+---
+
+## Requirements
+
+- **Ubuntu 26.04 LTS**, **amd64**. This is the only release the package
+  targets. It may work on newer Ubuntu; it is not tested there.
+- **A Wayland-capable login manager** — GDM, or LightDM/SDDM configured for
+  Wayland. Ubuntu Desktop already has GDM. On Server or a minimal install you
+  add one (below); the package will also pull one in if you have none.
+- **Graphics**: verified on **AMD** (Radeon 780M) and on **virtio-gpu / virgl**
+  in a VM. Intel and NVIDIA are not yet tested — Starling may or may not come
+  up on them. See [Troubleshooting](#troubleshooting) if the screen stays
+  black.
+- **~130 MB** of disk for the package and its dependencies. The `.deb` itself
+  is about 53 MB and pulls in roughly 26 dependency packages on a minimal
+  image.
+
+Starling runs as your ordinary user through the normal login path. It does
+**not** run as root and does not replace your existing desktop — it installs
+alongside it as another session you select at login.
+
+---
+
+## Install
+
+```bash
+# 1. Make sure a Wayland-capable login manager is present. Ubuntu Desktop
+#    already has GDM; on Server or a minimal install, add it:
+sudo apt install gdm3
+
+# 2. Download the package (or use the button on https://starling.build):
+curl -fLO https://github.com/starling-build/starling/releases/download/v0.2/starling_0.2-1_amd64.deb
+
+# 3. Install it. `apt` (not `dpkg -i`) so it also pulls the dependencies:
+sudo apt install ./starling_0.2-1_amd64.deb
+```
+
+`apt install ./file.deb` is deliberate — plain `dpkg -i` installs the package
+but not its dependencies and leaves you to chase them by hand.
+
+### Log in to Starling
+
+1. **Log out** of your current session (or reboot).
+2. At the login screen, **click your name**.
+3. Open the **session menu** — usually a gear or a small icon in a lower
+   corner of the password box.
+4. Choose **Starling**.
+5. Enter your password and sign in.
+
+The session menu only appears if a Wayland-capable login manager is running.
+If you do not see it, see [Troubleshooting](#no-starling-in-the-session-menu).
+
+### Verify it installed
+
+```bash
+dpkg -s starling | grep -E '^(Package|Version|Status)'
+#   Package: starling
+#   Version: 0.2-1
+#   Status: install ok installed
+```
+
+The session entry the login manager reads lives at
+`/usr/share/wayland-sessions/starling.desktop`.
+
+---
+
+## Upgrading
+
+Download the newer `.deb` and install it the same way — `apt` replaces the
+old version:
+
+```bash
+curl -fLO https://github.com/starling-build/starling/releases/download/<version>/starling_<version>_amd64.deb
+sudo apt install ./starling_<version>_amd64.deb
+```
+
+The package was renamed from `starling-desktop` to `starling` in 0.2. It
+declares `Conflicts`/`Replaces`/`Provides: starling-desktop`, so if you have
+the old package `apt` removes it and installs the new one in a single step —
+you do not need to uninstall first. Your installed-app records under
+`/var/lib/starling/installed.d` are preserved across the change.
+
+---
+
+## Uninstalling
+
+```bash
+sudo apt remove starling        # remove the package
+sudo apt purge starling         # also remove its config/data
+```
+
+Removing the package takes the **Starling** entry out of the login menu; your
+other sessions are untouched. `purge` additionally clears
+`/var/lib/starling`. A couple of runtime files may remain in `/tmp`
+(`/tmp/xdg-starling`, `/tmp/starling-session-*.log`); they are cleared on
+reboot.
+
+---
+
+## Troubleshooting
+
+The session writes a full log to **`/tmp/starling-session-<your-uid>.log`**
+(find your uid with `id -u`). It is the first place to look for any startup
+problem.
+
+### No "Starling" in the session menu
+
+The login manager is not Wayland-capable, or no login manager is running.
+Install GDM and reboot:
+
+```bash
+sudo apt install gdm3
+sudo systemctl enable gdm
+sudo reboot
+```
+
+Confirm the session file is present: `ls /usr/share/wayland-sessions/starling.desktop`.
+
+### Black screen, or it drops back to the login screen
+
+Almost always the GPU or the display connector. Check the log
+(`/tmp/starling-session-<uid>.log`) for the display lines:
+
+- **`[DRM] No connected connector found`** — Starling could not find a
+  connected output on the card it picked. If you have more than one GPU, point
+  it at the right card:
+
+  ```bash
+  # See which cards have a connected output:
+  for s in /sys/class/drm/card*-*/status; do echo "$(dirname "$s" | xargs basename): $(cat "$s")"; done
+  ```
+
+  Then set `FLUTTER_DRM_DEVICE=/dev/dri/cardN` in the session launcher
+  (`/usr/libexec/starling-session`) for the card that shows `connected`.
+
+- **No `[EGL] Initialized` line** — the GPU driver did not come up. Intel and
+  NVIDIA are not yet tested; on those, a black screen is expected for now.
+
+### It runs but an app won't launch
+
+First-party apps (Settings, Files, Terminal, Calculator, App Store) are in the
+package and should always launch. Third-party apps (Chrome, VS Code, …) must
+be installed on the host first — Starling launches what is there, it does not
+bundle them. Install them through the **App Store** (which uses your system's
+`apt`), or with your distribution's own packaging. See the
+[User Guide](USER_GUIDE.md#installing-more-apps).
+
+### Getting a clean log for a bug report
+
+```bash
+# Log out of Starling first, then from a console or SSH:
+cat /tmp/starling-session-$(id -u).log
+```
+
+Include that, your GPU (`lspci | grep -i vga`), and whether you are on bare
+metal or a VM. Issues: <https://github.com/starling-build/starling/issues>.
+
+---
+
+## A note on what this is
+
+Starling is an **early preview** (v0.2). It boots as a real desktop on real
+hardware and runs real applications, but it is the work of one person over a
+few months — expect rough edges, missing settings, and bugs. It is not meant
+to be anyone's only desktop yet. Installing it is safe and reversible: it adds
+a login option and changes nothing about your existing session.

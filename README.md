@@ -18,6 +18,9 @@ build/   packaging: the Ubuntu .deb, session files, app-run/app-install tools,
 docs/    porting guides and design notes
 ```
 
+**Get started:** [Install Starling](docs/INSTALL.md) ·
+[User Guide](docs/USER_GUIDE.md) · [Build from source](docs/BUILDING.md)
+
 ## Status
 
 **Early development — version 0.2.** The desktop boots as a real session, runs
