@@ -1,0 +1,218 @@
+// Copyright the Starling authors
+// SPDX-License-Identifier: Apache-2.0
+
+import Flutter
+import FlutterSwiftBridge
+
+// MARK: - LauncherApp
+
+/// One entry in the app launcher grid.
+struct LauncherApp {
+    let appId: String
+    let title: String
+    let iconType: IconType
+    let bgColor: Color
+    /// Icon read from the app's own install on this host (the path comes from
+    /// the app registry, resolved at install time) —
+    /// third-party marks are never shipped. Nil for first-party apps, and for
+    /// third-party ones that are installed without a resolvable raster icon;
+    /// both fall back to `iconType`'s painted glyph.
+    let textureId: Int64?
+
+    init(appId: String, title: String, iconType: IconType, bgColor: Color,
+         textureId: Int64? = nil) {
+        self.appId = appId
+        self.title = title
+        self.iconType = iconType
+        self.bgColor = bgColor
+        self.textureId = textureId
+    }
+}
+
+// MARK: - AppLauncher
+
+/// Full-screen macOS-style app launcher (Launchpad): a blurred, dimmed
+/// backdrop over the desktop with a centered grid of large app icons + labels.
+/// Tap an app to launch it (and close the launcher); tap empty space to
+/// dismiss. Opened from the dock's grid ("launcher") icon.
+class AppLauncher: StatelessWidget {
+
+    let apps: [LauncherApp]
+    let query: String
+    let onLaunch: (String) -> Void
+    let onDismiss: () -> Void
+
+    init(
+        apps: [LauncherApp],
+        query: String = "",
+        onLaunch: @escaping (String) -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.apps = apps
+        self.query = query
+        self.onLaunch = onLaunch
+        self.onDismiss = onDismiss
+    }
+
+    private static let kIconSize: Double = 104
+    private static let kTileWidth: Double = 150
+    private static let kTileHeight: Double = 152
+
+    /// One app tile: large rounded icon (bg colour + glyph) with a label under
+    /// it. The whole tile is tappable and launches the app.
+    private func tile(_ app: LauncherApp) -> Widget {
+        let radius = AppLauncher.kIconSize * 0.225
+        let glyph = AppLauncher.kIconSize * 0.52
+
+        // The app's own icon, read from its install on this host (the path
+        // comes from the app registry)
+        // — third-party marks are never shipped. Without one, the painted
+        // glyph for `iconType` stands in.
+        let iconGlyph: Widget
+        if let texId = app.textureId {
+            iconGlyph = SizedBox(
+                width: glyph * 1.6, height: glyph * 1.6,
+                child: TextureWidget(textureId: Int(texId), filterQuality: .medium))
+        } else {
+            iconGlyph = SizedBox(
+                width: glyph, height: glyph,
+                child: CustomPaint(
+                    painter: IconPainter(app.iconType, color: Color(0xFFFFFFFF))))
+        }
+
+        let iconTile: Widget = DecoratedBox(
+            decoration: BoxDecoration(
+                borderRadius: BorderRadius.all(Radius(circular: radius)),
+                boxShadow: [
+                    BoxShadow(
+                        color: Color(0x59000000),
+                        offset: Offset(0, 8),
+                        blurRadius: 18
+                    ),
+                ]
+            ),
+            child: ClipRRect(
+                borderRadius: BorderRadius.all(Radius(circular: radius)),
+                child: DecoratedBox(
+                    decoration: BoxDecoration(gradient: ShellPalette.tileGradient(app.bgColor)),
+                    child: Center(child: iconGlyph)
+                )
+            )
+        )
+
+        return GestureDetector(
+            onTap: { [self] in onLaunch(app.appId) },
+            child: SizedBox(
+                width: AppLauncher.kTileWidth,
+                height: AppLauncher.kTileHeight,
+                child: Column(
+                    mainAxisAlignment: .center,
+                    mainAxisSize: .min,
+                    children: [
+                        SizedBox(
+                            width: AppLauncher.kIconSize,
+                            height: AppLauncher.kIconSize,
+                            child: iconTile
+                        ),
+                        SizedBox(height: 12),
+                        Text(
+                            app.title,
+                            style: TextStyle(
+                                color: Color(0xFFFFFFFF),
+                                fontSize: 13
+                            ),
+                            textAlign: .center,
+                            overflow: .ellipsis,
+                            maxLines: 1
+                        ),
+                    ]
+                )
+            )
+        )
+    }
+
+    /// Centered search pill showing the live query (typed via the shell's key
+    /// handler — see routeKey). Dim placeholder when empty; a caret otherwise.
+    private func searchBar() -> Widget {
+        let empty = query.isEmpty
+        return DecoratedBox(
+            decoration: BoxDecoration(
+                color: Color(0x24FFFFFF),
+                borderRadius: BorderRadius.all(Radius(circular: 20))
+            ),
+            child: Padding(
+                padding: EdgeInsets(left: 20, top: 10, right: 20, bottom: 10),
+                child: Text(
+                    empty ? "Search" : (query + "|"),
+                    style: TextStyle(
+                        color: empty ? Color(0x80FFFFFF) : Color(0xFFFFFFFF),
+                        fontSize: 16
+                    ),
+                    textAlign: .center,
+                    maxLines: 1
+                )
+            )
+        )
+    }
+
+    override func build(_ context: any BuildContext) -> Widget {
+        let appArea: Widget = apps.isEmpty
+            ? Text(
+                "No apps match \u{201C}\(query)\u{201D}",
+                style: TextStyle(color: Color(0x99FFFFFF), fontSize: 16)
+              )
+            : Wrap(
+                alignment: .center,
+                spacing: 40,
+                runAlignment: .center,
+                runSpacing: 32,
+                children: apps.map { tile($0) }
+              )
+
+        // Search pill pinned near the top; the app grid below scrolls when it
+        // doesn't fit (many installed apps or a short display), so the grid can
+        // never overflow the screen the way a fixed centered Column does.
+        let grid: Widget = Column(
+            mainAxisSize: .max,
+            children: [
+                SizedBox(height: 72),
+                searchBar(),
+                SizedBox(height: 36),
+                Expanded(
+                    child: SingleChildScrollView(
+                        padding: EdgeInsets(left: 48, top: 0, right: 48, bottom: 56),
+                        child: Center(
+                            child: ConstrainedBox(
+                                constraints: BoxConstraints(maxWidth: 880),
+                                child: appArea
+                            )
+                        )
+                    )
+                ),
+            ]
+        )
+
+        return Stack(
+            fit: .expand,
+            children: [
+                // Blurred, dimmed backdrop over the desktop — also the
+                // tap-to-dismiss catcher (taps that miss a tile land here).
+                Listener(
+                    onPointerDown: { [self] _ in onDismiss() },
+                    behavior: .opaque,
+                    child: ClipRect(
+                        child: BackdropFilter(
+                            filter: ImageFilterFactory.blur(sigmaX: 36, sigmaY: 36),
+                            child: ColoredBox(
+                                color: Color(0x8C0B0B12),
+                                child: SizedBox(expand: ())
+                            )
+                        )
+                    )
+                ),
+                // App grid on top; each tile claims its own tap.
+                grid,
+            ]
+        )
+    }
+}

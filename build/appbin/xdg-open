@@ -1,0 +1,44 @@
+#!/bin/sh
+# xdg-open, Starling style — this dir is first on PATH for every app-run app.
+#
+# Third-party apps hand off URLs by exec'ing `xdg-open` (Electron
+# shell.openExternal, Qt QDesktopServices, Chromium external protocols).
+# Stock xdg-open resolves a handler from the HOST's desktop config and
+# launches it BARE — on the dev box Slack's sign-in opened
+# /opt/google/chrome/chrome with none of the flags the compositor needs
+# (--use-angle=gl, --ozone-platform=wayland, scale) and the page never
+# rendered. In the Starling model the app-run REGISTRY is the handler
+# database: web URLs go to the registry browser, app deep-link schemes go
+# back to their registry app (Electron/Chromium singletons forward the URL
+# to the running instance — the sign-in return hop). Everything else falls
+# through to the real xdg-open, best effort.
+#
+# app-run exports STARLING_APP_RUN (its own resolved path) into every app
+# it launches; the sibling-path fallbacks cover direct/manual invocation
+# and, later, the image layout where both live in /usr/bin.
+set -eu
+
+URL="${1:-}"
+
+APP_RUN="${STARLING_APP_RUN:-}"
+if [ ! -x "$APP_RUN" ]; then
+    APP_RUN="$(dirname "$(readlink -f "$0")")/../app-run.sh"
+fi
+[ -x "$APP_RUN" ] || APP_RUN=/usr/bin/app-run
+
+case "$URL" in
+    http://*|https://*)     exec "$APP_RUN" chrome "$URL" ;;
+    slack://*)              exec "$APP_RUN" slack "$URL" ;;
+    discord://*)            exec "$APP_RUN" discord "$URL" ;;
+    msteams:*)              exec "$APP_RUN" teams "$URL" ;;
+    spotify:*)              exec "$APP_RUN" spotify "$URL" ;;
+    tg://*)                 exec "$APP_RUN" telegram "$URL" ;;
+    zoommtg://*|zoomus://*) exec "$APP_RUN" zoom "$URL" ;;
+esac
+
+# Not ours — hand it to the host's xdg-open (files, mailto, …).
+if [ -x /usr/bin/xdg-open ]; then
+    exec /usr/bin/xdg-open "$@"
+fi
+echo "starling xdg-open: no handler for '$URL'" >&2
+exit 4

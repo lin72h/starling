@@ -1,0 +1,4765 @@
+// Copyright the Starling authors
+// SPDX-License-Identifier: Apache-2.0
+
+import Flutter
+import FlutterSwiftBridge
+import Foundation
+import CupertinoIcons
+import StarlingRegistry
+#if os(Linux)
+import FlutterDRMBridge  // fl_drm_view_capture_active (X11 GetImage present pump)
+#endif
+
+/// Called from main.swift after waylandIntegration is set.
+/// Lets _DesktopShellState wire up callbacks that couldn't be set during initState().
+nonisolated(unsafe) var _onWaylandIntegrationReady: (() -> Void)?
+
+/// Called from main.swift after x11Integration is set.
+nonisolated(unsafe) var _onX11IntegrationReady: (() -> Void)?
+
+// MARK: - DesktopShell
+
+/// Root widget of the Desktop Shell PoC.
+///
+/// Owns the window manager state and renders the desktop as a Stack:
+/// background wallpaper at the bottom, windows in the middle, taskbar on top.
+class DesktopShell: StatefulWidget {
+
+    override func createState() -> State<StatefulWidget> {
+        return _DesktopShellState()
+    }
+}
+
+// MARK: - _DesktopShellState
+
+/// Global ref for testing — allows SIGUSR2 to trigger shell-level resize.
+nonisolated(unsafe) var _shellState: _DesktopShellState? = nil
+
+class _DesktopShellState: State<StatefulWidget>, TickerProvider {
+
+    /// Every shell state change may move/open/close/focus a window that a
+    /// secondary output shows — poke those trees. Each host signature-checks
+    /// its own content, so unrelated churn (dock hover) doesn't re-present.
+    override func setState(_ fn: () -> Void) {
+        super.setState(fn)
+        if !secondaryScreenInvalidators.isEmpty {
+            invalidateSecondaryScreens()
+            updateWaylandSurfaceOutputs()
+        }
+    }
+
+    func createTicker(_ onTick: @escaping TickerCallback) -> Ticker {
+        return Ticker(onTick)
+    }
+
+    let windowManager = WindowManagerState()
+    var wallpaperPreset: WallpaperPreset = .still
+    var wallpaperTextureId: Int64 = -1
+    private var _wallpaperDecodeStarted = false
+    /// Apps whose host icon we have already tried to resolve (see
+    /// _loadIconTexture(for:)). Not a one-shot flag: apps arrive mid-session.
+    private var _iconDecodeAttempted: Set<String> = []
+
+    // Dock icon textures (loaded from PNG-converted RGBA files)
+    var iconTextures: [String: Int64] = [:]  // appId → textureId
+
+    // Context menu state
+    var contextMenuPosition: Offset?
+
+    // Status bar popup state (nil = no popup open)
+    enum StatusBarPopup { case wifi, battery, clock }
+    var activeStatusBarPopup: StatusBarPopup? = nil
+
+    // Full-screen app launcher (Launchpad) open state; toggled by the dock's
+    // grid icon. See AppLauncher. _launcherQuery is the live search string
+    // (typed while the launcher is open) that filters the app grid.
+    var _launcherOpen: Bool = false
+    var _launcherQuery: String = ""
+
+    // Texture IDs for process-based apps (for cleanup on window close)
+    var processTextureIds: [String: Int64] = [:]
+
+    // App IDs currently being launched (child started but first frame not yet received)
+    private var _pendingAppLaunches: Set<String> = []
+
+    // Cache inner window widgets to avoid full subtree rebuilds during drag.
+    // When only position changes, the cached widget instance is reused (===),
+    // so updateChild short-circuits and skips rebuilding the entire window subtree.
+    // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
+    // window changes its fullscreen state or when the auto-hide reveal flips
+    // (so the title-bar overlay shows/hides correctly).
+    private var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool)] = [:]
+
+    /// macOS-style fullscreen auto-hide: when a fullscreen window is on top,
+    /// the desktop status bar and the window's title bar are hidden until the
+    /// cursor approaches the top edge of the screen. The title bar then
+    /// overlays inside the window; non-fullscreen windows always show it.
+    private var _topBarRevealed: Bool = false
+
+    // Popup tracking: popupId → (textureId, parentSurfaceId, x, y, width, height, mapped)
+    // mapped=false until first buffer commit (Hyprland-style: don't render until content ready)
+    var popups: [String: (textureId: Int, parentSurfaceId: UInt32, x: Double, y: Double, width: Double, height: Double, mapped: Bool)] = [:]
+
+
+    // Screen dimensions — the logical size of the PRIMARY output. Backed by the
+    // display layout (virtual desktop); falls back to the implicit view / DPI
+    // on the macOS/GLFW dev paths where no layout is built. At N=1 the primary
+    // output is the whole panel, so this equals the previous computation.
+    // (Per-output chrome/window layout migrates individual call sites off these
+    // primary-only scalars in later slices.)
+    var screenWidth: Double {
+        if let dl = displayLayout { return dl.primary.logicalWidth }
+        return (PlatformDispatcher.instance.implicitView?.physicalSize.width ?? 3840.0) / currentShellDpi
+    }
+    var screenHeight: Double {
+        if let dl = displayLayout { return dl.primary.logicalHeight }
+        return (PlatformDispatcher.instance.implicitView?.physicalSize.height ?? 2160.0) / currentShellDpi
+    }
+
+    // ── Apps ─────────────────────────────────────────────────────────────
+    // There is no app table here, and there must not be one. Every app the
+    // desktop knows about — its name, tile colour, icon, how it installs, how
+    // it launches, and which window class its windows report — comes from the
+    // registry: the shipped catalog in registry/catalog.d plus the records
+    // app-install writes when an install succeeds. The App Store reads the
+    // same records, so the two cannot disagree, and an install shows up here
+    // without a relogin (see the watch set up in initState).
+    //
+    // The launcher shows every installed app; the dock shows the subset the
+    // catalog marks as default, plus whatever the user pinned, plus transient
+    // icons for running apps.
+
+    /// Dock order, as app ids — mutable for drag-to-reorder and Remove from
+    /// Dock. Seeded from the registry's default dock, which is already
+    /// filtered to what is installed: a given build or package may not ship
+    /// every first-party app (the .deb ships five), and a dock tile that
+    /// launches nothing is worse than an absent one. Filtering at seed time
+    /// rather than at display time keeps drag-to-reorder honest — those
+    /// indices address dockAppOrder directly.
+    var dockAppOrder: [String] = AppRegistry.shared.defaultDock.map { $0.id }
+
+    /// Apps the user took out of the dock by hand. Remembered so that
+    /// re-deriving the dock after a registry change can restore an app that
+    /// came back without resurrecting one the user deliberately removed.
+    private var _dockRemovedByUser: Set<String> = []
+
+    /// What the shell knows about each app's liveness.
+    ///
+    /// The shell is the only process that sees every window and every launch,
+    /// so it is the one that maintains this — the dock reads it, and the App
+    /// Store subscribes to it over the broker socket rather than working it
+    /// out a second time and drifting.
+    ///
+    /// Two facts, because they answer different questions. `window` is what
+    /// the dock means by running (macOS: an app is running when it has a
+    /// window) and drives the transient icon and the indicator dot.
+    /// `process` is the stronger one the App Store needs before it removes a
+    /// package: an Electron app with every window closed still has a zygote
+    /// holding its files open, and apt deleting them underneath it leaves a
+    /// half-uninstalled app.
+    struct AppLiveness: Equatable {
+        var window = false
+        var process = false
+    }
+    /// Only apps that are live in some sense appear here.
+    private(set) var appLiveness: [String: AppLiveness] = [:]
+
+    // Dock drag-to-reorder state
+    private var _dockDragIndex: Int? = nil       // index being dragged
+    private var _dockDragStartX: Double = 0      // pointer X at drag start
+    private var _dockDragCurrentX: Double = 0    // current pointer X
+    private var _dockDragCurrentY: Double = 0    // current pointer Y
+    private var _dockDragActive: Bool = false     // drag threshold exceeded
+
+    // Dock icon context menu (right-click on an icon). The anchor X is the
+    // icon's slot center captured at open time, so the menu stays put while
+    // hover magnification relaxes underneath the dismiss barrier.
+    private var _dockMenuAppId: String? = nil
+    private var _dockMenuAnchorX: Double = 0
+
+    // IME (fcitx5, toggled with Ctrl+Space). The shell draws the preedit +
+    // candidate panel itself — fcitx runs headless and answers over DBus.
+    var imeIntegration: ImeIntegration? = nil
+    private var _imeEnabled = false
+    private var _imePreedit = ""
+    private var _imeCandidates: [(String, String)] = []
+    private var _imeHighlighted = -1
+    // Latest caret reported by a child app (texture id + rect in the child's
+    // logical content coords) — anchors the IME panel next to the text caret.
+    private var _imeCaret: (textureId: Int64, rect: Rect, visible: Bool)? = nil
+    // The window the current composition targets; a focus change resets it.
+    private var _imeTargetWindowId: String? = nil
+    // Focused Wayland client's text-input state (windowId + cursor rect in
+    // surface-local logical coords) — commits route to it, panel anchors it.
+    private var _imeWaylandTI: (windowId: String, enabled: Bool, rect: Rect)? = nil
+
+    // Dock hover-magnification state (macOS style). Pointer X in logical
+    // screen coordinates while the cursor is over the dock strip; nil when
+    // it isn't. Icon scales are a pure function of this — cursor-driven,
+    // like macOS, rather than time-animated.
+    private var _dockHoverX: Double? = nil
+
+    // Liquid-glass refraction shader. The program is loaded lazily once; the
+    // dock and the status-bar popup each mint their OWN shader instance so
+    // the per-build uniform writes (panel rect) never clobber each other
+    // when both panels are on screen in the same frame.
+    private var _glassProgram: FragmentProgram?
+    private var _glassProgramTried = false
+    private var _dockGlassShader: FragmentShader?
+    private var _popupGlassShader: FragmentShader?
+
+    // Measured heights of the intrinsically-sized status popups, fed to the
+    // liquid-glass shader as exact geometry. Populated by MeasureSize on the
+    // popup's first layout (that first frame renders with the plain-frost
+    // fallback, then the refraction kicks in).
+    private var _statusPopupHeights: [StatusBarPopup: Double] = [:]
+
+    // Windows currently playing their close animation. Teardown (destroy
+    // app/texture, remove from the window manager) is deferred until the
+    // animation completes so the window shrinks with live content.
+    private var _closingWindows: Set<String> = []
+
+    // Windows currently playing the scale-effect minimize (flying into
+    // their dock icon). The actual minimize is deferred until it lands.
+    private var _minimizingWindows: Set<String> = []
+
+    // Frame tick for tooling (tools/shell-drive.py): SIGRTMIN+2 requests a
+    // *presented* frame. Screenshots and the recording toggle are consumed
+    // in the engine's present callback, but an idle scheduled frame with no
+    // damage never presents — so the tick dirties a 1px invisible corner
+    // overlay to force one. The signal handler just sets a flag; a 100ms
+    // GCD timer polls it (signal handlers can't touch widget state).
+    nonisolated(unsafe) private static var _frameTickRequested: Int32 = 0
+    private var _frameTick: Int = 0
+    private var _frameTickTimer: DispatchSourceTimer?
+
+    // Modifier key tracking for keyboard shortcuts (Ctrl+Tab, etc.)
+    private var _ctrlPressed: Bool = false
+    private var _shiftPressed: Bool = false
+
+    // ── Spaces (virtual desktops) ────────────────────────────────────────
+    // macOS-style horizontal slide between spaces. While a slide is running,
+    // build() renders BOTH spaces' wallpaper + windows in one flat Stack,
+    // offset by the eased progress; the status bar and dock stay put. The
+    // model (windowManager.activeSpaceIndex) flips at slide START — the
+    // animation is purely visual. Keyed by space ID (not index) so a space
+    // removed mid-slide degrades to a steady frame instead of mislabeling.
+    // `dir` is +1 sliding toward a space on the right, -1 to the left.
+    // `carried` pins one window at dx 0 during the slide — the window being
+    // edge-drag-carried stays under the cursor while the desktop slides
+    // behind it (macOS).
+    private var _spaceSlide: (fromId: Int, toId: Int, dir: Double, carried: String?)? = nil
+    private var _spaceSlideController: AnimationController?
+    private var _spaceSlideCurve: CurvedAnimation?
+
+    // ── AI Space (Murmuration agent mode) ────────────────────────────────
+    // The persistent agent space holds the fleet UI instead of windows; it
+    // is entered by Ctrl+Down / context menu only (never by Ctrl+arrow/Tab
+    // cycling). Stored here because extensions can't add stored properties;
+    // the UI lives in AgentSpace.swift.
+    /// Where Ctrl+Down returns to when toggling out of the AI Space.
+    var _agentReturnSpaceIndex: Int = 0
+    /// Generation token for the scripted P0 demo task (asyncAfter chains —
+    /// Foundation.Timer never fires on the DRM embedder).
+    var _agentDemoToken: Int = 0
+    /// Demo task progress line shown in the tile, nil when idle.
+    var _agentDemoStatus: String? = nil
+    /// Windows the human has taken over (P2): pointer-down into an app pane
+    /// arms it; Esc hands back. While a window is here, broker injections
+    /// for it are refused ("human has the controls").
+    var _humanControlledWindows: Set<String> = []
+    /// The selected session in the workbench (rail row); nil = first agent.
+    var _agentFeaturedId: String? = nil
+    /// Explicitly selected app tab per agent (agentId → windowId). Absent
+    /// or stale = follow the agent: the newest owned window is shown.
+    var _agentActiveTab: [String: String] = [:]
+    /// Wayland ownership hand-off (P4): set right before spawning a
+    /// Wayland client (Chrome via app-run) for an agent. The first toplevel
+    /// that arrives consumes it AND records the client connection in
+    /// _agentWaylandClients — every later toplevel from that client
+    /// (new windows, undocked devtools) is claimed for the same agent.
+    var _pendingAgentWayland: (agentId: String, onWindow: ((String) -> Void)?)? = nil
+    /// Wayland client connection → owning agent (ownership by launch
+    /// chain: the wl_client identity, never process trees).
+    var _agentWaylandClients: [UInt64: String] = [:]
+    /// Last frame-throttle interval applied per agent window (diff guard —
+    /// the policy is re-evaluated on every fleet build).
+    var _agentThrottleApplied: [String: UInt32] = [:]
+    /// Last content size configured per agent window (diff guard for
+    /// _applyAgentWindowGeometry, which runs on every workbench build).
+    var _agentSizeApplied: [String: Size] = [:]
+    /// Width of the workbench conversation column, draggable by the divider
+    /// between it and the stage.
+    var _agentChatW: Double = 688
+    /// True while the divider is being dragged: window re-configures are
+    /// deferred to the drop, so clients reflow once instead of per frame.
+    var _agentDividerDragging: Bool = false
+    /// 1s tick that refreshes tile status text (working/idle) while the
+    /// AI Space is visible — texture updates alone don't rebuild widgets.
+    var _agentStatusTimer: DispatchSourceTimer? = nil
+    #if os(Linux)
+    /// The P1 agent broker: JSON-lines socket at
+    /// $XDG_RUNTIME_DIR/starling-agent.sock. Every agent action crosses it.
+    var _agentBroker: AgentBroker? = nil
+    #endif
+
+    /// Broker quiescence signal (await_settled v0): true when no shell-side
+    /// animation is in flight. Frame-quiet per window is tracked by the
+    /// broker itself from child frame signals.
+    var _shellQuiescent: Bool {
+        _spaceSlide == nil && _windowRectAnims.isEmpty
+            && _closingWindows.isEmpty && _minimizingWindows.isEmpty
+            && !_missionControlOpen
+    }
+
+    // ── Mission Control ──────────────────────────────────────────────────
+    // Modal spaces overview (Ctrl+Up / context menu): spaces strip with
+    // live thumbnails + "+" tile on top, the active space's windows spread
+    // in an exposé grid below. While open, the normal desktop layers
+    // (windows, popups, status bar) are not rendered — each window mounts
+    // exactly once, inside the exposé. Stored here (not in the extension)
+    // because Swift extensions cannot add stored properties; the UI lives
+    // in MissionControl.swift.
+    var _missionControlOpen = false
+    var _mcOpenController: AnimationController?
+    var _mcOpenCurve: CurvedAnimation?
+    /// True while the exposé is animating back to the desktop (controller
+    /// running in reverse); the real teardown happens at dismissed.
+    var _mcClosing = false
+    /// Grid re-flow tween after a drop/removal: each surviving card lerps
+    /// from its old grid rect to the new one, and the dropped card flies
+    /// into its mini-rect inside the target thumbnail.
+    var _mcRelayoutFrom: [String: Rect] = [:]
+    var _mcDeparting: (id: String, from: Rect, to: Rect)? = nil
+    var _mcRelayoutController: AnimationController?
+    var _mcRelayoutCurve: CurvedAnimation?
+    /// In-flight exposé card drag: window id, press origin, live pointer
+    /// position, and whether the movement threshold was crossed (below it
+    /// the release is a click that focuses the window).
+    var _mcDragWindowId: String? = nil
+    var _mcDragStart: Offset? = nil
+    var _mcDragPos: Offset? = nil
+    var _mcDragMoved = false
+
+    // ── Edge-drag carry ──────────────────────────────────────────────────
+    // Dragging a window and holding the pointer against the left/right
+    // screen edge for a dwell carries the window to the adjacent space
+    // (macOS). Pointer position comes from the topmost translucent
+    // listener (it is in every pointer's hit path, so it keeps receiving
+    // move events during window drags). The dwell uses asyncAfter with a
+    // generation token — Foundation.Timer never fires on the DRM embedder.
+    private var _dragPointerPos: Offset? = nil
+    private var _edgeCarryToken: Int = 0
+    private var _edgeCarryArmedDir: Int = 0
+    private let _edgeCarryDwellMs = 400
+    private let _edgeCarryZonePx = 3.0
+
+    // ── Window rect animation (fullscreen zoom) ──────────────────────────
+    // One controller per animating window; a retarget cancels the old run.
+    private var _windowRectAnims: [String: AnimationController] = [:]
+
+    // ── Key repeat synthesis ─────────────────────────────────────────────
+    // The DRM embedder emits only down/up; typematic repeat is synthesized
+    // here (vsync Ticker) and routed like a real key. Wayland clients are
+    // excluded — they run their own repeat from wl_keyboard repeat_info.
+    private var _keyRouter: ((KeyData) -> Bool)?
+    private var _heldKeyForRepeat: KeyData?
+    private var _repeatTicker: Ticker?
+    private var _repeatsFired = 0
+    private let _repeatDelayMs: Int64 = 400
+    private let _repeatIntervalMs: Int64 = 35
+
+    private func _trackKeyRepeat(_ keyData: KeyData) {
+        switch keyData.type {
+        case .down:
+            // Modifiers and lock keys don't repeat (keysyms 0xFF7F Num_Lock,
+            // 0xFFE1-0xFFEE Shift/Ctrl/Alt/Meta/Caps…).
+            let sym = keyData.logical
+            if sym == 0xFF7F || (0xFFE1 ... 0xFFEE).contains(sym) { return }
+            _heldKeyForRepeat = keyData
+            _repeatsFired = 0
+            _repeatTicker?.stop()
+            _repeatTicker = Ticker({ [weak self] elapsed in
+                guard let self = self, let held = self._heldKeyForRepeat else { return }
+                let comps = elapsed.components
+                let ms = comps.seconds * 1_000 + comps.attoseconds / 1_000_000_000_000_000
+                guard ms >= self._repeatDelayMs else { return }
+                let expected = Int((ms - self._repeatDelayMs) / self._repeatIntervalMs) + 1
+                while self._repeatsFired < expected {
+                    self._repeatsFired += 1
+                    let repeatEvent = KeyData(
+                        timeStamp: held.timeStamp,
+                        type: .repeat,
+                        physical: held.physical,
+                        logical: held.logical,
+                        character: held.character,
+                        synthesized: true,
+                        deviceType: held.deviceType
+                    )
+                    _ = self._keyRouter?(repeatEvent)
+                }
+            }, debugLabel: "key repeat")
+            _ = _repeatTicker?.start()
+        case .up:
+            if let held = _heldKeyForRepeat, held.physical == keyData.physical {
+                _repeatTicker?.stop()
+                _repeatTicker = nil
+                _heldKeyForRepeat = nil
+            }
+        case .repeat:
+            break
+        }
+    }
+
+    override func initState() {
+        super.initState()
+        _shellState = self
+        Self.loadPersistedAppearance()
+        // Tiling choice persists like appearance; retile on any window
+        // lifecycle change so tiled layouts stay current.
+        if let s = try? String(contentsOfFile: Self._windowLayoutFile, encoding: .utf8) {
+            windowManager.tilingEnabled =
+                s.trimmingCharacters(in: .whitespacesAndNewlines) == "tiling"
+        }
+        #if os(Linux)
+        linuxProcessAppManager?.currentLayoutIsTiling = windowManager.tilingEnabled
+        #endif
+        windowManager.onWindowsChanged = { [weak self] in
+            guard let self else { return }
+            self.windowManager.retileAll(
+                screenWidth: self.screenWidth, screenHeight: self.screenHeight)
+            // A third-party window can appear without the shell having launched
+            // it — the App Store's Open button shells out to app-run itself —
+            // so resolve its host icon here rather than only on our own launch
+            // paths. Idempotent per app id, so this is a no-op after the first.
+            self._loadIconTexturesForRunningApps()
+            // A window appearing or going away changes app liveness, and
+            // anything subscribed (the App Store) needs to hear about it.
+            self._refreshAppLiveness()
+        }
+        CupertinoIcons.registerFont()
+
+        #if os(Linux)
+        // The App Store installs and removes apps while the session is
+        // running, and app-install writes/deletes a registry record when it
+        // does. Watching for that is what makes an install appear in the
+        // launcher and the dock immediately instead of at the next login.
+        // The handler runs on the main queue and reaches back through
+        // _shellState rather than capturing self: the state class is not
+        // Sendable (same pattern as the wallpaper and icon decodes).
+        AppRegistry.shared.watch {
+            guard let shell = _shellState else { return }
+            shell.setState { shell._reconcileDock() }
+            shell._loadIconTextures()
+        }
+        #endif
+
+        _setupWaylandCallbacks()  // Try now (may be nil if waylandIntegration not yet set)
+        _loadWallpaperTexture()   // Try now (needs waylandIntegration + drmTextureRegistry)
+        _loadIconTextures()
+        _onWaylandIntegrationReady = { [weak self] in
+            self?._setupWaylandCallbacks()
+            self?._loadWallpaperTexture()
+            self?._loadIconTextures()
+        }
+        _setupX11Callbacks()  // Try now (may be nil if x11Integration not yet set)
+        _onX11IntegrationReady = { [weak self] in
+            self?._setupX11Callbacks()
+        }
+
+        #if os(Linux)
+        // Murmuration P1: the agent broker. Handlers touch shell state, so
+        // requests are marshalled onto the main queue inside the broker.
+        let broker = AgentBroker()
+        broker.start(shell: self)
+        _agentBroker = broker
+
+        // Murmuration P2: tile status (working/idle) derives from broker op
+        // and frame recency, which don't mark widgets dirty — poke a rebuild
+        // once a second while the AI Space is on screen.
+        let statusTimer = DispatchSource.makeTimerSource(queue: .main)
+        statusTimer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+        statusTimer.setEventHandler { [weak self] in
+            guard let self, self.windowManager.activeSpace.isAgent else { return }
+            self.setState {}
+        }
+        statusTimer.resume()
+        _agentStatusTimer = statusTimer
+
+        // Frame tick (see _frameTickRequested): SIGRTMIN+2 = 36 on glibc.
+        // Also pumps presents while an X11 GetImage client (Zoom screen share)
+        // is capturing — an idle desktop never presents, so the capture mirror
+        // would go stale/black; forcing a tick per poll refreshes it. Runs at
+        // ~30fps so screen share is smooth; the poll itself is two int reads.
+        signal(36, { _ in _DesktopShellState._frameTickRequested = 1 })
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(33),
+                       repeating: .milliseconds(33))
+        timer.setEventHandler { [weak self] in
+            var tick = false
+            if _DesktopShellState._frameTickRequested != 0 {
+                _DesktopShellState._frameTickRequested = 0
+                tick = true
+            }
+            #if os(Linux)
+            if fl_drm_view_capture_active() != 0 { tick = true }
+            #endif
+            if tick { self?.setState { self?._frameTick += 1 } }
+        }
+        timer.resume()
+        _frameTickTimer = timer
+        #endif
+    }
+
+    /// Resolve a data file (wallpaper, icons, shaders) across installed and
+    /// dev layouts: $STARLING_DATA_DIR first (set by the packaged launcher),
+    /// then `<exe dir>/../share/starling` (staged layout), then the dev-tree
+    /// fallbacks the repo has always used.
+    static func dataFilePath(_ relative: String) -> String? {
+        var candidates: [String] = []
+        if let dataDir = ProcessInfo.processInfo.environment["STARLING_DATA_DIR"] {
+            candidates.append(dataDir + "/" + relative)
+        }
+        if let real = realpath("/proc/self/exe", nil) {
+            let selfDir = (String(cString: real) as NSString).deletingLastPathComponent
+            free(real)
+            candidates.append(selfDir + "/../share/starling/" + relative)
+        }
+        // Dev-tree fallback: sdk/ at the repo root, derived from this source
+        // file's compile-time path (<repo>/shell/Sources/DesktopShellApp/Shell/…).
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // Shell/
+            .deletingLastPathComponent()  // DesktopShellApp/
+            .deletingLastPathComponent()  // Sources/
+            .deletingLastPathComponent()  // shell/
+            .deletingLastPathComponent()  // repo root
+        candidates.append(repoRoot.appendingPathComponent("sdk/" + relative).path)
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Load the still wallpaper and upload it as a GL texture: a
+    /// pre-rendered raw RGBA file if one is staged (legacy path), else the
+    /// bundled JPEG, decoded via the image codec and center-cropped to the
+    /// screen's aspect so TextureWidget's stretch-to-fill stays uniform.
+    func _loadWallpaperTexture() {
+        #if os(Linux)
+        guard let registry = drmTextureRegistry,
+              let wl = waylandIntegration else {
+            return
+        }
+        guard wallpaperTextureId < 0, !_wallpaperDecodeStarted else { return }
+
+        // Legacy path: pre-rendered 3840x2160 raw RGBA.
+        if let path = Self.dataFilePath("wallpaper.rgba"),
+           let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           data.count == 3840 * 2160 * 4 {
+            let texId = registry.registerTexture(engine: wl.engine)
+            data.withUnsafeBytes { ptr in
+                registry.updatePixelData(
+                    engine: wl.engine, id: texId,
+                    data: ptr.baseAddress!, width: 3840, height: 2160)
+            }
+            wallpaperTextureId = texId
+            _syncSharedWallpaper()
+            return
+        }
+
+        // Bundled JPEG: packaged share dir first, then the dev tree
+        // (the shell runs from apps/DesktopShellApp in dev).
+        let candidates = [
+            Self.dataFilePath("wallpapers/golden-gate-dark.jpg"),
+            "Resources/Wallpapers/golden-gate-dark.jpg",
+        ].compactMap { $0 }
+        guard let jpg = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: jpg)) else { return }
+        _wallpaperDecodeStarted = true
+        // Re-enter shell state via the _shellState global (the state class
+        // is not Sendable, so the task must not capture self).
+        Task { @MainActor in
+            do {
+                let codec = try await FlutterSwiftBridge.instantiateImageCodec([UInt8](data))
+                let frame = try await codec.getNextFrame()
+                codec.dispose()
+                let image = frame.image
+                defer { image.dispose() }
+                guard let shell = _shellState,
+                      let registry = drmTextureRegistry,
+                      let wl = waylandIntegration else { return }
+                let bytes = try image.toByteData(format: .rawRgba)
+                let phys = PlatformDispatcher.instance.implicitView?.physicalSize
+                    ?? Size(3840, 2160)
+                let cropped = _DesktopShellState._centerCrop(
+                    rgba: bytes, width: image.width, height: image.height,
+                    toAspect: phys.width / phys.height)
+                let texId = registry.registerTexture(engine: wl.engine)
+                cropped.data.withUnsafeBytes { ptr in
+                    registry.updatePixelData(
+                        engine: wl.engine, id: texId,
+                        data: ptr.baseAddress!,
+                        width: cropped.width, height: cropped.height)
+                }
+                shell.setState {
+                    shell.wallpaperTextureId = texId
+                    shell._syncSharedWallpaper()
+                }
+            } catch {
+                // Decode failed — the preset's gradient stand-in stays up.
+            }
+        }
+        #endif
+    }
+
+    /// Center-crop raw top-down RGBA pixels to a target aspect ratio,
+    /// emitting rows bottom-up: the GL wallpaper-texture path samples with
+    /// a flipped V, so a top-down buffer renders upside down (the legacy
+    /// wallpaper.rgba / icon .rgba assets are stored pre-flipped for the
+    /// same reason).
+    private static func _centerCrop(rgba: Data, width: Int, height: Int,
+                                    toAspect target: Double)
+        -> (data: Data, width: Int, height: Int) {
+        let srcAspect = Double(width) / Double(height)
+        var cropW = width, cropH = height, x0 = 0, y0 = 0
+        if srcAspect > target + 0.005 {
+            // Too wide — trim columns.
+            cropW = Int(Double(height) * target)
+            x0 = (width - cropW) / 2
+        } else if srcAspect < target - 0.005 {
+            // Too tall — trim rows.
+            cropH = Int(Double(width) / target)
+            y0 = (height - cropH) / 2
+        }
+        var out = Data(capacity: cropW * cropH * 4)
+        rgba.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            let base = src.baseAddress!
+            for row in stride(from: y0 + cropH - 1, through: y0, by: -1) {
+                out.append(Data(bytes: base + (row * width + x0) * 4,
+                                count: cropW * 4))
+            }
+        }
+        return (out, cropW, cropH)
+    }
+
+    /// Secondary-output screens are separate widget trees that can't reach
+    /// this state object; they read the engine-global texture id. Publish it
+    /// only while the still preset is active so gradient presets show there
+    /// too.
+    private func _syncSharedWallpaper() {
+        sharedWallpaperTextureId =
+            (wallpaperPreset == .still) ? wallpaperTextureId : -1
+    }
+
+    /// Dock and launcher icons, read from the copy of each app the user
+    /// installed.
+    ///
+    /// Starling redistributes no third-party artwork — those marks are their
+    /// owners' trademarks — so the icon path comes from the registry (resolved
+    /// through the host's freedesktop lookup when the app was installed) and
+    /// is decoded here. An app with no resolvable raster icon registers
+    /// nothing and keeps the neutral painted glyph.
+    func _loadIconTextures() {
+        #if os(Linux)
+        for rec in AppRegistry.shared.installedApps where rec.iconPath != nil {
+            _loadIconTexture(for: rec.id)
+        }
+        #endif
+    }
+
+    /// Same, but only for apps that currently have a window. Cheap enough to
+    /// call on every window-list change: `_loadIconTexture` is a no-op once an
+    /// app's icon is loaded or has failed to resolve.
+    func _loadIconTexturesForRunningApps() {
+        #if os(Linux)
+        for win in windowManager.windows {
+            if let rec = _appOwning(win), rec.iconPath != nil {
+                _loadIconTexture(for: rec.id)
+            }
+        }
+        #endif
+    }
+
+    /// Resolve and decode one app's host icon, at most once per app id.
+    ///
+    /// Per-app rather than one-shot for the whole set, because an app can be
+    /// installed while the session is running — the App Store's Install button
+    /// does exactly that — and a single startup pass would leave it showing the
+    /// neutral glyph until the next login. Callers re-invoke this on launch and
+    /// when the Launchpad opens; an app whose icon is genuinely unresolvable is
+    /// attempted once and then left alone.
+    func _loadIconTexture(for name: String) {
+        #if os(Linux)
+        guard drmTextureRegistry != nil, waylandIntegration != nil else { return }
+        guard iconTextures[name] == nil, !_iconDecodeAttempted.contains(name) else { return }
+        guard let path = AppRegistry.shared.app(id: name)?.iconPath,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        else { return }   // not installed yet — retry on the next launch
+        _iconDecodeAttempted.insert(name)
+
+        // Same re-entry pattern as the wallpaper decode: the state class is not
+        // Sendable, so the task reaches back through _shellState.
+        Task { @MainActor in
+            do {
+                let codec = try await FlutterSwiftBridge.instantiateImageCodec([UInt8](data))
+                let frame = try await codec.getNextFrame()
+                codec.dispose()
+                let image = frame.image
+                defer { image.dispose() }
+                guard let shell = _shellState,
+                      let registry = drmTextureRegistry,
+                      let wl = waylandIntegration else { return }
+                // The GL texture path samples with a flipped V, so the decoder's
+                // top-down rows have to be reversed — the same reason
+                // _centerCrop emits bottom-up.
+                let flipped = _DesktopShellState._flipVertical(
+                    rgba: try image.toByteData(format: .rawRgba),
+                    width: image.width, height: image.height)
+                let texId = registry.registerTexture(engine: wl.engine)
+                flipped.withUnsafeBytes { ptr in
+                    registry.updatePixelData(
+                        engine: wl.engine, id: texId,
+                        data: ptr.baseAddress!,
+                        width: image.width, height: image.height)
+                }
+                shell.setState { shell.iconTextures[name] = texId }
+            } catch {
+                // Undecodable — the neutral painted glyph stays.
+            }
+        }
+        #endif
+    }
+
+    /// Reverse raw RGBA rows: top-down decoder output -> bottom-up upload.
+    private static func _flipVertical(rgba: Data, width: Int, height: Int) -> Data {
+        let stride = width * 4
+        guard height > 0, rgba.count >= stride * height else { return rgba }
+        var out = Data(count: stride * height)
+        rgba.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) in
+                for row in 0..<height {
+                    let from = src.baseAddress! + (height - 1 - row) * stride
+                    memcpy(dst.baseAddress! + row * stride, from, stride)
+                }
+            }
+        }
+        return out
+    }
+
+    /// Wire up WaylandIntegration callbacks to create/destroy windows.
+    /// Begin the close animation for a window by appId (used by the portal
+    /// file chooser to tear down the picker window when it exits — its
+    /// _closingWindows set is private to this state).
+    func _portalBeginClosingWindow(appId: String) {
+        setState {
+            if let win = windowManager.windows.first(where: { $0.appId == appId }) {
+                _closingWindows.insert(win.id)
+            }
+        }
+    }
+
+    private func _setupWaylandCallbacks() {
+        #if os(Linux)
+        guard let wayland = waylandIntegration else { return }
+
+        wayland.onNewWindow = { [weak self] (surfaceId: UInt32, textureId: Int, title: String, clientId: UInt64) -> String in
+            guard let self = self else { return "" }
+            let appId = "wayland-\(surfaceId)"
+            var windowId = ""
+            self.setState {
+                // addWindow may hop the active space to a user desktop (new
+                // windows never open inside the AI Space); if this turns out
+                // to be an agent-claimed window, the hop is undone below.
+                let spaceBefore = self.windowManager.activeSpaceIndex
+                windowId = self.windowManager.addWindow(
+                    title: Self._displayTitle(title),
+                    appId: appId,
+                    textureId: textureId,
+                    onWindowClose: {
+                        // Client-initiated close: the Wayland protocol doesn't have a
+                        // server->client close command. The client disconnects on its own.
+                        // When it does, on_toplevel_destroy fires and cleans up.
+                    },
+                    onPointerEvent: { (phase, x, y, buttons) in
+                        wayland.sendPointerEvent(
+                            surfaceId: surfaceId,
+                            phase: phase,
+                            x: x, y: y,
+                            buttons: buttons
+                        )
+                    },
+                    onContentResize: { (width, height) in
+                        wayland.sendResize(
+                            surfaceId: surfaceId,
+                            width: Int(width),
+                            height: Int(height)
+                        )
+                    },
+                    onResizeComplete: { (width, height) in
+                        wayland.sendResizeForced(
+                            surfaceId: surfaceId,
+                            width: Int(width),
+                            height: Int(height)
+                        )
+                    },
+                    onScrollEvent: { (x, y, deltaX, deltaY) in
+                        wayland.sendScrollEvent(
+                            surfaceId: surfaceId,
+                            x: x, y: y,
+                            scrollDeltaX: deltaX,
+                            scrollDeltaY: deltaY
+                        )
+                    },
+                    flipTextureY: true,
+                    appBuilder: { _ in SizedBox(expand: ()) }
+                )
+                // Agent-launched Wayland client (Murmuration): every
+                // toplevel from a claimed client connection belongs to its
+                // agent — no desktop presence, tile-only. A pending launch
+                // marker claims the connection on its first window.
+                var ownerId = self._agentWaylandClients[clientId]
+                var launchReply: ((String) -> Void)? = nil
+                if ownerId == nil, let pending = self._pendingAgentWayland {
+                    self._pendingAgentWayland = nil
+                    self._agentWaylandClients[clientId] = pending.agentId
+                    ownerId = pending.agentId
+                    launchReply = pending.onWindow
+                }
+                if let ownerId,
+                   let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                    win.ownerAgentId = ownerId
+                    win.spaceId = WindowManagerState.kNoSpaceId
+                    win.pendingOpenAnimation = false
+                    // Agent windows never move the human's view: undo the
+                    // user-space hop addWindow performed (e.g. Ctrl+N in a
+                    // taken-over Chrome while watching the AI Space).
+                    if self.windowManager.activeSpaceIndex != spaceBefore {
+                        self.windowManager.switchToSpace(spaceBefore)
+                    }
+                    self.windowManager.focusTopmostInActiveSpace()
+                    // Tile-only from birth: throttle immediately using the
+                    // surfaceId in hand (the windowId→surface map is filled
+                    // only after this callback returns; the fleet build
+                    // re-evaluates the full policy from then on).
+                    wayland.setSurfaceThrottle(surfaceId: surfaceId, intervalMs: 200)
+                    self._agentThrottleApplied[windowId] = 200
+                    launchReply?(windowId)
+                }
+            }
+            // Agent-owned clients are sized to the workbench stage, so they
+            // fill it exactly at scale 1.0 instead of being letterboxed at
+            // the desktop's aspect. The initial configure must go out before
+            // the first frame; _applyAgentWindowGeometry keeps it in sync
+            // afterwards (its diff guard is seeded here).
+            if let win = self.windowManager.windows.first(where: { $0.id == windowId }),
+               win.ownerAgentId != nil {
+                let stage = self._agentStageContentSize()
+                win.rect = Rect.fromLTWH(0, 0, stage.width,
+                                         stage.height + DesktopTheme.kTitleBarHeight)
+                self._agentSizeApplied[windowId] = stage
+                wayland.sendResize(surfaceId: surfaceId,
+                                   width: Int(stage.width), height: Int(stage.height))
+                return windowId
+            }
+            // Send configure with the maximized content area — fills the
+            // screen below status bar + title bar. The dock floats on top
+            // (macOS-style) so its BackdropFilter can blur actual content.
+            let topInset = DesktopTheme.kStatusBarHeight
+            let contentWidth = Int(screenWidth)
+            let contentHeight = Int(screenHeight - topInset - DesktopTheme.kTitleBarHeight)
+            wayland.sendResize(surfaceId: surfaceId, width: contentWidth, height: contentHeight)
+            // Start Wayland windows maximized (like Hyprland's default behavior).
+            self.windowManager.maximizeWindow(windowId, screenWidth: screenWidth, screenHeight: screenHeight)
+            return windowId
+        }
+
+        wayland.onWindowDestroyed = { [weak self] (windowId: String) in
+            guard let self = self else { return }
+            self.setState {
+                self.windowManager.closeWindow(windowId)
+            }
+        }
+
+        wayland.onTextInputState = { [weak self] windowId, enabled, x, y, w, h in
+            guard let self = self else { return }
+            self._imeWaylandTI = (windowId, enabled,
+                                  Rect.fromLTWH(x, y, w, h))
+            if self._imeEnabled,
+               !self._imePreedit.isEmpty || !self._imeCandidates.isEmpty {
+                self.setState {}
+            }
+        }
+
+        wayland.onTitleChanged = { [weak self] (windowId: String, title: String) in
+            guard let self = self else { return }
+            if let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                self.setState {
+                    win.title = Self._displayTitle(title, for: win)
+                }
+            }
+            // For the few windows recognised by title rather than app_id, this
+            // is the point at which "that window is Zoom" becomes true — the
+            // title only arrives here, after the first commit.
+            self._loadIconTexturesForRunningApps()
+        }
+
+        // What a window calls itself (`xdg_toplevel.set_app_id`), and the only
+        // reliable link from a window back to an installed app. IntelliJ says
+        // "jetbrains-idea" here on every window it owns, including the project
+        // window whose title is just "untitled – Main.java".
+        wayland.onAppIdChanged = { [weak self] (windowId: String, appId: String) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId })
+            else { return }
+            guard win.wmClass != appId else { return }
+            self.setState {
+                win.wmClass = appId
+                // A record may rename the window (WeChat's is the whole
+                // rootful Xwayland screen, titled "Xwayland on :1").
+                win.title = Self._displayTitle(win.title, for: win)
+            }
+            self._loadIconTexturesForRunningApps()
+        }
+
+        wayland.onNewPopup = { [weak self] (surfaceId: UInt32, textureId: Int, parentSurfaceId: UInt32, x: Int, y: Int, width: Int, height: Int) -> String in
+            guard let self = self else { return "" }
+            let popupId = "popup-\(surfaceId)"
+            self.setState {
+                // Dismiss stale sibling popups (same parent) and their descendants.
+                // Chrome never destroys popups because we don't send popup_done,
+                // so stale entries accumulate. Clean them up when a new sibling arrives.
+                var toRemove: Set<String> = []
+                for (id, p) in self.popups {
+                    if id != popupId && p.parentSurfaceId == parentSurfaceId {
+                        toRemove.insert(id)
+                    }
+                }
+                // Also remove descendants of dismissed popups
+                var changed = true
+                while changed {
+                    changed = false
+                    for (id, p) in self.popups {
+                        let parentKey = "popup-\(p.parentSurfaceId)"
+                        if !toRemove.contains(id) && toRemove.contains(parentKey) {
+                            toRemove.insert(id)
+                            changed = true
+                        }
+                    }
+                }
+                for id in toRemove {
+                    self.popups.removeValue(forKey: id)
+                }
+
+                self.popups[popupId] = (textureId: textureId, parentSurfaceId: parentSurfaceId,
+                                         x: Double(x), y: Double(y),
+                                         width: Double(width), height: Double(height),
+                                         mapped: false)
+            }
+            return popupId
+        }
+
+        wayland.onPopupDestroyed = { [weak self] (popupId: String) in
+            guard let self = self else { return }
+            self.setState {
+                self.popups.removeValue(forKey: popupId)
+            }
+        }
+
+        // Client-initiated interactive move/resize (xdg_toplevel.move/resize —
+        // CSD titlebar or Chrome tab-strip drag). Arm the grab state on the
+        // window; DesktopWindow's content Listener (which owns the in-flight
+        // pointer gesture) diverts motion into move/resize until button-up.
+        wayland.onMoveRequest = { [weak self] (windowId: String) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId })
+            else { return }
+            win.interactiveMoveActive = true
+            win.interactiveResizeEdge = nil
+            win.interactiveLastPos = nil
+        }
+
+        wayland.onInteractiveResizeRequest = { [weak self] (windowId: String, edges: UInt32) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId })
+            else { return }
+            // xdg_toplevel.resize_edge bitmask: top=1 bottom=2 left=4 right=8.
+            let edge: ResizeEdge?
+            switch edges {
+            case 1: edge = .top
+            case 2: edge = .bottom
+            case 4: edge = .left
+            case 8: edge = .right
+            case 5: edge = .topLeft
+            case 9: edge = .topRight
+            case 6: edge = .bottomLeft
+            case 10: edge = .bottomRight
+            default: edge = nil
+            }
+            guard let resolved = edge else { return }
+            win.interactiveMoveActive = false
+            win.interactiveResizeEdge = resolved
+            win.interactiveLastPos = nil
+            // Same start-of-drag contract as the shell's own resize handles.
+            win.targetRect = win.rect
+        }
+
+        wayland.onWindowGeometryChanged = { [weak self] (windowId: String, x: Int, y: Int, width: Int, height: Int, bufLogW: Int, bufLogH: Int) in
+            guard let self = self else { return }
+            if let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                let oldOffset = win.geometryOffset
+                let oldBufSize = win.bufferLogicalSize
+                win.geometryOffset = (x: Double(x), y: Double(y))
+                win.geometrySize = (width: Double(width), height: Double(height))
+                win.bufferLogicalSize = (width: Double(bufLogW), height: Double(bufLogH))
+                // Only rebuild if geometry actually changed (avoid rebuilds on every frame)
+                let changed = oldOffset == nil
+                    || oldOffset!.x != Double(x) || oldOffset!.y != Double(y)
+                    || oldBufSize == nil
+                    || oldBufSize!.width != Double(bufLogW) || oldBufSize!.height != Double(bufLogH)
+                if changed {
+                    self._windowChildCache.removeValue(forKey: windowId)
+                    self.setState {}
+                }
+            }
+        }
+
+        wayland.onPopupBufferResized = { [weak self] (popupId: String, logicalWidth: Int, logicalHeight: Int, geoX: Int, geoY: Int) in
+            guard let self = self else { return }
+            if var popup = self.popups[popupId] {
+                popup.width = Double(logicalWidth)
+                popup.height = Double(logicalHeight)
+                // Position buffer so content area (at geometry offset) aligns with positioner position.
+                // geometry (geoX, geoY) = offset from buffer top-left to content top-left.
+                popup.x -= Double(geoX)
+                popup.y -= Double(geoY)
+                popup.mapped = true
+                self.setState {
+                    self.popups[popupId] = popup
+                }
+            }
+        }
+
+        wayland.onWindowBufferResized = { [weak self] (windowId: String, logicalWidth: Int, logicalHeight: Int) in
+            guard let self = self else { return }
+            // Otherwise it's a toplevel window.
+            guard let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+
+            // Fullscreen: rect is fixed (below status bar, full width).
+            // Just schedule a repaint so the texture updates.
+            if win.isFullscreen {
+                PlatformDispatcher.instance.scheduleFrame()
+                return
+            }
+
+            let titleBarH = DesktopTheme.kTitleBarHeight
+            let newWidth = Double(logicalWidth)
+            let newHeight = Double(logicalHeight) + titleBarH
+
+            if win.resizeDragEdge != nil {
+                // During active drag: don't update rect (it follows the mouse),
+                // but schedule a frame so the texture repaints with new content.
+                PlatformDispatcher.instance.scheduleFrame()
+
+                // Check if Chrome matched target size (edge case)
+                if let target = win.targetRect,
+                   Int(newWidth) == Int(target.width),
+                   Int(newHeight) == Int(target.height) {
+                    win.targetRect = nil
+                    win.resizeDragEdge = nil
+                }
+            } else if win.targetRect != nil {
+                // Drag ended, waiting for Chrome to match final size.
+                let target = win.targetRect!
+                if Int(newWidth) == Int(target.width) &&
+                   Int(newHeight) == Int(target.height) {
+                    win.targetRect = nil
+                    win.resizeDragEdge = nil
+                }
+                // Update rect to Chrome's actual rendered size
+                self.setState {
+                    win.rect = Rect.fromLTWH(win.rect.left, win.rect.top, newWidth, newHeight)
+                }
+            } else {
+                // Normal buffer resize (not dragging)
+                if Int(win.rect.width) != Int(newWidth) || Int(win.rect.height) != Int(newHeight) {
+                    self.setState {
+                        win.rect = Rect.fromLTWH(win.rect.left, win.rect.top, newWidth, newHeight)
+                    }
+                } else {
+                    PlatformDispatcher.instance.scheduleFrame()
+                }
+            }
+        }
+
+        wayland.onFullscreenRequest = { [weak self] (windowId: String) in
+            guard let self = self else { return }
+            guard let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+            guard !win.isFullscreen else { return }  // already fullscreen
+            guard let surfId = wayland.surfaceId(forWindowId: windowId) else { return }
+            self.setState {
+                self._fullscreenWithZoom(windowId)
+            }
+            // Fullscreen: window sits below the system status bar (reserved
+            // top strip). The title bar overlays the content on demand so
+            // the wayland client renders into the full window height.
+            let contentW = Int(self.screenWidth)
+            let contentH = Int(self.screenHeight - DesktopTheme.kStatusBarHeight)
+            wayland.sendFullscreenResize(surfaceId: surfId, width: contentW, height: contentH)
+        }
+
+        wayland.onUnfullscreenRequest = { [weak self] (windowId: String) in
+            guard let self = self else { return }
+            guard let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+            guard win.isFullscreen else { return }
+            guard let surfId = wayland.surfaceId(forWindowId: windowId) else { return }
+            var finalRect: Rect? = nil
+            self.setState {
+                finalRect = self._fullscreenWithZoom(windowId)
+            }
+            // Restored — configure the client from the FINAL rect (win.rect
+            // is mid-zoom).
+            guard let restored = finalRect else { return }
+            let contentW = Int(restored.width)
+            let contentH = Int(restored.height - DesktopTheme.kTitleBarHeight)
+            wayland.sendExitFullscreen(surfaceId: surfId, width: contentW, height: contentH)
+        }
+
+        // Forward keyboard events to the focused Wayland or X11 client.
+        let pd = PlatformDispatcher.instance
+        let routeKey: (KeyData) -> Bool = { [weak self] keyData in
+            guard let self = self else { return false }
+
+            // Track Ctrl/Shift modifier state first (HID: 0xE0/0xE4 = Ctrl,
+            // 0xE1/0xE5 = Shift) — the modal layers below rely on it.
+            let phys = keyData.physical
+            if phys == 0xE0 || phys == 0xE4 {
+                self._ctrlPressed = (keyData.type == .down || keyData.type == .repeat)
+            }
+            if phys == 0xE1 || phys == 0xE5 {
+                self._shiftPressed = (keyData.type == .down || keyData.type == .repeat)
+            }
+
+            // The app launcher (Launchpad) is modal: while it's open it owns
+            // the keyboard. Type to search, Backspace to edit, Enter to launch
+            // the top match, Esc to clear the query (then close). No keystroke
+            // reaches the windows underneath.
+            if self._launcherOpen {
+                if keyData.type == .down || keyData.type == .repeat {
+                    switch keyData.physical {
+                    case 0x29:  // Escape
+                        self.setState {
+                            if self._launcherQuery.isEmpty {
+                                self._launcherOpen = false
+                            } else {
+                                self._launcherQuery = ""
+                            }
+                        }
+                    case 0x2A:  // Backspace
+                        self.setState {
+                            if !self._launcherQuery.isEmpty { self._launcherQuery.removeLast() }
+                        }
+                    case 0x28, 0x58:  // Enter / keypad Enter — launch the top match
+                        if let first = self._launcherFilteredApps().first {
+                            self.setState { self._launcherOpen = false; self._launcherQuery = "" }
+                            self._launchOrFocusApp(first.appId)
+                        }
+                    default:
+                        if let ch = keyData.character,
+                           let s = ch.unicodeScalars.first,
+                           s.value >= 0x20, s.value != 0x7F {
+                            self.setState { self._launcherQuery += ch }
+                        }
+                    }
+                }
+                return true  // swallow everything while the launcher is open
+            }
+
+            // Mission Control owns the keyboard while open: Esc / Ctrl+Up
+            // close it; Ctrl+←/→ retarget the active space instantly (the
+            // strip highlight and exposé follow); all else is swallowed.
+            if self._missionControlOpen {
+                if keyData.type == .down || keyData.type == .repeat {
+                    if keyData.type == .down,
+                       phys == 0x29 || (phys == 0x52 && self._ctrlPressed) {
+                        self._closeMissionControlAnimated()
+                    } else if self._ctrlPressed, phys == 0x50 || phys == 0x4F {
+                        let target = self.windowManager.activeSpaceIndex + (phys == 0x4F ? 1 : -1)
+                        if self.windowManager.spaces.indices.contains(target),
+                           !self.windowManager.spaces[target].isAgent {
+                            self._switchToSpace(target, animated: false)
+                        }
+                    }
+                }
+                return true
+            }
+
+            // Spaces shortcuts (macOS): Ctrl+←/→ slide to the adjacent
+            // space; Ctrl+Shift+←/→ carry the focused window along;
+            // Ctrl+Tab cycles through all spaces. Swallowed even at the
+            // ends of the strip — the system owns Ctrl+arrows, apps never
+            // see them (macOS behaviour).
+            if self._ctrlPressed, keyData.type == .down || keyData.type == .repeat {
+                if phys == 0x50 || phys == 0x4F {  // Left / Right arrow
+                    // Arrows never lead INTO the AI Space (dedicated entry
+                    // only) — but they do lead out of it.
+                    let target = self.windowManager.activeSpaceIndex + (phys == 0x4F ? 1 : -1)
+                    if self.windowManager.spaces.indices.contains(target),
+                       !self.windowManager.spaces[target].isAgent {
+                        if self._shiftPressed {
+                            self._moveFocusedWindowToSpace(target)
+                        } else {
+                            self._switchToSpace(target)
+                        }
+                    }
+                    return true
+                }
+                if phys == 0x2B && keyData.type == .down {  // Tab
+                    // Cycle through the ordinary spaces; the AI Space (always
+                    // last) is skipped — from inside it, Tab exits to space 0.
+                    let wm = self.windowManager
+                    let count = wm.spaces.count - (wm.agentSpaceIndex != nil ? 1 : 0)
+                    if count > 1 || wm.activeSpace.isAgent {
+                        self._switchToSpace((wm.activeSpaceIndex + 1) % max(count, 1))
+                    }
+                    return true
+                }
+                if phys == 0x52 && keyData.type == .down {  // Up — Mission Control
+                    self._openMissionControl()
+                    return true
+                }
+                if phys == 0x51 && keyData.type == .down {  // Down — AI Space
+                    self._toggleAgentSpace()
+                    return true
+                }
+                if phys == 0x2C && keyData.type == .down {  // Space — IME toggle
+                    self._toggleIme()
+                    return true
+                }
+            }
+
+            guard let focusedId = self.windowManager.focusedWindowId,
+                  let win = self.windowManager.windows.first(where: { $0.id == focusedId }) else {
+                // No focused window — offer the key to the shell's own UI
+                // (start menu search, etc.).
+                return FocusManager.instance.dispatchKeyData(keyData)
+            }
+
+            // Take-over release (Murmuration P2): Esc hands a taken-over
+            // agent window back to its agent instead of reaching the app.
+            if keyData.type == .down, phys == 0x29,
+               let ownerId = win.ownerAgentId,
+               self._humanControlledWindows.contains(win.id) {
+                self.setState {
+                    self._humanControlledWindows.remove(win.id)
+                    // Focus returns to the agent's terminal (supervision).
+                    self.windowManager.focusedWindowId = self.windowManager
+                        .agents.first(where: { $0.id == ownerId })?.terminalWindowId
+                }
+                return true
+            }
+
+            // IME: while enabled, offer the key to fcitx first — consumed
+            // keys are composition input (pinyin letters, candidate digits,
+            // …) and must not reach the app. Commits arrive via onCommit.
+            // Runs before the per-window forwarding so Wayland/X11 clients
+            // compose too (commits reach them via text-input-v3).
+            if self._imeEnabled, let ime = self.imeIntegration {
+                if win.appId.hasPrefix("wayland-") {
+                    // Text-input enter rides keyboard enter, which is
+                    // normally lazy (first forwarded key) — force it so the
+                    // client enables its text input before we compose.
+                    wayland.ensureKeyboardFocus()
+                }
+                // A half-typed composition must not follow focus to another
+                // window (or survive its target's death) — reset it.
+                if self._imeTargetWindowId != focusedId {
+                    if self._imeTargetWindowId != nil { ime.resetComposition() }
+                    self._imeTargetWindowId = focusedId
+                }
+                if ime.handleKey(keyData) {
+                    return true
+                }
+            }
+
+            if win.appId.hasPrefix("wayland-") {
+                let isDown = keyData.type == .down || keyData.type == .repeat
+                if keyData.type == .down || keyData.type == .up {
+                    // Deliver to the FOCUSED window's surface, not wherever the
+                    // pointer happens to be. appId is "wayland-<surfaceId>".
+                    let surface = UInt32(win.appId.dropFirst("wayland-".count)) ?? 0
+                    wayland.sendKeyEvent(
+                        physical: keyData.physical,
+                        logical: keyData.logical,
+                        isDown: isDown,
+                        targetSurface: surface
+                    )
+                }
+                return true
+            }
+
+            if win.appId.hasPrefix("x11-"), let x11 = x11Integration {
+                // Convert HID physical key to evdev keycode — the SAME mapping
+                // the Wayland path uses. keyData.physical is a HID usage code
+                // (Backspace = 0x2A); the X11 server adds 8 to make the X
+                // keycode. The old code passed the HID value straight through,
+                // so every key was mis-mapped (Backspace 0x2A → evdev 42 =
+                // Left Shift, i.e. did nothing; letters became other letters).
+                // Repeats are delivered as extra presses (X11-style autorepeat).
+                let evdevCode = WaylandIntegration.hidToEvdev(UInt64(bitPattern: keyData.physical))
+                x11.sendKeyEvent(keycode: evdevCode, pressed: keyData.type != .up)
+                return true
+            }
+
+            // Focused window hosts a child process app (Files, Settings, …):
+            // forward over its DMA-BUF input socket.
+            if let texId = self.processTextureIds[win.appId],
+               let mgr = linuxProcessAppManager {
+                let scalar = keyData.character?.unicodeScalars.first?.value ?? 0
+                let phase: Int32
+                switch keyData.type {
+                case .down: phase = 0
+                case .up: phase = 1
+                case .repeat: phase = 2
+                }
+                mgr.sendKeyEvent(
+                    textureId: texId,
+                    physical: keyData.physical,
+                    logical: keyData.logical,
+                    character: scalar,
+                    phase: phase
+                )
+                return true
+            }
+
+            // Focused window is shell-internal — offer the key to the
+            // shell's own focused widget, if any.
+            return FocusManager.instance.dispatchKeyData(keyData)
+        }
+        _keyRouter = routeKey
+        pd.onKeyData = { [weak self] keyData in
+            self?._trackKeyRepeat(keyData)
+            return routeKey(keyData)
+        }
+        #endif
+    }
+
+    // MARK: - Spaces (virtual desktops)
+
+    /// Switch the active space, macOS-style: the model flips immediately,
+    /// then a 380ms eased slide carries the old space out and the new one in.
+    /// A switch requested mid-slide retargets from the current destination.
+    func _switchToSpace(_ index: Int, animated: Bool = true, carrying carriedId: String? = nil) {
+        let wm = windowManager
+        guard wm.spaces.indices.contains(index), index != wm.activeSpaceIndex else { return }
+        let from = wm.activeSpaceIndex
+        setState {
+            let fromId = wm.spaces[from].id
+            wm.switchToSpace(index)
+            if animated {
+                _spaceSlide = (fromId, wm.activeSpace.id, index > from ? 1.0 : -1.0, carriedId)
+            }
+        }
+        if animated { _startSpaceSlide() }
+    }
+
+    // MARK: Window rect zoom
+
+    /// Animate a window's rect from wherever it is to `target` (macOS-style
+    /// fullscreen zoom). The client is configured for the final size by the
+    /// caller; the texture stretches during the zoom and sharpens when the
+    /// client catches up — same contract as interactive resize.
+    func _animateWindowRect(_ winId: String, to target: Rect, durationMs: Int = 320) {
+        if let old = _windowRectAnims.removeValue(forKey: winId) {
+            old.stop()
+            old.dispose()
+        }
+        guard let win = windowManager.windows.first(where: { $0.id == winId }) else { return }
+        let from = win.rect
+        let c = AnimationController(duration: .milliseconds(durationMs), vsync: self)
+        let curve = CurvedAnimation(parent: c, curve: Curves.easeInOutCubic)
+        c.addListener { [weak self, weak win] in
+            guard let self, let win else { return }
+            let t = curve.value
+            self.setState {
+                win.rect = Rect.fromLTWH(
+                    from.left + (target.left - from.left) * t,
+                    from.top + (target.top - from.top) * t,
+                    from.width + (target.width - from.width) * t,
+                    from.height + (target.height - from.height) * t)
+            }
+        }
+        c.addStatusListener { [weak self] status in
+            guard let self, status == .completed else { return }
+            if let done = self._windowRectAnims.removeValue(forKey: winId) {
+                done.dispose()
+            }
+        }
+        _windowRectAnims[winId] = c
+        _ = c.forward(from: 0)
+    }
+
+    /// Toggle a window's fullscreen state with the macOS zoom: the model
+    /// flips instantly (space bookkeeping included), then the rect animates
+    /// between the windowed and fullscreen geometry. Returns the FINAL rect
+    /// — callers must configure clients from it, not from win.rect, which
+    /// is mid-animation.
+    @discardableResult
+    func _fullscreenWithZoom(_ winId: String) -> Rect? {
+        guard let win = windowManager.windows.first(where: { $0.id == winId }) else { return nil }
+        let fromRect = win.rect
+        windowManager.fullscreenWindow(
+            winId, screenWidth: screenWidth, screenHeight: screenHeight)
+        let toRect = win.rect
+        win.rect = fromRect
+        _animateWindowRect(winId, to: toRect)
+        return toRect
+    }
+
+    // MARK: Edge-drag carry
+
+    /// Called on every window-drag move: arm (or re-arm/cancel) the dwell
+    /// when the pointer is pressed against a screen edge with a space on
+    /// that side.
+    func _checkEdgeCarry(_ winId: String) {
+        guard !_missionControlOpen, let pos = _dragPointerPos else { return }
+        let dir: Int
+        if pos.dx <= _edgeCarryZonePx {
+            dir = -1
+        } else if pos.dx >= screenWidth - _edgeCarryZonePx {
+            dir = 1
+        } else {
+            dir = 0
+        }
+        guard dir != _edgeCarryArmedDir else { return }
+        _edgeCarryToken += 1  // invalidate any pending dwell
+        _edgeCarryArmedDir = dir
+        guard dir != 0 else { return }
+        let token = _edgeCarryToken
+        let fire: () -> Void = { [weak self] in
+            guard let self, self._edgeCarryToken == token else { return }
+            self._edgeCarryArmedDir = 0
+            self._fireEdgeCarry(winId, dir)
+        }
+        // Main-queue-only state; the @Sendable coercion is safe (codebase
+        // idiom — see _recordStatusPopupHeight).
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(_edgeCarryDwellMs),
+            execute: unsafeBitCast(fire, to: (@Sendable () -> Void).self))
+    }
+
+    /// Pointer released anywhere — disarm the dwell.
+    func _cancelEdgeCarry() {
+        _edgeCarryToken += 1
+        _edgeCarryArmedDir = 0
+        _dragPointerPos = nil
+    }
+
+    /// Dwell elapsed at an edge: carry the dragged window to the adjacent
+    /// USER space (fullscreen windows own their space; private fullscreen
+    /// spaces accept no guests) and slide over with the window pinned
+    /// under the cursor. Holding at the edge re-arms for the next space.
+    private func _fireEdgeCarry(_ winId: String, _ direction: Int) {
+        let wm = windowManager
+        guard let win = wm.windows.first(where: { $0.id == winId }),
+              !win.isFullscreen, !win.isMinimized else { return }
+        let target = wm.activeSpaceIndex + direction
+        guard wm.spaces.indices.contains(target), wm.spaces[target].isUser else { return }
+        setState {
+            wm.moveWindow(winId, toSpaceIndex: target)
+            wm.bringToFront(winId)
+        }
+        _switchToSpace(target, carrying: winId)
+    }
+
+    // MARK: - AI Space entry/exit (Murmuration)
+
+    /// Ctrl+Down / context menu: toggle between the AI Space and the
+    /// desktop. The space is created lazily on first entry and persists;
+    /// leaving returns to the space the user came from.
+    func _toggleAgentSpace() {
+        let wm = windowManager
+        if wm.activeSpace.isAgent {
+            var back = _agentReturnSpaceIndex
+            if !wm.spaces.indices.contains(back) || wm.spaces[back].isAgent {
+                back = wm.spaces.indices.first(where: { wm.spaces[$0].isUser }) ?? 0
+            }
+            _switchToSpace(back)
+            return
+        }
+        _agentReturnSpaceIndex = wm.activeSpaceIndex
+        var idx: Int = 0
+        setState { idx = wm.ensureAgentSpace() }
+        _switchToSpace(idx)
+    }
+
+    private func _startSpaceSlide() {
+        if _spaceSlideController == nil {
+            let c = AnimationController(duration: .milliseconds(380), vsync: self)
+            c.addListener { [weak self] in
+                self?.setState {}
+            }
+            c.addStatusListener { [weak self] status in
+                guard let self, status == .completed else { return }
+                self.setState { self._spaceSlide = nil }
+            }
+            _spaceSlideController = c
+            _spaceSlideCurve = CurvedAnimation(parent: c, curve: Curves.easeInOutCubic)
+        }
+        _ = _spaceSlideController?.forward(from: 0)
+    }
+
+    /// Open the Mission Control overview (Ctrl+Up / context menu). The
+    /// exposé cards animate from the windows' desktop rects into the grid.
+    func _openMissionControl() {
+        guard !_missionControlOpen else { return }
+        // Mission Control shows desktops; from inside the AI Space, exit to
+        // the return space first (the AI Space has no strip thumbnail).
+        if windowManager.activeSpace.isAgent {
+            var back = _agentReturnSpaceIndex
+            if !windowManager.spaces.indices.contains(back) || windowManager.spaces[back].isAgent {
+                back = windowManager.spaces.indices.first(where: { windowManager.spaces[$0].isUser }) ?? 0
+            }
+            _switchToSpace(back, animated: false)
+        }
+        setState {
+            _missionControlOpen = true
+            contextMenuPosition = nil
+            activeStatusBarPopup = nil
+            _launcherOpen = false
+        }
+        if _mcOpenController == nil {
+            let c = AnimationController(duration: .milliseconds(300), vsync: self)
+            c.addListener { [weak self] in
+                self?.setState {}
+            }
+            c.addStatusListener { [weak self] status in
+                // Reverse run reached the desktop layout — finish the close.
+                guard let self, status == .dismissed, self._mcClosing else { return }
+                self._closeMissionControl()
+            }
+            _mcOpenController = c
+            _mcOpenCurve = CurvedAnimation(parent: c, curve: Curves.easeInOutCubic)
+        }
+        _mcClosing = false
+        _ = _mcOpenController?.forward(from: 0)
+    }
+
+    /// Immediate teardown (dock launches, and the tail end of the animated
+    /// close).
+    func _closeMissionControl() {
+        setState {
+            _missionControlOpen = false
+            _mcClosing = false
+            _mcDragWindowId = nil
+            _mcDragStart = nil
+            _mcDragPos = nil
+            _mcDragMoved = false
+            _mcRelayoutFrom = [:]
+            _mcDeparting = nil
+        }
+    }
+
+    /// Animated close: the exposé cards fly back to their desktop rects
+    /// (the open controller runs in reverse), then the overlay tears down.
+    func _closeMissionControlAnimated() {
+        guard _missionControlOpen, !_mcClosing else { return }
+        guard let c = _mcOpenController else {
+            _closeMissionControl()
+            return
+        }
+        setState {
+            _mcClosing = true
+            _mcDragWindowId = nil
+            _mcDragStart = nil
+            _mcDragPos = nil
+            _mcDragMoved = false
+        }
+        _ = c.reverse()
+    }
+
+    /// Carry the focused window to the space at `index` and follow it there
+    /// (Ctrl+Shift+←/→). Fullscreen windows own their space and don't move;
+    /// with nothing to carry this degrades to a plain switch. The carried
+    /// window is pinned during the slide — it stays put while the desktop
+    /// changes behind it (same visual as the edge-drag carry).
+    private func _moveFocusedWindowToSpace(_ index: Int) {
+        var carriedId: String? = nil
+        if let fid = windowManager.focusedWindowId,
+           let win = windowManager.windows.first(where: { $0.id == fid }),
+           // Agent-owned windows (e.g. the focused agent terminal in the
+           // AI Space) never move onto a desktop via carry.
+           win.ownerAgentId == nil,
+           !win.isFullscreen, !win.isMinimized {
+            setState {
+                windowManager.moveWindow(fid, toSpaceIndex: index)
+                windowManager.bringToFront(fid)
+            }
+            carriedId = fid
+        }
+        _switchToSpace(index, carrying: carriedId)
+    }
+
+    /// Wire up X11Integration callbacks to create/destroy windows.
+    private func _setupX11Callbacks() {
+        #if os(Linux)
+        guard let x11 = x11Integration else { return }
+
+        x11.onNewWindow = { [weak self] (windowId: UInt32, textureId: Int, title: String,
+                                           x: Int, y: Int, width: Int, height: Int) -> String in
+            guard let self = self else { return "" }
+            let appId = "x11-\(windowId)"
+            var shellWindowId = ""
+            // Honor the client's requested geometry (physical px → logical),
+            // centered on screen when unplaced. Forcing X11 windows fullscreen
+            // (the old Chrome-kiosk behavior) breaks apps with real dialog
+            // windows — WeChat's 296x402 login ends up stretched, and the
+            // follow-up fullscreen resize confuses Qt's swapchain sizing.
+            let dpi = currentShellDpi
+            let screenLogW = (PlatformDispatcher.instance.implicitView?.physicalSize.width ?? 3840.0) / dpi
+            let screenLogH = (PlatformDispatcher.instance.implicitView?.physicalSize.height ?? 2160.0) / dpi
+            let winLogW = max(80.0, Double(width) / dpi)
+            let winLogH = max(60.0, Double(height) / dpi) + DesktopTheme.kTitleBarHeight
+            let winLogX = (x != 0) ? Double(x) / dpi
+                                   : max(0.0, (screenLogW - winLogW) / 2.0)
+            let winLogY = (y != 0) ? Double(y) / dpi
+                                   : max(0.0, (screenLogH - winLogH) / 2.0)
+            let fullRect = Rect.fromLTWH(winLogX, winLogY, winLogW, winLogH)
+            self.setState {
+                shellWindowId = self.windowManager.addWindow(
+                    title: title,
+                    appId: appId,
+                    rect: fullRect,
+                    textureId: textureId,
+                    onWindowClose: {
+                        // X11 window close: we could send WM_DELETE_WINDOW ClientMessage
+                    },
+                    onPointerEvent: { (phase, px, py, buttons) in
+                        // Scale logical to physical pixels for X11 client
+                        let scale = currentShellDpi
+                        x11.sendPointerEvent(
+                            windowId: windowId,
+                            phase: phase,
+                            x: px * scale, y: py * scale,
+                            buttons: buttons
+                        )
+                    },
+                    onContentResize: { (w, h) in
+                        // Scale logical pixels to physical for X11 client
+                        let scale = currentShellDpi
+                        x11.sendResize(
+                            windowId: windowId,
+                            width: Int(Double(w) * scale),
+                            height: Int(Double(h) * scale)
+                        )
+                    },
+                    onResizeComplete: { (w, h) in
+                        // Force-send the final size on drag end, bypassing throttle
+                        let scale = currentShellDpi
+                        x11.sendResize(
+                            windowId: windowId,
+                            width: Int(Double(w) * scale),
+                            height: Int(Double(h) * scale)
+                        )
+                    },
+                    flipTextureY: true,  // DMA-BUF from X11/Vulkan needs Y-flip for GL
+                    appBuilder: { _ in SizedBox(expand: ()) }
+                )
+            }
+            // No forced resize: the client keeps the geometry it asked for.
+            // (The old code configured every window to fullscreen for the
+            // Chrome-kiosk flow; interactive resizes still flow through
+            // onContentResize/onResizeComplete above.)
+            return shellWindowId
+        }
+
+        x11.onWindowDestroyed = { [weak self] (windowId: String) in
+            guard let self = self else { return }
+            self.setState {
+                self.windowManager.closeWindow(windowId)
+            }
+        }
+
+        x11.onWindowBufferResized = { [weak self] (windowId: String, physWidth: Int, physHeight: Int) in
+            guard let self = self else { return }
+            if let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                let dpi = currentShellDpi
+                let logicalW = Double(physWidth) / dpi
+                let logicalH = Double(physHeight) / dpi + DesktopTheme.kTitleBarHeight
+
+                if win.resizeDragEdge != nil {
+                    // Option A (xfwm4-style): during drag, suppress rect update
+                    // from Chrome's buffer — rect already follows the mouse via
+                    // resizeWindow(). Just schedule a frame so the texture repaints.
+                    PlatformDispatcher.instance.scheduleFrame()
+
+                    // If drag ended (targetRect set but edge cleared by drag-end),
+                    // and Chrome matched, clear targetRect.
+                    if let target = win.targetRect,
+                       Int(logicalW) == Int(target.width),
+                       Int(logicalH) == Int(target.height) {
+                        win.targetRect = nil
+                        win.resizeDragEdge = nil
+                    }
+                } else if win.targetRect != nil {
+                    // Drag ended but Chrome hasn't matched final size yet.
+                    // Once Chrome renders at final size, snap rect and clear.
+                    let target = win.targetRect!
+                    if Int(logicalW) == Int(target.width) &&
+                       Int(logicalH) == Int(target.height) {
+                        win.targetRect = nil
+                        win.resizeDragEdge = nil
+                    }
+                    // Update rect to Chrome's actual rendered size
+                    self.setState {
+                        win.rect = Rect.fromLTWH(win.rect.left, win.rect.top, logicalW, logicalH)
+                    }
+                } else {
+                    // Not dragging — normal buffer resize
+                    if Int(win.rect.width) != Int(logicalW) || Int(win.rect.height) != Int(logicalH) {
+                        self.setState {
+                            win.rect = Rect.fromLTWH(win.rect.left, win.rect.top, logicalW, logicalH)
+                        }
+                    } else {
+                        PlatformDispatcher.instance.scheduleFrame()
+                    }
+                }
+            }
+        }
+
+        // onBufferPresented no longer needed — sync resize tracks via onWindowBufferResized
+
+        x11.onTitleChanged = { [weak self] (windowId: String, title: String) in
+            guard let self = self else { return }
+            if let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                self.setState {
+                    win.title = title
+                }
+            }
+        }
+        #endif
+    }
+
+    override func build(_ context: any BuildContext) -> Widget {
+        // SIMULATED multi-output (STARLING_SIM_OUTPUTS): render the whole
+        // virtual desktop scaled to fit the one physical panel. REAL
+        // multi-output instead gives each secondary its own Flutter view
+        // (SecondaryOutputScreen) and the primary renders the normal desktop
+        // below — the primary's slice of the virtual desktop is exactly its
+        // own logical rect at (0,0).
+        if let dl = displayLayout, dl.outputs.count > 1,
+           secondaryViewOutputs.isEmpty {
+            return _buildVirtualDesktopOverview(dl)
+        }
+
+        // Build window widgets sorted by z-index
+        var children: [Widget] = []
+
+        // Space-slide layers: (spaceId, dx). Steady state is one layer at
+        // dx 0; during a slide the outgoing and incoming spaces render side
+        // by side, offset by the eased progress. Resolved by space ID so a
+        // space removed mid-slide degrades to a steady frame.
+        var slideLayers: [(spaceId: Int, dx: Double)] = [(windowManager.activeSpace.id, 0)]
+        if let s = _spaceSlide, let curve = _spaceSlideCurve,
+           windowManager.spaces.contains(where: { $0.id == s.fromId }),
+           windowManager.spaces.contains(where: { $0.id == s.toId }) {
+            let p = curve.value
+            slideLayers = [
+                (s.fromId, -s.dir * p * screenWidth),
+                (s.toId, s.dir * (1.0 - p) * screenWidth),
+            ]
+        }
+        let isSliding = slideLayers.count > 1
+
+        // [0] Desktop wallpaper with right-click support. During a slide
+        // each space carries its own wallpaper copy as it moves (macOS).
+        func makeWallpaper() -> Widget {
+            let wallpaperWidget: Widget
+            #if os(Linux)
+            if wallpaperPreset == .still, wallpaperTextureId >= 0 {
+                wallpaperWidget = TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low)
+            } else {
+                wallpaperWidget = DesktopBackground(preset: wallpaperPreset)
+            }
+            #else
+            wallpaperWidget = DesktopBackground(preset: wallpaperPreset)
+            #endif
+            return Listener(
+                onPointerDown: { [self] event in
+                    if event.buttons & kSecondaryButton != 0 {
+                        setState {
+                            contextMenuPosition = event.position
+                            activeStatusBarPopup = nil
+                        }
+                    }
+                },
+                onPointerHover: { _ in
+                    // Catch-all: any hover that reaches the wallpaper (i.e.
+                    // wasn't claimed by a window edge, title bar, dock, etc.)
+                    // resets the cursor back to the default arrow.
+                    DesktopCursor.setShape(.default)
+                },
+                behavior: .opaque,
+                child: wallpaperWidget
+            )
+        }
+        if isSliding {
+            for layer in slideLayers {
+                children.append(Positioned(
+                    left: layer.dx, top: 0,
+                    width: screenWidth, height: screenHeight,
+                    child: makeWallpaper()))
+            }
+        } else {
+            children.append(makeWallpaper())
+        }
+
+        // [0.5] AI Space fleet UI (Murmuration) — rendered per slide layer,
+        // like the wallpaper, so entering/leaving slides it with the space.
+        // Ordinary spaces contribute nothing; the ValueKey keeps the fleet's
+        // element (and its terminal focus state) alive across slide/steady
+        // transitions.
+        if !_missionControlOpen {
+            for layer in slideLayers {
+                guard let space = windowManager.spaces.first(where: { $0.id == layer.spaceId }),
+                      space.isAgent else { continue }
+                children.append(Positioned(
+                    key: ValueKey("agent-space"),
+                    left: layer.dx, top: 0,
+                    width: screenWidth, height: screenHeight,
+                    child: _buildAgentSpace(context)))
+            }
+        }
+
+        // BISECT: temporarily removed search pill + date label
+        // to test whether they trigger the Chrome DMA-BUF crash.
+
+        // Build status bar and dock widgets — both always render above windows
+        // so the desktop's status bar (clock) stays visible. Fullscreen windows
+        // are positioned below the status bar to avoid overlapping it.
+        // Status bar gets a macOS-menu-bar frost: blurred + saturated
+        // backdrop under a faint dark tint and a bottom hairline, so the
+        // clock/icons stay legible over any wallpaper or window content.
+        let statusBarWidget: Widget = Positioned(
+            left: 0.0, top: 0.0, right: 0.0,
+            height: DesktopTheme.kStatusBarHeight,
+            child: ClipRect(
+                child: BackdropFilter(
+                    filter: ImageFilterFactory.compose(
+                        outer: ColorFilter(matrix: _saturationMatrix(1.15)),
+                        inner: ImageFilterFactory.blur(sigmaX: 18, sigmaY: 18)
+                    ),
+                    child: DecoratedBox(
+                        decoration: BoxDecoration(
+                            color: shellTheme.barTint,
+                            border: Border(
+                                bottom: BorderSide(color: shellTheme.barHairline, width: 1)
+                            )
+                        ),
+                        child: _buildStatusBar()
+                    )
+                )
+            )
+        )
+
+        // Dock geometry under the current hover magnification. The container
+        // is taller than the pill: magnified icons and the app-name label
+        // grow upward out of it, macOS style.
+        let dockMetrics = _dockMetrics()
+        let dockWidget: Widget = Positioned(
+            left: dockMetrics.left,
+            bottom: DesktopTheme.kDockBottomMargin,
+            width: dockMetrics.width, height: DesktopTheme.kDockContainerHeight,
+            child: _buildDock(
+                appIds: _dockDisplayApps, metrics: dockMetrics,
+                dockTop: screenHeight - DesktopTheme.kDockBottomMargin
+                    - DesktopTheme.kDockHeight)
+        )
+
+        // Whether the topmost visible window is fullscreen — gates the
+        // macOS-style auto-hide of the desktop status bar.
+        let topmostWindow = windowManager.visibleWindows.last
+        let isFullscreenMode = topmostWindow?.isFullscreen ?? false
+        if !isFullscreenMode && _topBarRevealed {
+            // No fullscreen window any more — reset reveal state.
+            _topBarRevealed = false
+        }
+
+        // [1..N] Visible windows — both spaces' windows during a slide,
+        // each offset by its layer's dx. None while Mission Control is up:
+        // every window renders exactly once, inside the exposé.
+        let layerWindows: [(win: WindowInfo, layerDx: Double)] = _missionControlOpen
+            ? []
+            : slideLayers.flatMap { layer in
+                windowManager.visibleWindows(inSpaceId: layer.spaceId).map { ($0, layer.dx) }
+            }
+        var liveWindowIds = Set<String>()
+        for (win, layerDx) in layerWindows {
+            let winId = win.id
+            liveWindowIds.insert(winId)
+            let isFocused = win.id == windowManager.focusedWindowId
+            // Only the topmost fullscreen window gets the reveal flag — other
+            // windows underneath are not affected.
+            let windowTopBarRevealed = win.isFullscreen && win.id == topmostWindow?.id
+                ? _topBarRevealed : false
+
+            // Reuse cached widget when only position changed (drag).
+            // updateChild's identity check (===) skips the entire subtree rebuild.
+            let window: DesktopWindow
+            if let cached = _windowChildCache[winId],
+               cached.isFocused == isFocused,
+               cached.width == win.rect.width,
+               cached.height == win.rect.height,
+               cached.isFullscreen == win.isFullscreen,
+               cached.isTopBarRevealed == windowTopBarRevealed {
+                window = cached.widget
+            } else {
+                window = DesktopWindow(
+                    windowInfo: win,
+                    isFocused: isFocused,
+                    isTopBarRevealed: windowTopBarRevealed,
+                    onBringToFront: { [self] in
+                        setState {
+                            windowManager.bringToFront(winId)
+                        }
+                    },
+                    onMove: { [self] (delta: Offset) in
+                        // Tiled windows are glued to their tiles.
+                        if windowManager.tilingEnabled { return }
+                        setState {
+                            windowManager.moveWindowByDelta(winId, delta: delta)
+                        }
+                        _checkEdgeCarry(winId)
+                    },
+                    onResize: { [self] (edge: ResizeEdge, delta: Offset) in
+                        if windowManager.tilingEnabled { return }
+                        setState {
+                            windowManager.resizeWindow(winId, edge: edge, delta: delta)
+                        }
+                    },
+                    onMinimize: { [self] in
+                        // Deferred: the scale-effect zoom into the dock plays
+                        // first; _finalizeWindowMinimize hides the window.
+                        setState {
+                            _minimizingWindows.insert(winId)
+                        }
+                    },
+                    onMaximize: { [self] in
+                        let wasFullscreen = windowManager.windows.first(where: { $0.id == winId })?.isFullscreen ?? false
+                        setState {
+                            // The zoom animates win.rect — configure clients
+                            // from the FINAL rect it returns.
+                            guard let finalRect = _fullscreenWithZoom(winId) else { return }
+                            guard let w = windowManager.windows.first(where: { $0.id == winId }) else { return }
+                            if let surfId = waylandIntegration?.surfaceId(forWindowId: winId) {
+                                if w.isFullscreen {
+                                    // Entering fullscreen — content fills the window;
+                                    // title bar overlays on top only when revealed.
+                                    waylandIntegration?.sendFullscreenResize(
+                                        surfaceId: surfId,
+                                        width: Int(finalRect.width),
+                                        height: Int(finalRect.height))
+                                } else {
+                                    // Exiting fullscreen → restored to pre-fullscreen rect
+                                    let contentW = finalRect.width
+                                    let contentH = finalRect.height - DesktopTheme.kTitleBarHeight
+                                    if wasFullscreen {
+                                        waylandIntegration?.sendExitFullscreen(
+                                            surfaceId: surfId,
+                                            width: Int(contentW),
+                                            height: Int(contentH))
+                                    } else {
+                                        w.onContentResize?(contentW, contentH)
+                                    }
+                                }
+                            } else {
+                                // DMA-BUF child process (Settings, viewer, …):
+                                // without this it keeps its old buffer and the
+                                // shell stretches it — 2x-scaled UI whose
+                                // hit-testing no longer matches the screen.
+                                let contentH = w.isFullscreen
+                                    ? finalRect.height
+                                    : finalRect.height - DesktopTheme.kTitleBarHeight
+                                if finalRect.width > 0 && contentH > 0 {
+                                    w.onContentResize?(finalRect.width, contentH)
+                                }
+                            }
+                        }
+                    },
+                    onClose: { [self] in
+                        // Teardown is deferred to _finalizeWindowClose (fired
+                        // by the close animation) so the shrink-out plays
+                        // over live window content.
+                        setState {
+                            _closingWindows.insert(winId)
+                        }
+                    },
+                    onTitleBarDoubleTap: { [self] in
+                        // macOS-style: double-click toggles maximized state.
+                        // Skip if the window is in fullscreen (handled by the
+                        // green button there).
+                        guard let w = windowManager.windows.first(where: { $0.id == winId }),
+                              !w.isFullscreen else { return }
+                        setState {
+                            windowManager.maximizeWindow(
+                                winId,
+                                screenWidth: screenWidth,
+                                screenHeight: screenHeight
+                            )
+                        }
+                        // Tell the wayland client about its new content size.
+                        let contentW = w.rect.width
+                        let contentH = w.rect.height - DesktopTheme.kTitleBarHeight
+                        if contentW > 0 && contentH > 0 {
+                            w.onContentResize?(contentW, contentH)
+                        }
+                    }
+                )
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed)
+            }
+
+            // Open zoom plays only when the window is genuinely appearing
+            // (new window, restore from minimize) — NOT when it merely
+            // mounts because a space switch brought its desktop on screen.
+            let animateOpen = win.pendingOpenAnimation
+            win.pendingOpenAnimation = false
+            // An edge-drag-carried window ignores the slide offset: it
+            // stays pinned under the cursor while the desktop slides.
+            let windowDx = win.id == _spaceSlide?.carried ? 0 : layerDx
+            children.append(
+                Positioned(
+                    key: ValueKey(winId),
+                    left: win.rect.left + windowDx,
+                    top: win.rect.top,
+                    width: win.rect.width,
+                    height: win.rect.height,
+                    // Zoom out of the dock icon on first appearance (and on
+                    // restore from minimize — both mount a fresh element);
+                    // shrink-out on close, with teardown deferred to the
+                    // animation's end.
+                    child: WindowLifecycleAnimation(
+                        closing: _closingWindows.contains(winId),
+                        minimizing: _minimizingWindows.contains(winId),
+                        animateOpen: animateOpen,
+                        onClosed: { [self] in _finalizeWindowClose(winId) },
+                        onMinimized: { [self] in _finalizeWindowMinimize(winId) },
+                        zoomFrom: _dockIconCenter(appId: win.appId, title: win.title).map {
+                            Offset($0.dx - (win.rect.left + win.rect.width / 2),
+                                   $0.dy - (win.rect.top + win.rect.height / 2))
+                        },
+                        child: window
+                    )
+                )
+            )
+        }
+
+        // Evict closed windows from cache
+        _windowChildCache = _windowChildCache.filter { liveWindowIds.contains($0.key) }
+
+        // [N+1..] Popups (rendered on top of windows, no decorations)
+        // Sort by nesting depth so children render on top of parents.
+        #if os(Linux)
+        let sortedPopups = _missionControlOpen ? [] : popups.sorted { a, b in
+            // Count nesting depth by walking parent chain
+            func depth(_ p: (key: String, value: (textureId: Int, parentSurfaceId: UInt32, x: Double, y: Double, width: Double, height: Double, mapped: Bool))) -> Int {
+                var d = 0
+                var sid = p.value.parentSurfaceId
+                while let parent = popups["popup-\(sid)"] {
+                    d += 1
+                    sid = parent.parentSurfaceId
+                }
+                return d
+            }
+            return depth(a) < depth(b)
+        }
+        for (popupId, popup) in sortedPopups {
+            if !popup.mapped { continue }
+            // Walk the parent chain to compute absolute popup position.
+            // For nested popups (submenu of a menu), accumulate positions up to the toplevel.
+            // Also track the immediate parent popup's absolute position for flip.
+            var absX = popup.x
+            var absY = popup.y
+            var parentSurfaceId = popup.parentSurfaceId
+            var immediateParentAbsX = 0.0
+            var immediateParentWidth = 0.0
+            var isFirstParent = true
+            var popupSpaceId: Int? = nil
+            while true {
+                // Check if parent is another popup
+                let parentPopupId = "popup-\(parentSurfaceId)"
+                if let parentPopup = popups[parentPopupId] {
+                    if isFirstParent {
+                        // Compute the immediate parent's absolute position (recursively)
+                        // by noting we'll add its x to absX next.
+                        immediateParentWidth = parentPopup.width
+                        isFirstParent = false
+                    }
+                    absX += parentPopup.x
+                    absY += parentPopup.y
+                    parentSurfaceId = parentPopup.parentSurfaceId
+                    continue
+                }
+                // Parent is a toplevel window — add window position
+                if let wl = waylandIntegration,
+                   let parentWinId = wl.windowId(forSurfaceId: parentSurfaceId),
+                   let parentWin = windowManager.windows.first(where: { $0.id == parentWinId }) {
+                    absX += parentWin.rect.left
+                    absY += parentWin.rect.top + DesktopTheme.kTitleBarHeight
+                    popupSpaceId = parentWin.spaceId
+                    if isFirstParent {
+                        // Direct child of toplevel — no flip needed for x
+                        immediateParentAbsX = parentWin.rect.left
+                        immediateParentWidth = parentWin.rect.width
+                    }
+                }
+                break
+            }
+
+            // Popups live on their toplevel's space: a menu opened on space 1
+            // must not float over space 2 after a switch.
+            if let sid = popupSpaceId, sid != windowManager.activeSpace.id { continue }
+
+            // Compute immediate parent popup's absolute x for flip.
+            if !isFirstParent {
+                immediateParentAbsX = absX - popup.x
+            }
+
+            // Constraint adjustment: keep popups within screen bounds.
+            if absX + popup.width > screenWidth {
+                if !isFirstParent {
+                    // Nested popup (submenu): flip to left side of parent popup.
+                    absX = immediateParentAbsX - popup.width
+                } else {
+                    // Direct child of toplevel: slide left to fit.
+                    absX = screenWidth - popup.width
+                }
+            }
+            if absX < 0 { absX = 0 }
+            if absY + popup.height > screenHeight {
+                absY = screenHeight - popup.height
+            }
+            if absY < 0 { absY = 0 }
+
+            let texture: Widget = TextureWidget(textureId: popup.textureId, filterQuality: .none)
+            // Flip Y for Wayland surfaces
+            let flipped: Widget = Transform(
+                transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
+                alignment: Alignment.center,
+                child: texture
+            )
+
+            // Wrap in Listener to forward pointer events to popup surface.
+            let popupChild: Widget
+            if let wl = waylandIntegration,
+               let surfaceId = wl.surfaceId(forWindowId: popupId) {
+                popupChild = Listener(
+                    onPointerDown: { event in
+                        wl.sendPointerEvent(
+                            surfaceId: surfaceId,
+                            phase: 2,
+                            x: event.localPosition.dx,
+                            y: event.localPosition.dy,
+                            buttons: Int64(event.buttons)
+                        )
+                    },
+                    onPointerMove: { event in
+                        wl.sendPointerEvent(
+                            surfaceId: surfaceId,
+                            phase: 3,
+                            x: event.localPosition.dx,
+                            y: event.localPosition.dy,
+                            buttons: Int64(event.buttons)
+                        )
+                    },
+                    onPointerUp: { event in
+                        wl.sendPointerEvent(
+                            surfaceId: surfaceId,
+                            phase: 1,
+                            x: event.localPosition.dx,
+                            y: event.localPosition.dy,
+                            buttons: 0
+                        )
+                    },
+                    onPointerHover: { event in
+                        wl.sendPointerEvent(
+                            surfaceId: surfaceId,
+                            phase: 6,
+                            x: event.localPosition.dx,
+                            y: event.localPosition.dy,
+                            buttons: 0
+                        )
+                    },
+                    onPointerSignal: { event in
+                        if let scroll = event as? PointerScrollEvent {
+                            wl.sendScrollEvent(
+                                surfaceId: surfaceId,
+                                x: scroll.localPosition.dx,
+                                y: scroll.localPosition.dy,
+                                scrollDeltaX: scroll.scrollDelta.dx,
+                                scrollDeltaY: scroll.scrollDelta.dy
+                            )
+                        }
+                    },
+                    behavior: .opaque,
+                    child: flipped
+                )
+            } else {
+                popupChild = flipped
+            }
+
+            children.append(
+                Positioned(
+                    key: ValueKey(popupId),
+                    left: absX,
+                    top: absY,
+                    width: popup.width,
+                    height: popup.height,
+                    child: popupChild
+                )
+            )
+        }
+        #endif
+
+        // Status bar renders ON TOP of windows. In fullscreen, the reserved
+        // top strip is filled with solid black (matching the status-bar
+        // background, hiding the wallpaper underneath) and the status-bar
+        // items only appear while revealed. In non-fullscreen, the status
+        // bar is transparent over the wallpaper as usual.
+        if _missionControlOpen {
+            // Mission Control replaces the desktop layers: no status bar
+            // (the spaces strip sits in that zone); the dock stays, above.
+            children.append(
+                Positioned(fill: (), child: _buildMissionControl(context))
+            )
+        } else if isFullscreenMode {
+            children.append(
+                Positioned(
+                    left: 0, top: 0, right: 0,
+                    height: DesktopTheme.kStatusBarHeight,
+                    child: ColoredBox(
+                        color: Color(0xFF000000),
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+            if _topBarRevealed {
+                children.append(statusBarWidget)
+            }
+        } else {
+            children.append(statusBarWidget)
+        }
+        // The dock launches desktop apps — meaningless in the AI Space, where
+        // every window belongs to an agent. Hide it there, cross-fading with
+        // the space slide (the model flips at slide start, so the fade tracks
+        // the incoming space's progress rather than snapping).
+        let agentTarget = windowManager.activeSpace.isAgent
+        var dockOpacity = agentTarget ? 0.0 : 1.0
+        if let s = _spaceSlide, let curve = _spaceSlideCurve,
+           let from = windowManager.spaces.first(where: { $0.id == s.fromId }),
+           from.isAgent != agentTarget {
+            // Leaving the AI Space fades the dock in; entering fades it out.
+            dockOpacity = agentTarget ? 1.0 - curve.value : curve.value
+        }
+        if dockOpacity > 0.01 {
+            children.append(dockOpacity < 0.99
+                ? Positioned(
+                    left: dockMetrics.left,
+                    bottom: DesktopTheme.kDockBottomMargin,
+                    width: dockMetrics.width,
+                    height: DesktopTheme.kDockContainerHeight,
+                    child: IgnorePointer(child: Opacity(
+                        opacity: dockOpacity,
+                        child: _buildDock(
+                            appIds: _dockDisplayApps, metrics: dockMetrics,
+                            dockTop: screenHeight - DesktopTheme.kDockBottomMargin
+                                - DesktopTheme.kDockHeight))))
+                : dockWidget)
+        }
+
+        // Top-edge cursor sensors for macOS-style auto-hide. While in
+        // fullscreen mode, two translucent Listeners sit on top of everything:
+        //   - Top region: hovering inside reveals the bars.
+        //   - Bottom region: hovering inside hides the bars.
+        // Using `.translucent` lets the events also reach the window content
+        // below so the focused Wayland/X11 client still gets hover events.
+        if isFullscreenMode && !_missionControlOpen {
+            // Collapsed: a 4-px sliver at the very top. Expanded: covers the
+            // status bar + the title-bar overlay so the user can hover into
+            // the title bar (and its traffic-light buttons) without the
+            // cursor "exiting" the sensor zone.
+            let revealZoneH = _topBarRevealed
+                ? DesktopTheme.kStatusBarHeight + DesktopTheme.kTitleBarHeight
+                : 4.0
+            children.append(
+                Positioned(
+                    left: 0, top: 0, right: 0,
+                    height: revealZoneH,
+                    child: Listener(
+                        onPointerHover: { [self] _ in
+                            if !_topBarRevealed {
+                                setState { _topBarRevealed = true }
+                            }
+                        },
+                        behavior: .translucent,
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+            children.append(
+                Positioned(
+                    left: 0, top: revealZoneH, right: 0, bottom: 0,
+                    child: Listener(
+                        onPointerHover: { [self] _ in
+                            if _topBarRevealed {
+                                setState { _topBarRevealed = false }
+                            }
+                        },
+                        behavior: .translucent,
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+        }
+
+        // Context menu (shown at right-click position)
+        if let pos = contextMenuPosition {
+            _appendDismissBarrier(&children) { [self] in
+                self.contextMenuPosition = nil
+            }
+
+            children.append(
+                Positioned(
+                    left: pos.dx,
+                    top: pos.dy,
+                    child: SizedBox(
+                        width: 200,
+                        child: _buildContextMenu()
+                    )
+                )
+            )
+        }
+
+        // Dock icon context menu (right-click on a dock icon), anchored
+        // above the icon's slot, macOS style.
+        if let menuAppId = _dockMenuAppId {
+            _appendDismissBarrier(&children) { [self] in
+                self._dockMenuAppId = nil
+            }
+            let menuWidth = 200.0
+            let menuLeft = max(8, min(_dockMenuAnchorX - menuWidth / 2,
+                                      screenWidth - menuWidth - 8))
+            children.append(
+                Positioned(
+                    left: menuLeft,
+                    bottom: DesktopTheme.kDockBottomMargin
+                        + DesktopTheme.kDockHeight + 10,
+                    child: SizedBox(
+                        width: menuWidth,
+                        child: _buildDockIconMenu(for: menuAppId)
+                    )
+                )
+            )
+        }
+
+        // IME panel: preedit + candidates while composing (shell-drawn).
+        // Anchored just below the focused child's reported caret when
+        // available (macOS style); falls back to floating above the dock.
+        if _imeEnabled && (!_imePreedit.isEmpty || !_imeCandidates.isEmpty) {
+            var anchored = false
+            // Wayland clients: anchor at the reported text-input cursor rect.
+            if let ti = _imeWaylandTI, ti.enabled,
+               let focusedId = windowManager.focusedWindowId,
+               focusedId == ti.windowId,
+               let win = windowManager.windows.first(where: { $0.id == focusedId }) {
+                let cx = win.rect.left + ti.rect.left
+                let cy = win.rect.top + DesktopTheme.kTitleBarHeight
+                    + ti.rect.top + ti.rect.height + 6
+                if cy < screenHeight - 200 {
+                    children.append(Positioned(
+                        left: max(8, min(cx, screenWidth - 360)),
+                        top: cy,
+                        child: _buildImePanel()
+                    ))
+                    anchored = true
+                }
+            }
+            if !anchored,
+               let caret = _imeCaret, caret.visible,
+               let focusedId = windowManager.focusedWindowId,
+               let win = windowManager.windows.first(where: { $0.id == focusedId }),
+               let texId = processTextureIds[win.appId],
+               texId == caret.textureId {
+                let cx = win.rect.left + caret.rect.left
+                let cy = win.rect.top + DesktopTheme.kTitleBarHeight
+                    + caret.rect.top + caret.rect.height + 6
+                if cy < screenHeight - 200 {
+                    children.append(Positioned(
+                        left: max(8, min(cx, screenWidth - 360)),
+                        top: cy,
+                        child: _buildImePanel()
+                    ))
+                    anchored = true
+                }
+            }
+            if !anchored {
+                children.append(Positioned(
+                    left: 0, right: 0,
+                    bottom: DesktopTheme.kDockBottomMargin
+                        + DesktopTheme.kDockContainerHeight + 12,
+                    child: Center(child: _buildImePanel())
+                ))
+            }
+        }
+
+        // Status bar popup (shown below status bar when an icon is tapped)
+        if activeStatusBarPopup != nil {
+            _appendDismissBarrier(&children) { [self] in
+                self.activeStatusBarPopup = nil
+            }
+
+            // Position popup below status bar, aligned with the tapped icon
+            // (geometry shared with the liquid-glass shader via
+            // _statusPopupGeometry).
+            let popup = activeStatusBarPopup!
+            let geo = _statusPopupGeometry(popup)
+            children.append(
+                Positioned(
+                    left: geo.left,
+                    top: DesktopTheme.kStatusBarHeight + 1,
+                    child: _buildStatusBarPopup()
+                )
+            )
+        }
+
+        // Full-screen app launcher (Launchpad), opened from the dock grid icon.
+        // Above windows + dock; tap an app to launch it, tap empty space to
+        // dismiss.
+        if _launcherOpen {
+            children.append(
+                Positioned(
+                    fill: (),
+                    child: AppLauncher(
+                        apps: _launcherFilteredApps(),
+                        query: _launcherQuery,
+                        onLaunch: { [self] appId in
+                            setState { _launcherOpen = false; _launcherQuery = "" }
+                            _launchOrFocusApp(appId)
+                        },
+                        onDismiss: { [self] in
+                            setState { _launcherOpen = false; _launcherQuery = "" }
+                        }
+                    )
+                )
+            )
+        }
+
+        // Floating dock icon follows cursor during drag
+        if _dockDragActive, let dragIdx = _dockDragIndex, dragIdx < dockAppOrder.count {
+            let dragAppId = dockAppOrder[dragIdx]
+            let floatingIcon = _buildDockIconContent(
+                appId: dragAppId, iconType: _iconType(for: dragAppId))
+            let iconSize = DesktopTheme.kDockIconSize
+            children.append(
+                Positioned(
+                    left: _dockDragCurrentX - iconSize / 2,
+                    top: _dockDragCurrentY - iconSize / 2,
+                    width: iconSize,
+                    height: iconSize,
+                    child: IgnorePointer(
+                        child: floatingIcon
+                    )
+                )
+            )
+        }
+
+        // While a space slide runs, an opaque full-screen barrier swallows
+        // all pointer input (macOS: the desktop is inert during the switch);
+        // it lifts automatically when the slide completes.
+        if isSliding {
+            children.append(
+                Positioned(
+                    fill: (),
+                    child: Listener(
+                        behavior: .opaque,
+                        child: ColoredBox(
+                            color: Color(0x00000000),
+                            child: SizedBox(expand: ())
+                        )
+                    )
+                )
+            )
+        }
+
+        // Frame-tick pixel: 1px in the bottom-left corner whose (invisible)
+        // alpha alternates with _frameTick, guaranteeing real damage — and
+        // therefore a present — whenever the tooling requests a frame.
+        children.append(
+            Positioned(
+                left: 0, top: screenHeight - 1, width: 1, height: 1,
+                child: IgnorePointer(
+                    child: ColoredBox(
+                        color: Color(_frameTick % 2 == 0 ? 0x01000000 : 0x02000000),
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+        )
+
+        // Topmost translucent hover listener: drives dock magnification from
+        // the global pointer position with a purely geometric test, so it
+        // keeps working (and relaxing) no matter what is under the cursor.
+        // The child must be a bare SizedBox: it sizes the listener without
+        // claiming hits (a ColoredBox — even fully transparent — hit-tests
+        // opaque and would swallow every click for the widgets below).
+        children.append(
+            Positioned(
+                fill: (),
+                child: Listener(
+                    // Pressed-pointer tracking for edge-drag carry: this
+                    // listener is in every pointer's hit path, so it keeps
+                    // seeing move events while a window drag is in flight.
+                    // No setState — the position feeds the dwell check only.
+                    onPointerMove: { [self] event in
+                        _dragPointerPos = event.position
+                    },
+                    onPointerUp: { [self] _ in
+                        _cancelEdgeCarry()
+                    },
+                    onPointerHover: { [self] event in
+                        _updateDockHover(x: event.position.dx, y: event.position.dy)
+                    },
+                    behavior: .translucent,
+                    child: SizedBox(expand: ())
+                )
+            )
+        )
+
+        // Keyed by theme: an appearance switch remounts the whole shell
+        // tree. In-place recolor proved unreliable (title bars rebuilt with
+        // the new theme but their stale layers kept compositing — a
+        // framework layer-retention quirk); a remount repaints everything
+        // from scratch and the switch is a rare, deliberate action. Window
+        // open-zooms stay silent (pendingOpenAnimation already consumed).
+        return Stack(
+            key: ValueKey("shell-\(shellTheme.name)"),
+            fit: .expand,
+            children: children
+        )
+    }
+
+    // MARK: - Multi-output virtual desktop (scale-to-fit dev harness)
+
+    /// Renders the whole virtual desktop — every output with its own wallpaper
+    /// and menu bar, all windows in virtual coordinates, and the dock on the
+    /// primary — scaled to fit the single physical panel (FittedBox .contain).
+    /// This is the hardware-free harness for multi-monitor layout work; a
+    /// production build spins one Flutter view per real output instead.
+    private func _buildVirtualDesktopOverview(_ dl: DisplayLayout) -> Widget {
+        let vb = dl.virtualBounds
+        let ox = vb.left, oy = vb.top
+
+        var layers: [Widget] = []
+
+        // Wallpaper per output.
+        for o in dl.outputs {
+            layers.append(Positioned(
+                left: o.logicalLeft - ox, top: o.logicalTop - oy,
+                width: o.logicalWidth, height: o.logicalHeight,
+                child: _overviewWallpaper()))
+        }
+
+        // Windows, positioned in virtual coordinates. A window straddling a
+        // seam therefore renders across both outputs. Dragging works: the
+        // FittedBox transform maps pointer motion back into virtual space.
+        for win in windowManager.visibleWindows {
+            let winId = win.id
+            let isFocused = winId == windowManager.focusedWindowId
+            layers.append(Positioned(
+                key: ValueKey("ov-\(winId)"),
+                left: win.rect.left - ox, top: win.rect.top - oy,
+                width: win.rect.width, height: win.rect.height,
+                child: _makeOverviewWindow(win, isFocused: isFocused)))
+        }
+
+        // Menu bar per output (macOS: one per display).
+        for o in dl.outputs {
+            layers.append(Positioned(
+                left: o.logicalLeft - ox, top: o.logicalTop - oy,
+                width: o.logicalWidth, height: DesktopTheme.kStatusBarHeight,
+                child: _overviewStatusBar()))
+        }
+
+        // Dock on the primary output (macOS: single dock, homes on primary).
+        let p = dl.primary
+        let dockMetrics = _dockMetrics()   // centered on screenWidth == primary logical width
+        layers.append(Positioned(
+            left: (p.logicalLeft - ox) + dockMetrics.left,
+            top: (p.logicalBottom - oy) - DesktopTheme.kDockBottomMargin - DesktopTheme.kDockContainerHeight,
+            width: dockMetrics.width, height: DesktopTheme.kDockContainerHeight,
+            child: _buildDock(
+                appIds: _dockDisplayApps, metrics: dockMetrics,
+                dockTop: p.logicalHeight - DesktopTheme.kDockBottomMargin - DesktopTheme.kDockHeight)))
+
+        // Bezel + label per output (non-interactive overlay on top).
+        for o in dl.outputs {
+            layers.append(Positioned(
+                left: o.logicalLeft - ox, top: o.logicalTop - oy,
+                width: o.logicalWidth, height: o.logicalHeight,
+                child: IgnorePointer(child: _overviewBezel(o))))
+        }
+
+        let virtualStack = SizedBox(
+            width: vb.width, height: vb.height,
+            child: Stack(fit: .expand, children: layers))
+
+        return Stack(
+            fit: .expand,
+            children: [
+                Positioned(fill: (), child: ColoredBox(color: Color(0xFF0B0E13))),
+                Positioned(fill: (), child: FittedBox(
+                    fit: .contain, alignment: Alignment.center, child: virtualStack)),
+            ])
+    }
+
+    private func _overviewWallpaper() -> Widget {
+        #if os(Linux)
+        if wallpaperPreset == .still, wallpaperTextureId >= 0 {
+            return TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low)
+        }
+        #endif
+        return DesktopBackground(preset: wallpaperPreset)
+    }
+
+    private func _overviewStatusBar() -> Widget {
+        ClipRect(
+            child: BackdropFilter(
+                filter: ImageFilterFactory.compose(
+                    outer: ColorFilter(matrix: _saturationMatrix(1.15)),
+                    inner: ImageFilterFactory.blur(sigmaX: 18, sigmaY: 18)),
+                child: DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: Color(0x2E101014),
+                        border: Border(bottom: BorderSide(color: Color(0x14FFFFFF), width: 1))),
+                    child: _buildStatusBar())))
+    }
+
+    private func _overviewBezel(_ o: DisplayOutput) -> Widget {
+        let borderColor = o.isPrimary ? Color(0xFFE6AB50) : Color(0x55FFFFFF)
+        let scaleStr = String(format: "%.1f", o.scale)
+        let label = "\(o.name)   \(o.physicalWidth)×\(o.physicalHeight) @\(scaleStr)×" +
+            (o.isPrimary ? "   • primary" : "")
+        return Stack(children: [
+            Positioned(fill: (), child: DecoratedBox(
+                decoration: BoxDecoration(border: Border.all(color: borderColor, width: 2)))),
+            Positioned(
+                left: 10, top: DesktopTheme.kStatusBarHeight + 8,
+                child: DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: Color(0x99000000),
+                        borderRadius: BorderRadius.circular(5)),
+                    child: Padding(
+                        padding: EdgeInsets(left: 8, top: 4, right: 8, bottom: 4),
+                        child: Text(label, style: TextStyle(
+                            color: Color(0xFFFFFFFF), fontSize: 12, fontWeight: .w500))))),
+        ])
+    }
+
+    /// A movable/resizable/closable window for the overview harness (skips the
+    /// minimize/maximize/lifecycle-animation machinery of the single-screen path).
+    private func _makeOverviewWindow(_ win: WindowInfo, isFocused: Bool) -> Widget {
+        let winId = win.id
+        return DesktopWindow(
+            windowInfo: win,
+            isFocused: isFocused,
+            onBringToFront: { [self] in setState { windowManager.bringToFront(winId) } },
+            onMove: { [self] (delta: Offset) in
+                if windowManager.tilingEnabled { return }
+                setState { windowManager.moveWindowByDelta(winId, delta: delta) }
+            },
+            onResize: { [self] (edge: ResizeEdge, delta: Offset) in
+                if windowManager.tilingEnabled { return }
+                setState { windowManager.resizeWindow(winId, edge: edge, delta: delta) }
+            },
+            onMaximize: { [self] in
+                setState {
+                    windowManager.fullscreenWindow(winId, screenWidth: screenWidth, screenHeight: screenHeight)
+                }
+            },
+            onClose: { [self] in setState { _closingWindows.insert(winId) } },
+            onTitleBarDoubleTap: { [self] in
+                // Maximize to the window's OWNING output (derived from its rect).
+                setState {
+                    windowManager.maximizeWindow(winId, screenWidth: screenWidth, screenHeight: screenHeight)
+                }
+            })
+    }
+
+    // MARK: - Status Bar (macOS menu bar style, top)
+
+    private func _statusBarItem(icon: IconData, popup: StatusBarPopup) -> Widget {
+        let isActive = activeStatusBarPopup == popup
+        let bg: Widget = isActive
+            ? DecoratedBox(
+                decoration: BoxDecoration(
+                    color: shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(4)
+                ),
+                child: Padding(
+                    padding: EdgeInsets(left: 6, top: 2, right: 6, bottom: 2),
+                    child: MacosIcon(icon: icon, color: shellTheme.fgPrimary, size: 15)
+                )
+              )
+            : Padding(
+                padding: EdgeInsets(left: 6, top: 2, right: 6, bottom: 2),
+                child: MacosIcon(icon: icon, color: shellTheme.fgPrimary, size: 15)
+              )
+        return GestureDetector(
+            onTap: { [self] in
+                setState {
+                    activeStatusBarPopup = isActive ? nil : popup
+                    contextMenuPosition = nil
+                }
+            },
+            behavior: .opaque,
+            child: bg
+        )
+    }
+
+    private func _statusBarClockItem(dateString: String) -> Widget {
+        let isActive = activeStatusBarPopup == .clock
+        let textWidget = Text(
+            dateString,
+            style: TextStyle(
+                color: shellTheme.fgPrimary,
+                fontSize: 13,
+                fontWeight: isActive ? .w600 : .w400
+            )
+        )
+        let bg: Widget = isActive
+            ? DecoratedBox(
+                decoration: BoxDecoration(
+                    color: shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(4)
+                ),
+                child: Padding(
+                    padding: EdgeInsets(left: 8, top: 2, right: 8, bottom: 2),
+                    child: textWidget
+                )
+              )
+            : Padding(
+                padding: EdgeInsets(left: 8, top: 2, right: 8, bottom: 2),
+                child: textWidget
+              )
+        return GestureDetector(
+            onTap: { [self] in
+                setState {
+                    activeStatusBarPopup = isActive ? nil : .clock
+                    contextMenuPosition = nil
+                }
+            },
+            behavior: .opaque,
+            child: bg
+        )
+    }
+
+    private func _buildStatusBar() -> Widget {
+        let now = Date()
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "h:mm"
+        let timeString = timeFormatter.string(from: now)
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "EEE, MMM d"
+        let dateString = dateFormatter.string(from: now)
+        let combined = "\(timeString)   \(dateString)"
+
+        return Padding(
+            padding: EdgeInsets(left: 16, top: 0, right: 16, bottom: 0),
+            child: Row(
+                mainAxisAlignment: .spaceBetween,
+                crossAxisAlignment: .center,
+                children: [
+                    // Left: clock + date
+                    _statusBarClockItem(dateString: combined),
+                    // Right: wifi, battery
+                    Row(
+                        mainAxisSize: .min,
+                        crossAxisAlignment: .center,
+                        spacing: 2,
+                        children: [
+                            _statusBarItem(icon: CupertinoIcons.wifi, popup: .wifi),
+                            _statusBarItem(icon: CupertinoIcons.battery_100, popup: .battery),
+                        ]
+                    ),
+                ]
+            )
+        )
+    }
+
+    // MARK: - Status Bar Popups
+
+    private func _buildStatusBarPopup() -> Widget {
+        switch activeStatusBarPopup! {
+        case .wifi:
+            return _buildWifiPopup()
+        case .battery:
+            return _buildBatteryPopup()
+        case .clock:
+            return _buildClockPopup()
+        }
+    }
+
+    /// Fixed width and screen-left of each status popup — used both to
+    /// position the panel and to hand the liquid-glass shader its rect.
+    /// Anchors: status bar is padded 16 each side; each right-side icon item
+    /// is 27px wide (6+15+6) with a 2px gap, so battery's right edge sits at
+    /// 16 and wifi's at 45. The clock popup is left-anchored.
+    private func _statusPopupGeometry(_ popup: StatusBarPopup) -> (width: Double, left: Double) {
+        switch popup {
+        case .wifi:    return (280, screenWidth - 45 - 280)
+        case .battery: return (260, screenWidth - 16 - 260)
+        case .clock:   return (260, 16)
+        }
+    }
+
+    /// Records a popup panel's laid-out height (fires from MeasureSize during
+    /// layout — mutate state on the main queue, never synchronously).
+    private func _recordStatusPopupHeight(_ popup: StatusBarPopup, _ size: Size) {
+        if abs((_statusPopupHeights[popup] ?? -1) - size.height) < 0.5 { return }
+        let h = size.height
+        let update: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.setState { self._statusPopupHeights[popup] = h }
+        }
+        // Same-thread hop out of the layout pass; the state is main-thread
+        // only, so the @Sendable coercion is safe (codebase idiom).
+        DispatchQueue.main.async(
+            execute: unsafeBitCast(update, to: (@Sendable () -> Void).self))
+    }
+
+    /// macOS-style popup panel — Liquid Glass: blurred + saturation-boosted
+    /// backdrop warped by the refraction shader, a translucent dark tint for
+    /// text legibility, and a thin white hairline. The shader needs the exact
+    /// panel rect; the height is intrinsic, so it comes from MeasureSize (the
+    /// first frame after opening renders with the plain-frost fallback).
+    private func _statusPopupPanel(popup: StatusBarPopup, children: [Widget]) -> Widget {
+        let radius: Double = 12
+        let geo = _statusPopupGeometry(popup)
+        let shader = _statusPopupHeights[popup] != nil ? _popupGlassShaderIfAvailable() : nil
+        let filter = _liquidGlassFilter(
+            shader: shader,
+            left: geo.left, top: DesktopTheme.kStatusBarHeight + 1,
+            width: geo.width, height: _statusPopupHeights[popup] ?? 0,
+            cornerRadius: radius,
+            blurSigma: 16, saturation: 1.15)
+        return MeasureSize(
+            onSize: { [weak self] size in
+                self?._recordStatusPopupHeight(popup, size)
+            },
+            child: SizedBox(
+                width: geo.width,
+                child: DecoratedBox(
+                    // Drop shadow lives outside the clip so it doesn't get blurred.
+                    decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(radius),
+                        boxShadow: [
+                            BoxShadow(color: shellTheme.popupShadow, offset: Offset(0, 6), blurRadius: 24),
+                        ]
+                    ),
+                    child: ClipRRect(
+                        borderRadius: BorderRadius.circular(radius),
+                        child: BackdropFilter(
+                            filter: filter,
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    // Translucent tint over the glass —
+                                    // lighter than plain frost needs, since the
+                                    // refraction already separates the panel.
+                                    color: shellTheme.popupTint,
+                                    // Hairline that defines the panel against any backdrop.
+                                    border: Border.all(
+                                        color: shellTheme.popupInnerBorder,
+                                        width: 1.0
+                                    ),
+                                    borderRadius: BorderRadius.circular(radius)
+                                ),
+                                child: Padding(
+                                    padding: EdgeInsets(all: 16),
+                                    child: Column(
+                                        mainAxisSize: .min,
+                                        crossAxisAlignment: .start,
+                                        children: children
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    /// Section header text (e.g. "Wi-Fi", "Battery")
+    private func _popupSectionHeader(_ title: String) -> Widget {
+        return Padding(
+            padding: EdgeInsets(bottom: 10),
+            child: Text(
+                title,
+                style: TextStyle(
+                    color: shellTheme.fgPrimary,
+                    fontSize: 15,
+                    fontWeight: .w600
+                )
+            )
+        )
+    }
+
+    /// A row with icon, label, and right-side value
+    private func _popupInfoRow(icon: IconData, label: String, value: String) -> Widget {
+        return Padding(
+            padding: EdgeInsets(top: 4, bottom: 4),
+            child: Row(
+                mainAxisSize: .max,
+                children: [
+                    MacosIcon(icon: icon, color: shellTheme.fgTertiary, size: 14),
+                    SizedBox(width: 8),
+                    Text(
+                        label,
+                        style: TextStyle(color: shellTheme.fgSecondary, fontSize: 13)
+                    ),
+                    Expanded(child: SizedBox(width: 0)),
+                    Text(
+                        value,
+                        style: TextStyle(color: shellTheme.fgTertiary, fontSize: 13)
+                    ),
+                ]
+            )
+        )
+    }
+
+    /// Horizontal divider for popup panels
+    private func _popupDivider() -> Widget {
+        return Padding(
+            padding: EdgeInsets(top: 8, bottom: 8),
+            child: SizedBox(
+                width: Double.infinity,
+                height: 1,
+                child: ColoredBox(color: shellTheme.popupDivider)
+            )
+        )
+    }
+
+    /// Clickable row item (e.g. "Network Preferences...")
+    private func _popupActionRow(label: String, onTap: @escaping () -> Void) -> Widget {
+        return GestureDetector(
+            onTap: onTap,
+            behavior: .opaque,
+            child: Padding(
+                padding: EdgeInsets(top: 6, bottom: 6),
+                child: Text(
+                    label,
+                    style: TextStyle(
+                        color: shellTheme.accent,
+                        fontSize: 13
+                    )
+                )
+            )
+        )
+    }
+
+    private func _buildWifiPopup() -> Widget {
+        return _statusPopupPanel(popup: .wifi, children: [
+            _popupSectionHeader("Wi-Fi"),
+            _popupInfoRow(icon: CupertinoIcons.wifi, label: "Network", value: "Connected"),
+            _popupInfoRow(icon: CupertinoIcons.antenna_radiowaves_left_right, label: "Signal", value: "Strong"),
+            _popupDivider(),
+            _popupSectionHeader("Known Networks"),
+            _popupInfoRow(icon: CupertinoIcons.wifi, label: "Home-5G", value: "Connected"),
+            _popupInfoRow(icon: CupertinoIcons.wifi, label: "Office-WiFi", value: "Saved"),
+            _popupDivider(),
+            _popupActionRow(label: "Network Settings...") { [self] in
+                setState {
+                    activeStatusBarPopup = nil
+                    _launchOrFocusApp("settings")
+                }
+            },
+        ])
+    }
+
+    private func _buildBatteryPopup() -> Widget {
+        // Battery popup with percentage bar
+        let batteryPercent = 85.0
+        let batteryBar: Widget = SizedBox(
+            height: 8,
+            child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: shellTheme.popupDivider,
+                    borderRadius: BorderRadius.circular(4)
+                ),
+                child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: FractionallySizedBox(
+                        widthFactor: batteryPercent / 100.0,
+                        child: DecoratedBox(
+                            decoration: BoxDecoration(
+                                color: Color(0xFF34C759),
+                                borderRadius: BorderRadius.circular(4)
+                            ),
+                            child: SizedBox(expand: ())
+                        )
+                    )
+                )
+            )
+        )
+
+        return _statusPopupPanel(popup: .battery, children: [
+            _popupSectionHeader("Battery"),
+            Row(
+                children: [
+                    MacosIcon(icon: CupertinoIcons.battery_100, color: Color(0xFF34C759), size: 22),
+                    SizedBox(width: 10),
+                    Text(
+                        "\(Int(batteryPercent))%",
+                        style: TextStyle(
+                            color: shellTheme.fgPrimary,
+                            fontSize: 24,
+                            fontWeight: .w300
+                        )
+                    ),
+                ]
+            ),
+            SizedBox(height: 10),
+            batteryBar,
+            SizedBox(height: 6),
+            Text(
+                "Power Source: AC Power",
+                style: TextStyle(color: shellTheme.fgTertiary, fontSize: 12)
+            ),
+            _popupDivider(),
+            _popupInfoRow(icon: CupertinoIcons.bolt, label: "Status", value: "Charging"),
+            _popupInfoRow(icon: CupertinoIcons.clock, label: "Full in", value: "~30 min"),
+            _popupDivider(),
+            _popupActionRow(label: "Battery Settings...") { [self] in
+                setState {
+                    activeStatusBarPopup = nil
+                    _launchOrFocusApp("settings")
+                }
+            },
+        ])
+    }
+
+    private func _buildClockPopup() -> Widget {
+        let now = Date()
+        let timeFmt = DateFormatter()
+        timeFmt.dateFormat = "h:mm"
+        let timeString = timeFmt.string(from: now)
+
+        let ampmFmt = DateFormatter()
+        ampmFmt.dateFormat = "a"
+        let ampmString = ampmFmt.string(from: now)
+
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "EEEE, MMMM d, yyyy"
+        let dateString = dateFmt.string(from: now)
+
+        return _statusPopupPanel(popup: .clock, children: [
+            Center(
+                child: Text(
+                    timeString,
+                    style: TextStyle(
+                        color: shellTheme.fgPrimary,
+                        fontSize: 48,
+                        fontWeight: .w200
+                    )
+                )
+            ),
+            Center(
+                child: Text(
+                    ampmString,
+                    style: TextStyle(
+                        color: shellTheme.fgTertiary,
+                        fontSize: 16,
+                        fontWeight: .w400
+                    )
+                )
+            ),
+            SizedBox(height: 6),
+            Center(
+                child: Text(
+                    dateString,
+                    style: TextStyle(
+                        color: shellTheme.fgSecondary,
+                        fontSize: 13
+                    )
+                )
+            ),
+        ])
+    }
+
+    // MARK: - Dock (macOS style, bottom centered)
+
+    /// The registry record behind an app id — the one place any fact about an
+    /// app is read from.
+    private func _record(_ appId: String) -> AppRecord? {
+        AppRegistry.shared.app(id: appId)
+    }
+
+    /// Icon tile base colour, from the catalog. One harmonized palette: every
+    /// colour sits in the same saturation/brightness band, so hue carries app
+    /// identity without any tile shouting over the rest — which is exactly why
+    /// it is a catalog field and not the app's own brand colour.
+    private func _dockIconColor(for appId: String) -> Color {
+        Color(Int(_record(appId)?.color ?? 0x5C8FD6) | 0xFF00_0000)
+    }
+
+    /// Human-readable label for dock tooltips and launcher tiles.
+    private func _dockAppLabel(for appId: String) -> String {
+        _record(appId)?.name ?? appId
+    }
+
+    /// The painted glyph an app falls back to when no host icon resolves.
+    private func _iconType(for appId: String) -> IconType {
+        Self.iconType(named: _record(appId)?.glyph ?? "externalApp")
+    }
+
+    /// Catalog `Glyph` name -> painter case. This is the only app-shaped
+    /// switch left in the shell, and it is about drawing rather than about
+    /// apps: adding an app never touches it unless that app wants a shape we
+    /// do not draw yet.
+    static func iconType(named name: String) -> IconType {
+        switch name {
+        case "settings":   return .settings
+        case "folder":     return .folder
+        case "document":   return .document
+        case "terminal":   return .terminal
+        case "calculator": return .calculator
+        case "store":      return .store
+        case "photos":     return .photos
+        case "chrome":     return .chrome
+        case "vscode":     return .vscode
+        case "apps":       return .apps
+        case "flutterApp": return .flutterApp
+        default:           return .externalApp
+        }
+    }
+
+    // MARK: Installed-app detection — launcher/dock show what's installed
+
+    /// True if the app is actually installed. The registry answers this: an
+    /// `app-install` record means the store put it there, and failing that a
+    /// catalog `Bins` path existing covers the app the user installed by hand.
+    static func appIsInstalled(_ id: String) -> Bool {
+        AppRegistry.shared.app(id: id)?.installed ?? false
+    }
+
+    /// Re-derive the dock after the registry changed.
+    ///
+    /// Drops anything no longer installed — a tile that launches nothing is
+    /// worse than an absent one — and restores any default-dock app that came
+    /// back, at its catalog position. That second half matters: an uninstall
+    /// followed by a reinstall must not cost the icon until the next login,
+    /// which is exactly what a plain prune does.
+    ///
+    /// The user's own arrangement survives both: drag order is untouched, and
+    /// an app they removed by hand stays removed.
+    func _reconcileDock() {
+        dockAppOrder.removeAll { !Self.appIsInstalled($0) }
+        for rec in AppRegistry.shared.defaultDock
+        where !dockAppOrder.contains(rec.id) && !_dockRemovedByUser.contains(rec.id) {
+            let order = rec.dockOrder ?? Int.max
+            let idx = dockAppOrder.firstIndex {
+                (AppRegistry.shared.app(id: $0)?.dockOrder ?? Int.max) > order
+            } ?? dockAppOrder.count
+            dockAppOrder.insert(rec.id, at: idx)
+        }
+    }
+
+    /// The launcher's app entries — installed apps only (no phantom tiles for
+    /// uninstalled apps), in catalog order, filtered by the current search query.
+    private func _launcherFilteredApps() -> [LauncherApp] {
+        let all = AppRegistry.shared.installedApps.map { rec in
+            LauncherApp(
+                appId: rec.id,
+                title: rec.name,
+                iconType: Self.iconType(named: rec.glyph),
+                bgColor: Color(Int(rec.color) | 0xFF00_0000),
+                textureId: iconTextures[rec.id]
+            )
+        }
+        let q = _launcherQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty { return all }
+        return all.filter { $0.title.lowercased().contains(q) }
+    }
+
+    /// Compute the target index the dragged icon should move to, based on drag delta.
+    private func _dockDragTargetIndex() -> Int {
+        guard let fromIndex = _dockDragIndex else { return 0 }
+        let dx = _dockDragCurrentX - _dockDragStartX
+        let slotWidth = DesktopTheme.kDockIconSize + DesktopTheme.kDockIconPadding
+        let slotShift = Int((dx / slotWidth).rounded())
+        let target = fromIndex + slotShift
+        return max(0, min(target, dockAppOrder.count - 1))
+    }
+
+    // MARK: Dock magnification geometry
+
+    /// Per-build dock geometry: slot scales/widths under the current hover
+    /// magnification, and the pill's resulting size and position. Slot 0 is
+    /// the launcher; slots 1... map to `dockAppOrder`. Scales are computed
+    /// against the *base* (unmagnified) geometry so cursor → scale is a
+    /// stable mapping with no layout feedback loop.
+    struct DockMetrics {
+        var scales: [Double]
+        var slotWidths: [Double]
+        var width: Double      // current pill width
+        var left: Double       // current pill left (kept centered)
+        var baseWidth: Double
+        var baseLeft: Double
+        var baseCenters: [Double]  // unmagnified slot centers, dock-local x
+    }
+
+    /// Gap that follows slot `i` (wider divider gap after the launcher).
+    private func _dockGapAfter(_ i: Int, slotCount: Int) -> Double {
+        if i >= slotCount - 1 { return 0 }
+        return i == 0 ? DesktopTheme.kDockIconPadding * 2 : DesktopTheme.kDockIconPadding
+    }
+
+    private func _dockMetrics() -> DockMetrics {
+        let hPad = DesktopTheme.kDockHorizontalPadding
+        // The launcher (slot 0) is a full tile like the app icons, so it uses
+        // the same base slot size and magnifies identically.
+        let baseSizes = [DesktopTheme.kDockIconSize]
+            + _dockDisplayApps.map { _ in DesktopTheme.kDockIconSize }
+        let n = baseSizes.count
+
+        var baseCenters: [Double] = []
+        var xOff = hPad
+        for (i, s) in baseSizes.enumerated() {
+            baseCenters.append(xOff + s / 2)
+            xOff += s + _dockGapAfter(i, slotCount: n)
+        }
+        let baseWidth = xOff + hPad
+        let baseLeft = (screenWidth - baseWidth) / 2
+
+        // macOS-style cosine falloff around the cursor. Suspended while a
+        // drag reorder is in progress so the drag math stays in base units.
+        var scales = [Double](repeating: 1.0, count: n)
+        if let hx = _dockHoverX, !_dockDragActive {
+            let r = DesktopTheme.kDockMagnifyRadius
+            let boost = DesktopTheme.kDockMagnifyMaxScale - 1.0
+            for i in 0..<n {
+                let d = abs(hx - (baseLeft + baseCenters[i]))
+                if d < r {
+                    scales[i] = 1.0 + boost * (0.5 + 0.5 * cos(.pi * d / r))
+                }
+            }
+        }
+
+        let slotWidths = zip(baseSizes, scales).map { $0 * $1 }
+        var width = 2 * hPad + slotWidths.reduce(0, +)
+        for i in 0..<n { width += _dockGapAfter(i, slotCount: n) }
+        return DockMetrics(
+            scales: scales, slotWidths: slotWidths,
+            width: width, left: (screenWidth - width) / 2,
+            baseWidth: baseWidth, baseLeft: baseLeft,
+            baseCenters: baseCenters)
+    }
+
+    /// Global center of the dock icon that owns a window (direct appId match,
+    /// or Chrome/VS Code by window title) — the origin of the open zoom.
+    private func _dockIconCenter(appId: String, title: String) -> Offset? {
+        let owner = title.isEmpty ? nil : AppRegistry.shared.app(forTitle: title)?.id
+        let idx = _dockDisplayApps.firstIndex { id in
+            id == appId || id == owner
+        }
+        guard let idx else { return nil }
+        let m = _dockMetrics()
+        let x = m.baseLeft + m.baseCenters[idx + 1]  // slot 0 is the launcher
+        let y = screenHeight - DesktopTheme.kDockBottomMargin
+            - DesktopTheme.kDockIconBottomInset - DesktopTheme.kDockIconSize / 2
+        return Offset(x, y)
+    }
+
+    /// The dock as it is on screen right now: every slot's app id and the
+    /// center of its icon, in logical screen coordinates. Slot 0 is the
+    /// launcher.
+    ///
+    /// Served over the broker so tooling can drive the real dock instead of
+    /// mirroring its layout. A mirror cannot work here: the dock is
+    /// centre-aligned and grows a transient icon for every running app, so
+    /// launching anything shifts every icon left — which is exactly how
+    /// `shell-drive.py` used to click 122px away from the launcher and report
+    /// it as broken.
+    ///
+    /// Unmagnified geometry (`baseCenters`), which is what a caller needs: the
+    /// pointer is not over the dock yet when it asks where to move.
+    func dockSlots() -> [(app: String, x: Double, y: Double, size: Double)] {
+        let metrics = _dockMetrics()
+        let ids = ["launcher"] + _dockDisplayApps
+        let y = screenHeight - DesktopTheme.kDockBottomMargin
+            - DesktopTheme.kDockIconBottomInset - DesktopTheme.kDockIconSize / 2
+        return ids.enumerated().prefix(metrics.baseCenters.count).map { i, id in
+            (app: id,
+             x: metrics.baseLeft + metrics.baseCenters[i],
+             y: y,
+             size: DesktopTheme.kDockIconSize)
+        }
+    }
+
+    /// Global-hover hook: activates dock magnification while the cursor is
+    /// over the dock strip and relaxes it once the cursor leaves. Horizontal
+    /// slack is generous — at the far edges the falloff has already returned
+    /// every icon to ~1x, so over-inclusion is invisible.
+    private func _updateDockHover(x: Double, y: Double) {
+        let pillTop = screenHeight - DesktopTheme.kDockBottomMargin
+            - DesktopTheme.kDockHeight
+        let m = _dockMetrics()
+        let inside = y >= pillTop - 28
+            && x >= m.baseLeft - 40 && x <= m.baseLeft + m.baseWidth + 40
+        let newValue: Double? = inside ? x : nil
+        switch (newValue, _dockHoverX) {
+        case (nil, nil):
+            return
+        case let (a?, b?) where abs(a - b) < 0.5:
+            return
+        default:
+            setState { _dockHoverX = newValue }
+        }
+    }
+
+    /// Which app a window belongs to, or nil when nothing claims it.
+    ///
+    /// The authoritative signal is the window's own `app_id`
+    /// (`xdg_toplevel.set_app_id`), matched against what the app's `.desktop`
+    /// entry declares as its `StartupWMClass` — the pairing exists precisely
+    /// so a desktop can tie a window back to an app, and app-install records
+    /// it at install time.
+    ///
+    /// Title matching is the fallback, and only for the records that ask for
+    /// it: the windows that genuinely carry no app_id (Zoom on the in-tree X
+    /// server, WeChat inside rootful Xwayland, Waydroid's single window for
+    /// every Android app). It is not a general fallback because it cannot be
+    /// one — IntelliJ's project window is titled `untitled – Main.java`, with
+    /// nothing app-shaped in it at all.
+    /// The title to show for a window — the client's own, unless its record
+    /// asks us to override it. One app needs that: WeChat's window is the
+    /// entire rootful Xwayland screen and calls itself "Xwayland on :1", which
+    /// is an implementation detail rather than a window name.
+    static func _displayTitle(_ title: String, for win: WindowInfo? = nil) -> String {
+        if let cls = win?.wmClass, let rec = AppRegistry.shared.app(forAppId: cls),
+           rec.renameWindows {
+            return rec.name
+        }
+        if let rec = AppRegistry.shared.app(forTitle: title), rec.renameWindows {
+            return rec.name
+        }
+        return title
+    }
+
+    func _appOwning(_ win: WindowInfo) -> AppRecord? {
+        if let rec = AppRegistry.shared.app(id: win.appId) { return rec }
+        if let cls = win.wmClass, let rec = AppRegistry.shared.app(forAppId: cls) {
+            return rec
+        }
+        return AppRegistry.shared.app(forTitle: win.title)
+    }
+
+    /// What the dock actually shows: the pinned apps, then any known app that
+    /// is running — or mid-launch, so a Launchpad launch bounces a dock tile
+    /// immediately — without being pinned (macOS-style transient icons).
+    /// Transient icons vanish when the app quits; the right-click menu's
+    /// "Keep in Dock" pins them.
+    private var _dockDisplayApps: [String] {
+        let pinned = Set(dockAppOrder)
+        return dockAppOrder + AppRegistry.shared.apps.map { $0.id }.filter { id in
+            !pinned.contains(id)
+                && (_pendingAppLaunches.contains(id) || _isAppRunning(id))
+        }
+    }
+
+    /// True when the app has an open (possibly minimized) window — drives
+    /// the macOS-style running-indicator dot under the dock icon.
+    /// Agent-owned windows have no desktop presence and never light dots.
+    private func _isAppRunning(_ appId: String) -> Bool {
+        windowManager.windows.contains { win in
+            win.ownerAgentId == nil && _appOwning(win)?.id == appId
+        }
+    }
+
+    /// Recompute app liveness and publish it if it changed.
+    ///
+    /// Window presence comes from `_isAppRunning`, so the dock and the
+    /// published status are the same derivation rather than two that can
+    /// disagree. Process liveness comes from the registry's /proc scan — the
+    /// shell does it, not the App Store, because the shell is the component
+    /// that owns app status.
+    ///
+    /// Called on every window-list change (free, event-driven) and, while
+    /// something is subscribed, on the broker's tick — a process exiting
+    /// without closing a window produces no event of its own.
+    func _refreshAppLiveness() {
+        #if os(Linux)
+        let processes = AppRegistry.shared.runningAppIds()
+        var next: [String: AppLiveness] = [:]
+        for app in AppRegistry.shared.apps where app.installed {
+            let live = AppLiveness(window: _isAppRunning(app.id),
+                                   process: processes.contains(app.id))
+            if live.window || live.process { next[app.id] = live }
+        }
+        guard next != appLiveness else { return }
+        appLiveness = next
+        _agentBroker?.pushAppStatus(next)
+        #endif
+    }
+
+    /// Loads the compiled liquid-glass program once. Returns nil if the
+    /// .iplr asset can't be found or fails to initialize — callers fall
+    /// back to the plain blur+saturate filter.
+    private func _glassProgramIfAvailable() -> FragmentProgram? {
+        if _glassProgramTried { return _glassProgram }
+        _glassProgramTried = true
+        var candidates = [
+            // Resolved relative to whichever CWD the shell was launched from.
+            "Sources/DesktopShellApp/Shaders/liquid_glass.frag.iplr",
+            "apps/DesktopShellApp/Sources/DesktopShellApp/Shaders/liquid_glass.frag.iplr",
+        ]
+        // Installed layout ($STARLING_DATA_DIR / <exe>/../share/starling).
+        if let packaged = Self.dataFilePath("shaders/liquid_glass.frag.iplr") {
+            candidates.insert(packaged, at: 0)
+        }
+        for path in candidates {
+            guard let data = FileManager.default.contents(atPath: path) else { continue }
+            do {
+                _glassProgram = try FragmentProgram(
+                    data: [UInt8](data), backend: .skSL)
+                FileHandle.standardError.write(Data(
+                    "[DesktopShell] Liquid-glass shader loaded from \(path)\n".utf8))
+                return _glassProgram
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[DesktopShell] Liquid-glass shader load failed: \(error)\n".utf8))
+            }
+        }
+        FileHandle.standardError.write(Data(
+            "[DesktopShell] Liquid-glass shader .iplr not found — using plain blur\n".utf8))
+        return nil
+    }
+
+    private func _dockGlassShaderIfAvailable() -> FragmentShader? {
+        if _dockGlassShader == nil {
+            _dockGlassShader = _glassProgramIfAvailable()?.fragmentShader()
+        }
+        return _dockGlassShader
+    }
+
+    private func _popupGlassShaderIfAvailable() -> FragmentShader? {
+        if _popupGlassShader == nil {
+            _popupGlassShader = _glassProgramIfAvailable()?.fragmentShader()
+        }
+        return _popupGlassShader
+    }
+
+    /// Builds a liquid-glass BackdropFilter: blur → saturation boost → (if a
+    /// shader instance is supplied) refraction. The shader is the outermost
+    /// pass so it warps the already blurred+saturated backdrop.
+    private func _liquidGlassFilter(shader: FragmentShader?,
+                                    left: Double, top: Double,
+                                    width: Double, height: Double,
+                                    cornerRadius: Double,
+                                    blurSigma: Double,
+                                    saturation: Double) -> any ImageFilter {
+        let base = ImageFilterFactory.compose(
+            outer: ColorFilter(matrix: _saturationMatrix(saturation)),
+            inner: ImageFilterFactory.blur(sigmaX: blurSigma, sigmaY: blurSigma)
+        )
+        guard let shader else { return base }
+        // FlutterFragCoord() in the runtime-effect image filter is in
+        // full-screen *logical* coordinates — pass the panel's logical
+        // origin and size so the shader normalizes to a 0..1 panel uv.
+        shader.setFloat(0, width)                           // uSize.x
+        shader.setFloat(1, height)                          // uSize.y
+        shader.setFloat(2, left)                            // uOrigin.x
+        shader.setFloat(3, top)                             // uOrigin.y
+        shader.setFloat(4, cornerRadius)                    // uCornerRadius
+        // Flutter compiles `sampler2D uTexture` to a child shader plus an
+        // auto uniform `uTexture_size`; `texture(uTexture, X)` becomes
+        // `uTexture.eval(uTexture_size * X)`. For an image-filter input
+        // there is no setImageSampler call to populate that size, so set
+        // it to (1,1) directly (indices 5,6, just past the 5 declared
+        // float uniforms) — then texture() samples in raw coord space.
+        shader.setFloat(5, 1.0)                             // uTexture_size.x
+        shader.setFloat(6, 1.0)                             // uTexture_size.y
+        return ImageFilterFactory.compose(
+            outer: ImageFilterFactory.shader(shader),
+            inner: base
+        )
+    }
+
+    private func _dockGlassFilter(dockWidth: Double, dockLeft: Double,
+                                  dockTop: Double) -> any ImageFilter {
+        return _liquidGlassFilter(
+            shader: _dockGlassShaderIfAvailable(),
+            left: dockLeft, top: dockTop,
+            width: dockWidth, height: DesktopTheme.kDockHeight,
+            cornerRadius: DesktopTheme.kDockCornerRadius,
+            blurSigma: 3.5, saturation: 1.12)
+    }
+
+    private func _buildDock(appIds: [String], metrics: DockMetrics,
+                            dockTop: Double) -> Widget {
+        var iconWidgets: [Widget] = []
+        let targetIdx = _dockDragActive ? _dockDragTargetIndex() : -1
+        let animDuration: Duration = .milliseconds(150)
+
+        // Slot 0: launcher, followed by the wider divider gap.
+        iconWidgets.append(_buildLauncherIcon(slotWidth: metrics.slotWidths[0]))
+        iconWidgets.append(SizedBox(width: DesktopTheme.kDockIconPadding * 2))
+
+        for (i, appId) in appIds.enumerated() {
+            let iconType = _iconType(for: appId)
+            if i > 0 {
+                iconWidgets.append(SizedBox(width: DesktopTheme.kDockIconPadding))
+            }
+
+            let isDragged = _dockDragActive && _dockDragIndex == i
+
+            // Insert gap BEFORE this slot if target is here and dragged icon is after
+            if _dockDragActive, let fromIdx = _dockDragIndex, targetIdx == i, fromIdx > i {
+                iconWidgets.append(AnimatedContainer(
+                    width: DesktopTheme.kDockIconSize, height: DesktopTheme.kDockIconSize,
+                    duration: animDuration
+                ))
+                iconWidgets.append(SizedBox(width: DesktopTheme.kDockIconPadding))
+            }
+
+            // Dragged icon's slot collapses to zero width
+            if isDragged {
+                iconWidgets.append(AnimatedContainer(
+                    width: 0, height: DesktopTheme.kDockIconSize,
+                    duration: animDuration, clipBehavior: .hardEdge
+                ))
+            } else {
+                iconWidgets.append(
+                    _buildDockIcon(appId: appId, iconType: iconType, index: i,
+                                   slotWidth: metrics.slotWidths[i + 1])
+                )
+            }
+
+            // Insert gap AFTER this slot if target is here and dragged icon is before
+            if _dockDragActive, let fromIdx = _dockDragIndex, targetIdx == i, fromIdx < i {
+                iconWidgets.append(SizedBox(width: DesktopTheme.kDockIconPadding))
+                iconWidgets.append(AnimatedContainer(
+                    width: DesktopTheme.kDockIconSize, height: DesktopTheme.kDockIconSize,
+                    duration: animDuration
+                ))
+            }
+        }
+
+        // Liquid-glass pill: backdrop blur + saturation boost (the signature
+        // Apple trick to keep blurred backgrounds vivid), then a vertical
+        // white gradient on top — brighter at the top edge to simulate light
+        // catching the glass. Outer DecoratedBox carries the drop shadow
+        // (outside the clip), inner DecoratedBox carries tint + border. This
+        // path was previously blocked by the Skia stencil null-deref under
+        // DMA-BUF compositing — see patches/skia-stencil-nullcheck.patch.
+        // The pill is its own layer now: icons live above it in the Stack so
+        // magnified icons can grow past its top edge without being clipped.
+        let pill: Widget = DecoratedBox(
+            decoration: BoxDecoration(
+                borderRadius: BorderRadius.all(Radius(circular: DesktopTheme.kDockCornerRadius)),
+                boxShadow: [
+                    BoxShadow(color: shellTheme.dockShadow, offset: Offset(0, 6), blurRadius: 24),
+                ]
+            ),
+            child: ClipRRect(
+                borderRadius: BorderRadius.all(Radius(circular: DesktopTheme.kDockCornerRadius)),
+                child: BackdropFilter(
+                    filter: _dockGlassFilter(dockWidth: metrics.width,
+                                             dockLeft: metrics.left,
+                                             dockTop: dockTop),
+                    child: DecoratedBox(
+                        decoration: BoxDecoration(
+                            // Single thin crisp hairline — the only
+                            // thing defining the panel against a dark
+                            // backdrop, exactly as the macOS dock does.
+                            border: Border.all(
+                                color: shellTheme.dockRim,
+                                width: 1.0
+                            ),
+                            borderRadius: BorderRadius.all(Radius(circular: DesktopTheme.kDockCornerRadius)),
+                            // Faint frost tint; kept low in the dark theme
+                            // so over black the body stays near-black like
+                            // macOS, defined by the hairline, not a fill.
+                            gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [shellTheme.dockGradientTop, shellTheme.dockGradientBottom]
+                            )
+                        ),
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+        )
+
+        var layers: [Widget] = [
+            Positioned(
+                left: 0, right: 0, bottom: 0,
+                height: DesktopTheme.kDockHeight,
+                child: pill
+            ),
+            // Icon row: bottom-anchored so magnified icons grow upward from
+            // a shared baseline, overflowing the pill's top edge like macOS.
+            Positioned(
+                left: DesktopTheme.kDockHorizontalPadding,
+                bottom: 0,
+                child: Row(
+                    mainAxisAlignment: .start,
+                    crossAxisAlignment: .end,
+                    children: iconWidgets
+                )
+            ),
+        ]
+        if let label = _buildDockHoverLabel(metrics: metrics) {
+            layers.append(label)
+        }
+
+        // Wrap entire dock in Listener for drag move/up
+        return Listener(
+            onPointerMove: { [self] event in
+                guard _dockDragIndex != nil else { return }
+                if !_dockDragActive {
+                    let dx = abs(event.position.dx - _dockDragStartX)
+                    if dx > 5 { _dockDragActive = true }
+                }
+                if _dockDragActive {
+                    setState {
+                        _dockDragCurrentX = event.position.dx
+                        _dockDragCurrentY = event.position.dy
+                    }
+                }
+            },
+            onPointerUp: { [self] _ in
+                if _dockDragActive, let fromIndex = _dockDragIndex {
+                    let targetIndex = _dockDragTargetIndex()
+                    setState {
+                        if fromIndex != targetIndex {
+                            let item = dockAppOrder.remove(at: fromIndex)
+                            dockAppOrder.insert(item, at: targetIndex)
+                        }
+                        _dockDragIndex = nil
+                        _dockDragActive = false
+                    }
+                } else if _dockDragIndex != nil {
+                    _dockDragIndex = nil
+                    _dockDragActive = false
+                }
+            },
+            behavior: .translucent,
+            child: Stack(clipBehavior: .none, children: layers)
+        )
+    }
+
+    /// macOS-style app-name bubble floating above the hovered dock icon.
+    /// Uses *current* (magnified) geometry so it tracks the on-screen icon.
+    private func _buildDockHoverLabel(metrics: DockMetrics) -> Widget? {
+        guard let hx = _dockHoverX, !_dockDragActive else { return nil }
+        let localX = hx - metrics.left
+        let n = metrics.slotWidths.count
+
+        var hoveredIdx: Int? = nil
+        var hoveredCenter: Double = 0
+        var x = DesktopTheme.kDockHorizontalPadding
+        for (i, w) in metrics.slotWidths.enumerated() {
+            let gapBefore = i == 0 ? 0 : _dockGapAfter(i - 1, slotCount: n)
+            let gapAfter = _dockGapAfter(i, slotCount: n)
+            if localX >= x - gapBefore / 2 && localX < x + w + gapAfter / 2 {
+                hoveredIdx = i
+                hoveredCenter = x + w / 2
+                break
+            }
+            x += w + gapAfter
+        }
+        guard let idx = hoveredIdx else { return nil }
+        let label = idx == 0 ? "Apps" : _dockAppLabel(for: _dockDisplayApps[idx - 1])
+
+        let bubble: Widget = DecoratedBox(
+            decoration: BoxDecoration(
+                color: shellTheme.dockLabelTint,
+                border: Border.all(color: shellTheme.dockLabelBorder, width: 0.5),
+                borderRadius: BorderRadius.all(Radius(circular: 7)),
+                boxShadow: [
+                    BoxShadow(color: shellTheme.dockShadow, offset: Offset(0, 3), blurRadius: 10),
+                ]
+            ),
+            child: Padding(
+                padding: EdgeInsets(left: 11, top: 5, right: 11, bottom: 5),
+                child: Text(
+                    label,
+                    style: TextStyle(
+                        color: shellTheme.dockLabelText,
+                        fontSize: 13,
+                        fontWeight: .w500
+                    )
+                )
+            )
+        )
+        // A wide strip centered on the icon; the bubble shrink-wraps inside
+        // a Center so the text never needs explicit measuring.
+        return Positioned(
+            left: hoveredCenter - 150,
+            bottom: DesktopTheme.kDockLabelBottom,
+            width: 300,
+            height: 30,
+            child: IgnorePointer(child: Center(child: bubble))
+        )
+    }
+
+    /// Standard "saturate(s)" color matrix in row-major 4x5 form, where the
+    /// luminance coefficients are sRGB (Rec. 709): 0.213 / 0.715 / 0.072.
+    /// s = 1.0 → identity; s = 1.8 → ~Apple "Liquid Glass" vibrancy boost.
+    private func _saturationMatrix(_ s: Double) -> [Double] {
+        let lr = 0.213, lg = 0.715, lb = 0.072
+        return [
+            lr + (1 - lr) * s,  lg - lg * s,        lb - lb * s,        0, 0,
+            lr - lr * s,        lg + (1 - lg) * s,  lb - lb * s,        0, 0,
+            lr - lr * s,        lg - lg * s,        lb + (1 - lb) * s,  0, 0,
+            0,                  0,                  0,                  1, 0,
+        ]
+    }
+
+    /// Large "Mon, May 17" date label above the search pill.
+    private func _buildDesktopDateLabel() -> Widget {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        return Text(
+            f.string(from: Date()),
+            style: TextStyle(
+                color: Color(0xFFFFFFFF),
+                fontSize: 16,
+                fontWeight: .w500
+            )
+        )
+    }
+
+    /// Floating Google-style search pill — non-functional placeholder for now.
+    private func _buildSearchPill() -> Widget {
+        let leadingIcon: Widget = SizedBox(
+            width: 22, height: 22,
+            child: Center(
+                child: Text(
+                    "G",
+                    style: TextStyle(
+                        color: Color(0xFF8AB4F8),
+                        fontSize: 16,
+                        fontWeight: .w700
+                    )
+                )
+            )
+        )
+        return DecoratedBox(
+            decoration: BoxDecoration(
+                color: DesktopTheme.searchPillBackground,
+                border: Border.all(color: DesktopTheme.searchPillBorder, width: 0.5),
+                borderRadius: BorderRadius.all(Radius(circular: DesktopTheme.kSearchPillHeight / 2)),
+                boxShadow: [
+                    BoxShadow(color: Color(0x40000000), offset: Offset(0, 2), blurRadius: 12),
+                ]
+            ),
+            child: Padding(
+                padding: EdgeInsets(left: 16, top: 0, right: 16, bottom: 0),
+                child: Row(
+                    mainAxisAlignment: .start,
+                    crossAxisAlignment: .center,
+                    children: [
+                        leadingIcon,
+                        SizedBox(width: 12),
+                        Text(
+                            "Search the web",
+                            style: TextStyle(
+                                color: Color(0xFFB0B0B0),
+                                fontSize: 14,
+                                fontWeight: .w400
+                            )
+                        ),
+                    ]
+                )
+            )
+        )
+    }
+
+    /// 3×3 dot grid "launcher" icon at the left of the dock (Chrome OS style).
+    /// `slotWidth` is the magnified slot size; the glyph scales with it.
+    private func _buildLauncherIcon(slotWidth: Double) -> Widget {
+        // The launcher shares the app icons' slot geometry and tile treatment
+        // (see _buildDockIcon / _buildDockIconContent) so it lines up with the
+        // rest of the dock: a rounded, shadowed tile with a white glyph — here
+        // a 3x3 dot grid instead of an IconPainter shape.
+        let scale = slotWidth / DesktopTheme.kDockIconSize
+        let cornerRadius = DesktopTheme.kDockIconCornerRadius * scale
+
+        let dot: Widget = SizedBox(
+            width: 5, height: 5,
+            child: ClipRRect(
+                borderRadius: BorderRadius.all(Radius(circular: 2.5)),
+                child: ColoredBox(color: Color(0xFFFFFFFF), child: SizedBox(expand: ()))
+            )
+        )
+        func row() -> Widget {
+            return Row(mainAxisAlignment: .spaceBetween, children: [dot, dot, dot])
+        }
+        let grid: Widget = SizedBox(
+            width: 24, height: 24,
+            child: Column(mainAxisAlignment: .spaceBetween, children: [row(), row(), row()])
+        )
+
+        let tile: Widget = DecoratedBox(
+            decoration: BoxDecoration(
+                borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
+                boxShadow: [
+                    BoxShadow(color: Color(0x4D000000),
+                              offset: Offset(0, 3 * scale), blurRadius: 8 * scale),
+                ]
+            ),
+            child: ClipRRect(
+                borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
+                child: ColoredBox(
+                    color: Color(0xFF5A5A5F),  // neutral graphite — a "system" tile
+                    child: Center(child: grid)
+                )
+            )
+        )
+
+        return SizedBox(
+            width: slotWidth,
+            height: slotWidth + DesktopTheme.kDockIconBottomInset,
+            child: Column(
+                crossAxisAlignment: .stretch,
+                children: [
+                    Expanded(
+                        child: GestureDetector(
+                            onTap: { [self] in
+                                // Pick up icons for anything installed since
+                                // login before the grid is built.
+                                _loadIconTextures()
+                                setState {
+                                    contextMenuPosition = nil
+                                    activeStatusBarPopup = nil
+                                    _launcherQuery = ""
+                                    _launcherOpen = true
+                                }
+                            },
+                            behavior: .opaque,
+                            child: tile
+                        )
+                    ),
+                    SizedBox(height: DesktopTheme.kDockIconBottomInset),
+                ]
+            )
+        )
+    }
+
+    /// Build just the visual icon content (used for both dock slot and floating drag).
+    /// The corner radius scales with magnification so the tile shape stays
+    /// proportional (pass the default for unmagnified uses like drag ghosts).
+    private func _buildDockIconContent(
+        appId: String, iconType: IconType,
+        cornerRadius: Double = DesktopTheme.kDockIconCornerRadius
+    ) -> Widget {
+        let iconBg = _dockIconColor(for: appId)
+        let iconContent: Widget
+        if let texId = iconTextures[appId] {
+            iconContent = TextureWidget(textureId: Int(texId), filterQuality: .medium)
+        } else {
+            iconContent = DecoratedBox(
+                decoration: BoxDecoration(gradient: ShellPalette.tileGradient(iconBg)),
+                child: Center(
+                    child: SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: CustomPaint(
+                            painter: IconPainter(iconType, color: Color(0xFFFFFFFF))
+                        )
+                    )
+                )
+            )
+        }
+        // macOS-style depth: every icon tile casts a soft shadow down onto
+        // the dock glass. The shadow tracks the tile's rounded rect and
+        // scales with magnification (cornerRadius already carries the slot
+        // scale), so magnified icons throw proportionally deeper shadows.
+        let shadowScale = cornerRadius / DesktopTheme.kDockIconCornerRadius
+        return DecoratedBox(
+            decoration: BoxDecoration(
+                borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
+                boxShadow: [
+                    BoxShadow(color: Color(0x4D000000),
+                              offset: Offset(0, 3 * shadowScale),
+                              blurRadius: 8 * shadowScale),
+                ]
+            ),
+            child: ClipRRect(
+                borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
+                child: iconContent
+            )
+        )
+    }
+
+    private func _buildDockIcon(appId: String, iconType: IconType, index: Int,
+                                slotWidth: Double) -> Widget {
+        let scale = slotWidth / DesktopTheme.kDockIconSize
+        let iconContent = _buildDockIconContent(
+            appId: appId, iconType: iconType,
+            cornerRadius: DesktopTheme.kDockIconCornerRadius * scale)
+
+        // Pointer down on icon records which icon is being dragged;
+        // move/up handled by dock-level Listener (wide area, keeps getting events)
+        let interactive: Widget = Listener(
+            onPointerDown: { [self] event in
+                if event.buttons & kSecondaryButton != 0 {
+                    // Right-click opens the icon's menu instead of arming a
+                    // drag (macOS: menus appear on right-mouse-down).
+                    setState {
+                        _dockDragIndex = nil
+                        _dockDragActive = false
+                        contextMenuPosition = nil
+                        activeStatusBarPopup = nil
+                        _dockMenuAppId = appId
+                        _dockMenuAnchorX = _dockIconCenter(appId: appId, title: "")?.dx
+                            ?? event.position.dx
+                    }
+                    return
+                }
+                if let origIndex = dockAppOrder.firstIndex(of: appId) {
+                    _dockDragIndex = origIndex
+                    _dockDragStartX = event.position.dx
+                    _dockDragCurrentX = event.position.dx
+                    _dockDragCurrentY = event.position.dy
+                    _dockDragActive = false
+                }
+            },
+            behavior: .translucent,
+            child: GestureDetector(
+                onTap: { [self] in
+                    setState {
+                        _dockDragIndex = nil
+                        _dockDragActive = false
+                        contextMenuPosition = nil
+                        _launchOrFocusApp(appId)
+                    }
+                },
+                behavior: .opaque,
+                child: iconContent
+            )
+        )
+
+        // macOS-style running-indicator dot in the strip below the icon.
+        // White core with a hairline dark rim + shadow so it reads on both
+        // dark wallpapers and light window content behind the glass pill.
+        let indicator: Widget
+        if _isAppRunning(appId) {
+            indicator = SizedBox(
+                width: DesktopTheme.kDockIndicatorSize,
+                height: DesktopTheme.kDockIndicatorSize,
+                child: DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: shellTheme.dockIndicator,
+                        border: Border.all(color: shellTheme.dockIndicatorRim, width: 0.5),
+                        borderRadius: BorderRadius.all(
+                            Radius(circular: DesktopTheme.kDockIndicatorSize / 2)),
+                        boxShadow: [
+                            BoxShadow(color: Color(0x59000000),
+                                      offset: Offset(0, 0.5), blurRadius: 1.5),
+                        ]
+                    )
+                )
+            )
+        } else {
+            indicator = SizedBox(width: 0, height: 0)
+        }
+
+        // The slot is bottom-anchored in the dock's icon row: the icon grows
+        // upward with magnification while the dot strip keeps it seated
+        // kDockIconBottomInset above the pill's bottom edge.
+        return SizedBox(
+            width: slotWidth,
+            height: slotWidth + DesktopTheme.kDockIconBottomInset,
+            child: Column(
+                crossAxisAlignment: .stretch,
+                children: [
+                    // Bounce the tile while its app is launching (macOS-style
+                    // feedback for the spawn-to-first-frame wait).
+                    Expanded(child: DockBounce(
+                        active: _pendingAppLaunches.contains(appId),
+                        child: interactive
+                    )),
+                    SizedBox(
+                        height: DesktopTheme.kDockIconBottomInset,
+                        child: Center(child: indicator)
+                    ),
+                ]
+            )
+        )
+    }
+
+    // MARK: - Dismiss Barrier
+
+    private func _appendDismissBarrier(_ children: inout [Widget], dismiss: @escaping () -> Void) {
+        children.append(
+            Positioned(
+                fill: (),
+                child: Listener(
+                    onPointerDown: { [self] _ in
+                        setState {
+                            dismiss()
+                        }
+                    },
+                    behavior: .opaque,
+                    child: ColoredBox(
+                        color: Color(0x00000000),
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+        )
+    }
+
+    // MARK: - Context Menu
+
+    private func _buildContextMenu() -> Widget {
+        var items: [MenuFlyoutItemBase] = [
+            MenuFlyoutItem(
+                text: Text("Change Wallpaper"),
+                onPressed: { [self] in
+                    setState {
+                        wallpaperPreset = wallpaperPreset.next
+                        _syncSharedWallpaper()
+                        contextMenuPosition = nil
+                    }
+                }
+            ),
+            MenuFlyoutItem(
+                text: Text(shellTheme.isDark ? "Light Appearance" : "Dark Appearance"),
+                onPressed: { [self] in
+                    setState { contextMenuPosition = nil }
+                    _setAppearance(dark: !shellTheme.isDark)
+                }
+            ),
+            MenuFlyoutSeparator(),
+            // Spaces. New desktops append at the end of the strip; removal
+            // rehomes the desktop's windows to the nearest user space.
+            MenuFlyoutItem(
+                text: Text("Mission Control"),
+                onPressed: { [self] in
+                    setState { contextMenuPosition = nil }
+                    _openMissionControl()
+                }
+            ),
+            MenuFlyoutItem(
+                text: Text("New Desktop"),
+                onPressed: { [self] in
+                    setState { contextMenuPosition = nil }
+                    let idx = windowManager.addSpace()
+                    _switchToSpace(idx)
+                }
+            ),
+            MenuFlyoutItem(
+                text: Text("AI Space"),
+                onPressed: { [self] in
+                    setState { contextMenuPosition = nil }
+                    if !windowManager.activeSpace.isAgent { _toggleAgentSpace() }
+                }
+            ),
+        ]
+        let active = windowManager.activeSpace
+        if active.isUser && windowManager.spaces.filter({ $0.isUser }).count > 1 {
+            items.append(MenuFlyoutItem(
+                text: Text("Remove This Desktop"),
+                onPressed: { [self] in
+                    setState {
+                        contextMenuPosition = nil
+                        windowManager.removeSpace(at: windowManager.activeSpaceIndex)
+                    }
+                }
+            ))
+        }
+        items.append(contentsOf: [
+            MenuFlyoutSeparator(),
+                MenuFlyoutItem(
+                    text: Text("Display Settings"),
+                    onPressed: { [self] in
+                        setState {
+                            contextMenuPosition = nil
+                            _launchOrFocusApp("settings")
+                        }
+                    }
+                ),
+                MenuFlyoutItem(
+                    text: Text("Open Text Viewer"),
+                    onPressed: { [self] in
+                        setState {
+                            contextMenuPosition = nil
+                            _launchOrFocusApp("textviewer")
+                        }
+                    }
+                ),
+        ])
+        // The flyout panel draws from the Fluent theme — override the
+        // app-level dark theme so menus follow the shell appearance.
+        return FluentTheme(
+            data: FluentThemeData(brightness: shellTheme.isDark ? .dark : .light),
+            child: MenuFlyout(items: items)
+        )
+    }
+
+    /// Dock icon right-click menu: Show/Open, Quit (when running), and
+    /// Remove from Dock (macOS style).
+    private func _buildDockIconMenu(for appId: String) -> Widget {
+        let running = _isAppRunning(appId)
+        var items: [MenuFlyoutItemBase] = [
+            MenuFlyoutItem(
+                text: Text(running ? "Show" : "Open"),
+                onPressed: { [self] in
+                    setState {
+                        _dockMenuAppId = nil
+                        _launchOrFocusApp(appId)
+                    }
+                }
+            ),
+        ]
+        if running {
+            items.append(MenuFlyoutItem(
+                text: Text("Quit"),
+                onPressed: { [self] in
+                    setState { _dockMenuAppId = nil }
+                    _quitApp(appId)
+                }
+            ))
+        }
+        items.append(MenuFlyoutSeparator())
+        if dockAppOrder.contains(appId) {
+            items.append(MenuFlyoutItem(
+                text: Text("Remove from Dock"),
+                onPressed: { [self] in
+                    setState {
+                        _dockMenuAppId = nil
+                        dockAppOrder.removeAll { $0 == appId }
+                        _dockRemovedByUser.insert(appId)
+                    }
+                }
+            ))
+        } else {
+            // Transient icon (running but unpinned) — offer to pin it.
+            items.append(MenuFlyoutItem(
+                text: Text("Keep in Dock"),
+                onPressed: { [self] in
+                    setState {
+                        _dockMenuAppId = nil
+                        if AppRegistry.shared.app(id: appId) != nil {
+                            dockAppOrder.append(appId)
+                            _dockRemovedByUser.remove(appId)
+                        }
+                    }
+                }
+            ))
+        }
+        return FluentTheme(
+            data: FluentThemeData(brightness: shellTheme.isDark ? .dark : .light),
+            child: MenuFlyout(items: items)
+        )
+    }
+
+    /// Quit a running app from its dock menu: tear down every desktop window
+    /// it owns. Windows visible on the active space play the shrink-out first
+    /// (teardown fires when the animation completes); minimized, other-space,
+    /// or exposé-covered windows have no animatable widget, so they are torn
+    /// down immediately. onWindowClose terminates process-backed apps.
+    private func _quitApp(_ appId: String) {
+        let targets = windowManager.windows.filter { win in
+            win.ownerAgentId == nil && _appOwning(win)?.id == appId
+        }
+        guard !targets.isEmpty else { return }
+        let activeSpaceId = windowManager.activeSpace.id
+        setState {
+            for win in targets {
+                if !_missionControlOpen && !win.isMinimized
+                    && win.spaceId == activeSpaceId {
+                    _closingWindows.insert(win.id)
+                } else {
+                    if win.textureId != nil { win.onWindowClose?() }
+                    win.onWindowClose = nil
+                    windowManager.closeWindow(win.id)
+                }
+            }
+        }
+    }
+
+    // MARK: - IME
+
+    /// Child app reported its text caret (via the DMA-BUF socket). Stored
+    /// always; only rebuilds when the panel is showing.
+    func _imeCaretChanged(textureId: Int64, x: Double, y: Double,
+                          width: Double, height: Double, visible: Bool) {
+        _imeCaret = (textureId, Rect.fromLTWH(x, y, width, height), visible)
+        // Keep fcitx informed of the screen-space caret (SetCursorRect) —
+        // decorative while it runs headless, but plugins expect it.
+        if visible, _imeEnabled, let ime = imeIntegration,
+           let focusedId = windowManager.focusedWindowId,
+           let win = windowManager.windows.first(where: { $0.id == focusedId }),
+           processTextureIds[win.appId] == textureId {
+            ime.setCursorRect(
+                x: win.rect.left + x,
+                y: win.rect.top + DesktopTheme.kTitleBarHeight + y,
+                width: width, height: height)
+        }
+        if _imeEnabled && (!_imePreedit.isEmpty || !_imeCandidates.isEmpty) {
+            setState {}
+        }
+    }
+
+    /// Ctrl+Space: toggle fcitx5 input (lazy bridge creation — fcitx may
+    /// not be installed; the bridge retries its connection quietly).
+    private func _toggleIme() {
+        #if os(Linux)
+        if imeIntegration == nil {
+            let ime = ImeIntegration()
+            ime.onCommit = { [weak self] text in
+                self?._imeDeliverCommit(text)
+            }
+            ime.onPanelChanged = { [weak self] preedit, candidates, highlighted in
+                guard let self else { return }
+                // Mirror the composition into a focused Wayland client's
+                // text field (in-field preedit, like native IME frontends).
+                if let focusedId = self.windowManager.focusedWindowId,
+                   let win = self.windowManager.windows.first(where: { $0.id == focusedId }),
+                   win.appId.hasPrefix("wayland-") {
+                    waylandIntegration?.sendTextInputPreedit(
+                        preedit, cursor: Int32(preedit.utf8.count))
+                }
+                self.setState {
+                    self._imePreedit = preedit
+                    self._imeCandidates = candidates
+                    self._imeHighlighted = highlighted
+                }
+            }
+            ime.onReplayKey = { [weak self] keyData in
+                self?._imeReplayKey(keyData)
+            }
+            imeIntegration = ime
+        }
+        setState {
+            _imeEnabled.toggle()
+            _imePreedit = ""
+            _imeCandidates = []
+            _imeHighlighted = -1
+        }
+        if _imeEnabled {
+            imeIntegration?.focusIn()
+        } else {
+            imeIntegration?.focusOut()
+        }
+        #endif
+    }
+
+    /// Deliver a key fcitx declined (async verdict) to the focused app —
+    /// the down was swallowed optimistically, so send a full down+up now.
+    private func _imeReplayKey(_ keyData: KeyData) {
+        #if os(Linux)
+        guard let focusedId = windowManager.focusedWindowId,
+              let win = windowManager.windows.first(where: { $0.id == focusedId })
+        else {
+            _ = FocusManager.instance.dispatchKeyData(keyData)
+            return
+        }
+        if win.appId.hasPrefix("wayland-"), let wayland = waylandIntegration {
+            wayland.sendKeyEvent(physical: keyData.physical,
+                                 logical: keyData.logical, isDown: true)
+            wayland.sendKeyEvent(physical: keyData.physical,
+                                 logical: keyData.logical, isDown: false)
+            return
+        }
+        if let texId = processTextureIds[win.appId],
+           let mgr = linuxProcessAppManager {
+            let scalar = keyData.character?.unicodeScalars.first?.value ?? 0
+            mgr.sendKeyEvent(textureId: texId, physical: keyData.physical,
+                             logical: keyData.logical, character: scalar,
+                             phase: 0)
+            mgr.sendKeyEvent(textureId: texId, physical: keyData.physical,
+                             logical: keyData.logical, character: 0, phase: 1)
+        } else {
+            _ = FocusManager.instance.dispatchKeyData(keyData)
+        }
+        #endif
+    }
+
+    /// Insert IME-committed text into the focused app. Child processes get
+    /// synthetic character key events over the DMA-BUF input socket — their
+    /// editors insert `keyData.character` on key-down, so each scalar is a
+    /// down (with the character) followed by an up.
+    private func _imeDeliverCommit(_ text: String) {
+        #if os(Linux)
+        guard let focusedId = windowManager.focusedWindowId,
+              let win = windowManager.windows.first(where: { $0.id == focusedId })
+        else { return }
+        // Wayland clients receive IME text via zwp_text_input_v3.
+        if win.appId.hasPrefix("wayland-"), let wayland = waylandIntegration {
+            wayland.sendTextInputPreedit("", cursor: 0)
+            wayland.sendTextInputCommit(text)
+            return
+        }
+        guard let texId = processTextureIds[win.appId],
+              let mgr = linuxProcessAppManager else { return }
+        for scalar in text.unicodeScalars {
+            mgr.sendKeyEvent(textureId: texId, physical: 0, logical: 0,
+                             character: scalar.value, phase: 0)
+            mgr.sendKeyEvent(textureId: texId, physical: 0, logical: 0,
+                             character: 0, phase: 1)
+        }
+        #endif
+    }
+
+    /// The shell-drawn IME panel: preedit on top, numbered candidates below
+    /// (fcitx runs headless — ClientSideInputPanel capability).
+    private func _buildImePanel() -> Widget {
+        var rows: [Widget] = []
+        if !_imePreedit.isEmpty {
+            rows.append(Row(mainAxisSize: .min, children: [
+                Text(_imePreedit, style: TextStyle(
+                    color: shellTheme.fgPrimary, fontSize: 15)),
+            ]))
+        }
+        if !_imeCandidates.isEmpty {
+            var items: [Widget] = []
+            for (i, candidate) in _imeCandidates.enumerated() {
+                if i > 0 { items.append(SizedBox(width: 14)) }
+                let isHighlighted = i == _imeHighlighted
+                let label = candidate.0.isEmpty ? "\(i + 1)." : candidate.0
+                items.append(Row(mainAxisSize: .min, children: [
+                    Text(label, style: TextStyle(
+                        color: shellTheme.fgSecondary, fontSize: 13)),
+                    SizedBox(width: 3),
+                    Text(candidate.1, style: TextStyle(
+                        color: isHighlighted ? Color(0xFF0A84FF) : shellTheme.fgPrimary,
+                        fontSize: 15,
+                        fontWeight: isHighlighted ? .w600 : .w400)),
+                ]))
+            }
+            if !rows.isEmpty { rows.append(SizedBox(height: 6)) }
+            rows.append(Row(mainAxisSize: .min, children: items))
+        }
+        return DecoratedBox(
+            decoration: BoxDecoration(
+                color: shellTheme.isDark ? Color(0xF0303032) : Color(0xF0F2F2F4),
+                borderRadius: BorderRadius.circular(10),
+                boxShadow: [BoxShadow(color: Color(0x59000000),
+                                      offset: Offset(0, 4), blurRadius: 16)]
+            ),
+            child: Padding(
+                padding: EdgeInsets(left: 14, top: 9, right: 14, bottom: 9),
+                child: Column(crossAxisAlignment: .start, children: rows)
+            )
+        )
+    }
+
+    // MARK: - Appearance
+
+    private static var _appearanceFile: String {
+        LoginUser.configDir + "/appearance"
+    }
+
+    private static var _windowLayoutFile: String {
+        LoginUser.configDir + "/window-layout"
+    }
+
+    /// Switch between the floating window manager (default) and dwm-style
+    /// master-stack tiling; persists the choice like the appearance.
+    /// Leaving tiling restores every window's remembered floating rect.
+    func _setTiling(_ enabled: Bool) {
+        guard enabled != windowManager.tilingEnabled else { return }
+        setState {
+            windowManager.tilingEnabled = enabled
+            if enabled {
+                windowManager.retileAll(
+                    screenWidth: screenWidth, screenHeight: screenHeight)
+            } else {
+                windowManager.restoreFloatingLayout()
+            }
+        }
+        // Children mirror the choice (the Settings app's Tiling toggle).
+        #if os(Linux)
+        linuxProcessAppManager?.broadcastLayout(tiling: enabled)
+        #endif
+        let path = Self._windowLayoutFile
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try? (enabled ? "tiling" : "floating").write(
+            toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Restore the persisted appearance before the first build.
+    static func loadPersistedAppearance() {
+        if let s = try? String(contentsOfFile: _appearanceFile, encoding: .utf8) {
+            shellTheme = s.trimmingCharacters(in: .whitespacesAndNewlines) == "light"
+                ? .light : .dark
+        }
+    }
+
+    /// Switch the desktop appearance (context menu or the Settings app's
+    /// Dark Mode toggle) and persist the choice.
+    func _setAppearance(dark: Bool) {
+        guard dark != shellTheme.isDark else { return }
+        setState {
+            shellTheme = dark ? .dark : .light
+            // Cached window widgets have the old theme baked into their
+            // subtrees — drop them so title bars recolor.
+            _windowChildCache.removeAll()
+        }
+        // Child apps re-theme their own UI from the same event.
+        #if os(Linux)
+        linuxProcessAppManager?.broadcastTheme(dark: dark)
+        // Wayland clients (Chrome, GTK/Qt) follow the portal's
+        // org.freedesktop.appearance/color-scheme SettingChanged signal.
+        portalIntegration?.setColorScheme(dark ? 1 : 2)
+        #endif
+        let path = Self._appearanceFile
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try? (dark ? "dark" : "light").write(
+            toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - Window Close / Minimize
+
+    /// Actually minimize, fired when the scale-effect zoom lands on the dock.
+    private func _finalizeWindowMinimize(_ winId: String) {
+        setState {
+            _minimizingWindows.remove(winId)
+            windowManager.minimizeWindow(winId)
+        }
+    }
+
+    /// Real window teardown, fired when the close animation completes:
+    /// destroy the app/texture (onWindowClose) and drop the window.
+    private func _finalizeWindowClose(_ winId: String) {
+        guard let win = windowManager.windows.first(where: { $0.id == winId }) else {
+            _closingWindows.remove(winId)
+            return
+        }
+        if win.onWindowClose != nil && win.textureId != nil {
+            win.onWindowClose?()
+            win.onWindowClose = nil
+        }
+        setState {
+            _closingWindows.remove(winId)
+            windowManager.closeWindow(winId)
+        }
+    }
+
+    // MARK: - App Launching
+
+    /// Focus an existing window, following it to its space when it lives on
+    /// another one (macOS dock: clicking an app's icon switches to its
+    /// space). Restore handles the space switch in the model; the plain
+    /// focus path slides over explicitly.
+    private func _focusWindowAcrossSpaces(_ win: WindowInfo) {
+        if win.isMinimized {
+            windowManager.restoreWindow(win.id)
+        } else {
+            windowManager.bringToFront(win.id)
+            if win.spaceId != windowManager.activeSpace.id,
+               let idx = windowManager.spaceIndex(ofSpaceId: win.spaceId) {
+                _switchToSpace(idx)
+            }
+        }
+    }
+
+    #if os(Linux)
+    /// Spawn one of the session's launcher scripts (app-run, wechat-run,
+    /// android-app), wired to THIS shell's Wayland socket rather than
+    /// app-run's wayland-0 default — which is wrong whenever the shell came up
+    /// on wayland-1 after an unclean exit. The scripts take everything else
+    /// from the environment, so the same three variables serve all of them.
+    private func _spawnLauncher(_ path: String, args: [String] = []) {
+        guard let socketName = waylandIntegration?.socketName else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["STARLING_WAYLAND"] = socketName
+        env["STARLING_XDG_DIR"] = LoginUser.runtimeDir
+        env["STARLING_APP_SCALE"] = String(currentShellDpi)
+        process.environment = env
+        try? process.run()
+    }
+    #endif
+
+    private func _launchOrFocusApp(_ appId: String) {
+        // Ignore if this app is already being launched
+        if _pendingAppLaunches.contains(appId) { return }
+
+        // An app installed since login has no host icon loaded yet, so its
+        // transient dock tile would show the neutral glyph. Cheap and idempotent.
+        _loadIconTexture(for: appId)
+
+        // Launching from the dock while Mission Control is up exits it
+        // (macOS behaviour) — the target window needs the real desktop.
+        if _missionControlOpen { _closeMissionControl() }
+
+        // If the app already has a window, bring it to front. Third-party
+        // windows arrive over Wayland with a synthetic appId ("wayland-N"), so
+        // ownership is resolved through the registry — by the app_id the
+        // client declared, not by its title. Windows playing their close
+        // animation don't count: the app's process is already gone (crashed or
+        // killed), and focusing the corpse would swallow the click that should
+        // relaunch it.
+        if let existing = windowManager.windows.first(where: {
+            _appOwning($0)?.id == appId && !_closingWindows.contains($0.id)
+        }) {
+            _focusWindowAcrossSpaces(existing)
+            return
+        }
+
+        // Otherwise, create a new window with the real app content
+        let title: String
+        let builder: (any BuildContext) -> Widget
+        switch appId {
+        case "textviewer":
+            title = "Text Viewer"
+            builder = { _ in TextViewerApp() }
+        #if os(macOS)
+        case "chrome", "vscode":
+            return  // Chrome/VS Code launch not implemented on macOS
+        case "externalapp":
+            // Launch an offscreen-rendered external app via FlutterTexture
+            if let mgr = externalAppManager {
+                let texId = mgr.createExternalApp(width: 640, height: 480)
+                let textureIdInt = Int(texId)
+                windowManager.addWindow(
+                    title: "External App",
+                    appId: appId,
+                    textureId: textureIdInt,
+                    onWindowClose: {
+                        mgr.destroyExternalApp(textureId: texId)
+                    },
+                    appBuilder: { _ in SizedBox(expand: ()) }
+                )
+            }
+            return
+        case "settings", "files", "flutterapp":
+            // Launch as a separate process with IOSurface compositing
+            let execName: String
+            let winTitle: String
+            let winRect: Rect?
+            switch appId {
+            case "settings":
+                execName = "SettingsApp"; winTitle = "Settings"
+                winRect = Rect.fromLTWH(100, 60, 800, 592)
+            case "files":
+                execName = "FileExplorerApp"; winTitle = "Files"
+                winRect = Rect.fromLTWH(80, 50, 900, 620)
+            default:
+                execName = "FlutterDemoApp"; winTitle = "Flutter App"
+                winRect = nil
+            }
+            if let mgr = processAppManager {
+                mgr.launchApp(
+                    executableName: execName,
+                    onReady: { [self] (texId: Int64) in
+                        setState {
+                            processTextureIds[appId] = texId
+                            windowManager.addWindow(
+                                title: winTitle,
+                                appId: appId,
+                                rect: winRect,
+                                textureId: Int(texId),
+                                onWindowClose: {
+                                    mgr.destroyApp(textureId: texId)
+                                },
+                                appBuilder: { _ in SizedBox(expand: ()) }
+                            )
+                        }
+                    },
+                    onTerminated: { [self] in
+                        setState {
+                            processTextureIds.removeValue(forKey: appId)
+                            if let win = windowManager.windows.first(where: { $0.appId == appId }) {
+                                _closingWindows.insert(win.id)
+                            }
+                        }
+                    }
+                )
+            }
+            return
+        #elseif os(Linux)
+        case _ where _record(appId)?.kind == .host:
+            // Third-party host app. Every one of them goes out through
+            // app-run, which owns the per-app launch recipe — the flags, the
+            // env, and the accumulated knowledge of what each app needs (Zoom
+            // must not see WAYLAND_DISPLAY, Chrome's sandbox needs nested
+            // userns, IntelliJ needs -Dawt.toolkit.name=WLToolkit). The window
+            // arrives back via the onNewWindow Wayland callback. app-run is
+            // resolved from STARLING_APP_RUN (set by run-desktop.sh in dev) or
+            // /usr/bin/app-run in the shipped image; the record's Exec names
+            // the recipe.
+            _spawnLauncher(
+                ProcessInfo.processInfo.environment["STARLING_APP_RUN"]
+                    ?? "/usr/bin/app-run",
+                args: [_record(appId)?.exec ?? appId])
+            return
+        case _ where _record(appId)?.kind == .x11:
+            // An X11-only app in its own rootful Xwayland, which is what
+            // actually talks to our compositor (the in-tree X server can't
+            // present WeChat's embedded Chromium). The whole X screen arrives
+            // as one Wayland window; the record's RenameWindows puts the app's
+            // name back on it.
+            _spawnLauncher(
+                ProcessInfo.processInfo.environment["STARLING_WECHAT_RUN"]
+                    ?? "/usr/bin/wechat-run")
+            return
+        case _ where _record(appId)?.kind == .android:
+            // Android apps live inside Waydroid. android-app.sh brings the
+            // session up first if it isn't running, then launches through
+            // `waydroid app launch` — that call sets `waydroid.active_apps`,
+            // and Waydroid FREEZES the container whenever that prop is empty,
+            // so a raw am/monkey start would freeze the app mid-launch.
+            _spawnLauncher(
+                ProcessInfo.processInfo.environment["STARLING_ANDROID_APP"]
+                    ?? "/usr/bin/android-app",
+                args: [_record(appId)?.exec ?? appId])
+            return
+        case "externalapp":
+            // Launch an offscreen-rendered external app via embedder texture API
+            if let mgr = linuxExternalAppManager {
+                let texId = mgr.createExternalApp(width: 640, height: 480)
+                windowManager.addWindow(
+                    title: "External App",
+                    appId: appId,
+                    textureId: Int(texId),
+                    onWindowClose: {
+                        mgr.destroyExternalApp(textureId: texId)
+                    },
+                    appBuilder: { _ in SizedBox(expand: ()) }
+                )
+            }
+            return
+        case "flutterapp", _ where _record(appId)?.kind == .firstParty:
+            // A Starling app, launched as a child process with DMA-BUF
+            // compositing. Executable, title and opening geometry all come
+            // from the app's catalog record ("flutterapp" is the dev demo and
+            // has none).
+            let rec = _record(appId)
+            let execName = rec?.exec ?? "FlutterDemoApp"
+            let winTitle = rec?.name ?? "Flutter App"
+            let winRect = rec?.windowRect.map {
+                Rect.fromLTWH($0.x, $0.y, $0.width, $0.height)
+            }
+            let contentW = Int(winRect?.width ?? DesktopTheme.kDefaultWindowWidth)
+            let contentH = Int((winRect?.height ?? DesktopTheme.kDefaultWindowHeight) - DesktopTheme.kTitleBarHeight)
+            if let mgr = linuxProcessAppManager {
+                // Mark app as launching so duplicate clicks are ignored
+                _pendingAppLaunches.insert(appId)
+                // Hand child apps the live Wayland socket + app-run knobs, so a
+                // child that shells out to app-run (the App Store's "Open"
+                // button) targets THIS shell's socket instead of app-run's
+                // wayland-0 default — which is wrong whenever the shell came up
+                // on wayland-1 after an unclean exit.
+                var childEnv: [String: String] = [:]
+                if let sock = waylandIntegration?.socketName {
+                    childEnv["STARLING_WAYLAND"] = sock
+                    childEnv["STARLING_XDG_DIR"] = LoginUser.runtimeDir
+                    childEnv["STARLING_APP_SCALE"] = String(currentShellDpi)
+                }
+                // Shared between onReady/onTerminated: the texture this
+                // launch received, so late termination tears down only its
+                // own window (never a relaunched instance's).
+                var launchTexId: Int64 = -1
+                let started = mgr.launchDmaBufApp(
+                    executableName: execName,
+                    contentWidth: contentW,
+                    contentHeight: contentH,
+                    extraEnv: childEnv,
+                    onReady: { [self] (texId: Int64) in
+                        launchTexId = texId
+                        // Wait for child's first rendered frame before showing the window
+                        // to avoid displaying uninitialized GPU memory artifacts
+                        mgr.onFirstFrame(textureId: texId) { [self] in
+                            setState {
+                                _pendingAppLaunches.remove(appId)
+                                processTextureIds[appId] = texId
+                                windowManager.addWindow(
+                                    title: winTitle,
+                                    appId: appId,
+                                    rect: winRect,
+                                    textureId: Int(texId),
+                                    onWindowClose: {
+                                        mgr.destroyApp(textureId: texId)
+                                    },
+                                    onPointerEvent: { (phase, x, y, buttons) in
+                                        mgr.sendPointerEvent(
+                                            textureId: texId,
+                                            phase: phase,
+                                            x: x, y: y,
+                                            buttons: buttons
+                                        )
+                                    },
+                                    onContentResize: { (width, height) in
+                                        mgr.sendResize(
+                                            textureId: texId,
+                                            width: Int(width),
+                                            height: Int(height)
+                                        )
+                                    },
+                                    onScrollEvent: { (x, y, dx, dy) in
+                                        mgr.sendScrollEvent(
+                                            textureId: texId,
+                                            x: x, y: y, dx: dx, dy: dy)
+                                    },
+                                    appBuilder: { _ in SizedBox(expand: ()) }
+                                )
+                            }
+                        }
+                    },
+                    onTerminated: { [self] in
+                        setState {
+                            _pendingAppLaunches.remove(appId)
+                            // Scope teardown to THIS process's texture — if
+                            // the app was already relaunched, the fresh
+                            // window must not be torn down by the old
+                            // instance's late termination.
+                            if processTextureIds[appId] == launchTexId {
+                                processTextureIds.removeValue(forKey: appId)
+                            }
+                            // The process died (exit or crash): close its
+                            // window via the animated path, otherwise it
+                            // lingers as a zombie showing the last texture.
+                            if let win = windowManager.windows.first(where: {
+                                $0.appId == appId && $0.textureId == Int(launchTexId)
+                            }) {
+                                _closingWindows.insert(win.id)
+                            }
+                        }
+                    }
+                )
+                // Launch never started (missing binary / socket failure): clear
+                // the pending marker so the icon stays clickable and can retry.
+                if !started { _pendingAppLaunches.remove(appId) }
+            }
+            return
+        #endif
+        default:
+            title = appId
+            builder = { _ in
+                Center(
+                    child: Text(
+                        appId,
+                        style: TextStyle(color: Color(0x80FFFFFF), fontSize: 16)
+                    )
+                )
+            }
+        }
+
+        windowManager.addWindow(
+            title: title,
+            appId: appId,
+            appBuilder: builder
+        )
+    }
+
+}

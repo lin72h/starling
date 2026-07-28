@@ -1,0 +1,49 @@
+// Copyright the Starling authors
+// SPDX-License-Identifier: Apache-2.0
+
+import Flutter
+
+// MARK: - Themed root
+
+/// Root that re-themes the app when the parent shell pushes an appearance
+/// change over the DMA-BUF socket (DMABUF_CONTROL_SET_THEME), and keeps
+/// the Appearance page's Dark Mode switch in sync.
+class ThemedSettingsRoot: StatefulWidget {
+    override func createState() -> State<StatefulWidget> {
+        return _ThemedSettingsRootState()
+    }
+}
+
+class _ThemedSettingsRootState: State<StatefulWidget> {
+    private var _dark = true
+
+    override func initState() {
+        super.initState()
+        #if os(Linux)
+        // Seed from the appearance the shell pushed at connect, before this
+        // tree existed (SettingsBloc seeds its Dark Mode switch the same way).
+        if let dark = GpuDmaBufRenderer.lastPushedThemeIsDark {
+            _dark = dark
+        }
+        GpuDmaBufRenderer.onThemeChanged = { [weak self] dark in
+            guard let self, self._dark != dark else { return }
+            self.setState { self._dark = dark }
+            settingsBlocShared?.add(.themeApplied(dark))
+        }
+        // Layout switches from the desktop context menu flip the Settings
+        // toggle live.
+        GpuDmaBufRenderer.onLayoutChanged = { tiling in
+            settingsBlocShared?.add(.layoutApplied(tiling))
+        }
+        #endif
+    }
+
+    override func build(_ context: any BuildContext) -> Widget {
+        return MacosApp(
+            theme: _dark ? MacosThemeData.dark() : MacosThemeData.light(),
+            home: SettingsApp()
+        )
+    }
+}
+
+runApp(ThemedSettingsRoot())

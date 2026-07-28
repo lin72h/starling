@@ -1,0 +1,4 @@
+module FlutterMacOSBridge {
+  header "FlutterMacOSBridge.h"
+  export *
+}

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Assemble a complete, self-contained Starling desktop tree from the build
+# outputs scattered across this repo (shell/.build, apps/*/.build, the engine
+# checkout, the swiftly toolchain) into ONE directory.
+#
+#   build/stage.sh [outdir] [--apps "A B C"] [--config release]
+#
+# Default outdir: .stage/ at the repo root (gitignored).
+#
+# The staged layout mirrors the installed one exactly:
+#
+#   <stage>/lib/         -> /usr/lib/starling    binaries + every .so they need
+#   <stage>/lib/apps/    -> .../apps             child apps (FLUTTER_APPS_DIR)
+#   <stage>/lib/appbin/  -> .../appbin           xdg-open shim etc.
+#   <stage>/share/       -> /usr/share/starling  icudtl.dat, flutter_assets,
+#                                                wallpaper, icons, shaders
+#   <stage>/bin/         -> /usr/bin             app-run, app-install
+#
+# Why this exists: running straight out of .build only works by coincidence of
+# relative rpaths and the shell's cwd, and child apps are spawned with
+# LD_LIBRARY_PATH scrubbed, so they resolve libraries via their own $ORIGIN
+# only. Staging puts every library next to the binary that needs it, which is
+# the same arrangement that ships — so the dev loop exercises the shipping
+# configuration instead of a dev-only one.
+#
+# Both build/run-desktop.sh and build/package-desktop.sh consume this, so the
+# layout is defined in exactly one place.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+OUT=""
+CONFIG=release
+APPS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --apps)   APPS="$2"; shift 2 ;;
+        --config) CONFIG="$2"; shift 2 ;;
+        -*)       echo "unknown option: $1" >&2; exit 1 ;;
+        *)        OUT="$1"; shift ;;
+    esac
+done
+OUT="${OUT:-$REPO/.stage}"
+
+TRIPLE=x86_64-unknown-linux-gnu
+SHELL_BUILD=$REPO/shell/.build
+E=$REPO/engine/src/out/host_release
+[ -d "$E" ] || E=$REPO/engine/src/out/host_debug
+E="${STARLING_ENGINE_OUT:-$E}"
+
+[ -f "$E/libflutter_engine.so" ] || {
+    echo "error: no libflutter_engine.so in $E — build the engine first" >&2; exit 1
+}
+[ -x "$SHELL_BUILD/$CONFIG/DesktopShellApp" ] || {
+    echo "error: shell not built — cd shell && swift build -c $CONFIG" >&2; exit 1
+}
+
+# Default app set: every app with a built binary for this config.
+if [ -z "$APPS" ]; then
+    for d in "$REPO"/apps/*/; do
+        a=$(basename "$d")
+        [ -x "$REPO/apps/$a/.build/$CONFIG/$a" ] && APPS="$APPS $a"
+    done
+fi
+APPS="$(echo "$APPS" | xargs)"   # trim
+
+LIB=$OUT/lib
+SHARE=$OUT/share
+rm -rf "$OUT"
+mkdir -p "$LIB/apps" "$LIB/appbin" "$SHARE/shaders" "$OUT/bin"
+
+# --- shell + engine ----------------------------------------------------------
+install -m755 "$SHELL_BUILD/$CONFIG/DesktopShellApp" "$LIB/"
+install -m644 "$SHELL_BUILD/$TRIPLE/$CONFIG/libFlutterShared.so" "$LIB/"
+install -m644 "$E/libflutter_engine.so" "$E/libflutter_linux_drm.so" "$LIB/"
+
+# SwiftPM resource bundles (CupertinoIcons font, …): the generated accessor
+# fatals if the bundle isn't next to the executable. Ship every one.
+for r in "$SHELL_BUILD/$TRIPLE/$CONFIG/"*.resources; do
+    [ -d "$r" ] && cp -r "$r" "$LIB/"
+done
+
+# --- Swift runtime: the ldd closure of everything we stage, limited to what
+# the swiftly toolchain provides (absent on target machines) ------------------
+{
+    ldd "$SHELL_BUILD/$CONFIG/DesktopShellApp"
+    for a in $APPS; do ldd "$REPO/apps/$a/.build/$CONFIG/$a"; done
+} 2>/dev/null | awk '$3 ~ /swiftly\/toolchains/ {print $3}' | sort -u | while read -r so; do
+    install -m644 "$so" "$LIB/"
+done
+
+# --- first-party apps --------------------------------------------------------
+for a in $APPS; do
+    install -m755 "$REPO/apps/$a/.build/$CONFIG/$a" "$LIB/apps/"
+    for r in "$REPO/apps/$a/.build/$TRIPLE/$CONFIG/"*.resources; do
+        [ -d "$r" ] && cp -r "$r" "$LIB/apps/"
+    done
+    # Some apps (AppStoreApp) link their own libFlutterShared.so build product;
+    # $ORIGIN is the apps/ dir, so it must sit alongside them.
+    fs="$REPO/apps/$a/.build/$TRIPLE/$CONFIG/libFlutterShared.so"
+    [ -f "$fs" ] && install -m644 "$fs" "$LIB/apps/"
+    # Vendored per-app libraries (ImageViewerApp's PDFium).
+    for dep in "$REPO/apps/$a/.deps/"*/lib/*.so; do
+        [ -f "$dep" ] && install -m644 "$dep" "$LIB/apps/"
+    done
+done
+
+# Child apps resolve libraries via their own $ORIGIN only — the shell's
+# child-spawn path scrubs LD_LIBRARY_PATH (STARLING_CHILD_HOST_GL, a dev-Mesa
+# workaround) — so the engine + Swift runtime must be reachable from apps/ too.
+# Symlinks keep the tree size flat.
+for so in "$LIB"/*.so; do
+    b="$(basename "$so")"
+    [ -e "$LIB/apps/$b" ] || ln -s "../$b" "$LIB/apps/$b"
+done
+
+# --- assets: engine data + flutter_assets + shell data files -----------------
+# flutter_assets is what the embedder is pointed at (args.assets_path), but it
+# holds only the manifests, the engine's third-party NOTICES and its shaders.
+# The Dart snapshots a normal Flutter app would ship here — kernel_blob.bin,
+# isolate_snapshot_data, vm_snapshot_data, 35 MB of them — are gone: the Swift
+# runtime replaces the Dart framework, so no isolate is ever created and
+# neither the release (AOT) nor the debug (JIT) engine reads them. Verified by
+# deleting all three and booting both engines.
+install -m644 "$E/icudtl.dat" "$SHARE/"
+cp -r "$REPO/build/flutter_assets" "$SHARE/"
+# Wallpapers: the bundled JPEGs, decoded and center-cropped at runtime.
+# sdk/wallpaper.rgba is deliberately NOT staged — it is the legacy
+# pre-rendered 3840x2160 raw path, which _loadWallpaperTexture() checks
+# FIRST, so staging it silently pins the desktop to that stale image and
+# the bundled default never loads (and it costs 33 MB).
+mkdir -p "$SHARE/wallpapers"
+install -m644 "$REPO"/shell/Resources/Wallpapers/*.jpg "$SHARE/wallpapers/"
+# The app catalog: one record per app the desktop knows about. The launcher,
+# the dock, the App Store and app-install all read it, so it has to be here
+# for any of them to know an app exists.
+mkdir -p "$SHARE/catalog.d"
+install -m644 "$REPO"/registry/catalog.d/*.app "$SHARE/catalog.d/"
+# No third-party app icons are staged: those marks are their owners'
+# trademarks, so the dock reads them from the host's freedesktop icon theme at
+# runtime (DesktopEntry lookup) and falls back to its own neutral glyph.
+install -m644 "$REPO/shell/Sources/DesktopShellApp/Shaders/liquid_glass.frag.iplr" \
+    "$SHARE/shaders/"
+
+# --- third-party app tools: host-direct runner + apt-only installer ---------
+install -m755 "$REPO/build/app-run.sh" "$OUT/bin/app-run"
+install -m755 "$REPO/build/app-install.sh" "$OUT/bin/app-install"
+install -m755 "$REPO/build/wechat-run.sh" "$OUT/bin/wechat-run"
+install -m755 "$REPO"/build/appbin/* "$LIB/appbin/"
+
+echo "staged -> $OUT"
+echo "  engine: $E"
+echo "  config: $CONFIG"
+echo "  apps:   $APPS"

@@ -1,0 +1,7 @@
+/engine
+.build/
+.build-starling/
+.DS_Store
+.stage/
+/sdk/tools/drm_screenshot
+__pycache__/

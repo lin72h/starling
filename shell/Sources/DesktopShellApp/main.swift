@@ -1,0 +1,765 @@
+// Copyright the Starling authors
+// SPDX-License-Identifier: Apache-2.0
+
+#if os(macOS)
+import AppKit
+import FlutterMacOSBridge
+#elseif os(Linux)
+import FlutterEmbedderBridge
+import FlutterDRMBridge
+import WaylandServerBridge
+import PortalService
+import Foundation
+import Glibc
+#endif
+
+import Flutter
+import FlutterSwiftBridge
+import SwiftRuntime
+import StarlingRegistry
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARK: - macOS Entry Point
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#if os(macOS)
+
+// MARK: - Global Compositor
+
+/// Global reference to the external app manager, set after engine starts.
+nonisolated(unsafe) var externalAppManager: ExternalAppManager? = nil
+
+/// Global reference to the process app manager, set after engine starts.
+nonisolated(unsafe) var processAppManager: ProcessAppManager? = nil
+
+// MARK: - Entry Point
+
+let app = NSApplication.shared
+app.setActivationPolicy(.regular)
+
+// Create FlutterEngine (headless — we start it manually in Swift mode).
+let engine = FlutterEngine(name: "swift-app", project: nil, allowHeadlessExecution: true)
+
+// Build the widget tree: FluentApp wrapping our DesktopShell.
+// FluentApp now provides Directionality and Overlay automatically.
+runApp(
+    FluentApp(
+        themeMode: .dark,
+        home: DesktopShell(),
+        title: "Desktop Shell PoC"
+    )
+)
+
+// Create the C callback table backed by SwiftRuntimeDelegate.
+var callbacks = createRuntimeCallbacks()
+
+// Start engine in Swift mode BEFORE creating the view controller.
+let started = withUnsafePointer(to: &callbacks) { ptr in
+   engine.runSwift(withRuntimeCallbacks: UnsafeRawPointer(ptr))
+}
+guard started else {
+    fatalError("[DesktopShellApp] Failed to start engine in Swift mode")
+}
+
+// Initialize the external app manager now that the engine is running.
+externalAppManager = ExternalAppManager(engine: engine)
+
+// Initialize the process app manager for cross-process IOSurface compositing.
+processAppManager = ProcessAppManager(engine: engine)
+
+// Create FlutterViewController with the already-running engine.
+let viewController = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
+
+// Create window.
+let window = NSWindow(
+    contentRect: NSMakeRect(0, 0, 1440, 900),
+    styleMask: [.titled, .closable, .miniaturizable, .resizable],
+    backing: .buffered,
+    defer: false
+)
+window.title = "Desktop Shell PoC"
+window.contentViewController = viewController
+window.setContentSize(NSMakeSize(1440, 900))
+window.center()
+window.makeKeyAndOrderFront(nil)
+app.activate(ignoringOtherApps: true)
+
+// Schedule first frame.
+PlatformDispatcher.instance.scheduleFrame()
+
+// Enter event loop.
+app.run()
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARK: - Linux Entry Point
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Creates an X11 window via GLFW3, renders with OpenGL ES 2 via EGL, and
+// forwards mouse/keyboard input to the Flutter engine. Falls back to the
+// headless software renderer when --headless is passed.
+
+#elseif os(Linux)
+
+// ─── AppState ────────────────────────────────────────────────────────────────
+
+/// Holds all mutable state shared between GLFW callbacks and the embedder.
+/// Passed as `Unmanaged<AppState>.toOpaque()` through the embedder's
+/// `user_data` and GLFW's `glfwSetWindowUserPointer`.
+///
+/// Must NOT be @MainActor — engine callbacks come from io/raster threads.
+/// @unchecked Sendable because we manually synchronize access (main thread
+/// for GLFW callbacks, NSLock for taskQueue).
+// Whether a first-party app counts as installed depends on where its binary
+// can be found, and only the shell knows all the layouts (staged, packaged,
+// sibling dev build). Hand that to the registry before anything reads it —
+// the launcher and dock ask it on their very first build.
+AppRegistry.shared.firstPartyResolver = { LinuxProcessAppManager.resolveAppExecutable($0) }
+
+/// Global reference to the Linux external app manager, set after engine starts.
+nonisolated(unsafe) var linuxExternalAppManager: LinuxExternalAppManager? = nil
+
+/// Global reference to the Linux process app manager (cross-process compositing).
+nonisolated(unsafe) var linuxProcessAppManager: LinuxProcessAppManager? = nil
+
+nonisolated(unsafe) var waylandIntegration: WaylandIntegration? = nil
+nonisolated(unsafe) var x11Integration: X11Integration? = nil
+nonisolated(unsafe) var portalIntegration: PortalIntegration? = nil
+
+/// Current shell DPI — updated at runtime by Settings app. Read this instead
+/// of the FLUTTER_DRM_DPI env var for coordinate conversion.
+// Default 2.0: integer scaling on 4K panels — fractional scales (e.g. 1.7)
+// can't land text stems on the pixel grid and read as blurry (the Apr 2026
+// 1.7 default was a crispness regression).
+nonisolated(unsafe) var currentShellDpi: Double = Double(ProcessInfo.processInfo.environment["FLUTTER_DRM_DPI"] ?? "2.0") ?? 2.0
+
+/// The display layout (virtual desktop of one or more outputs). Built at DRM
+/// startup; nil on the macOS/GLFW dev paths (screen size falls back there).
+nonisolated(unsafe) var displayLayout: DisplayLayout? = nil
+
+
+final class AppState: @unchecked Sendable {
+    nonisolated(unsafe) var window: OpaquePointer? = nil
+    nonisolated(unsafe) var resourceWindow: OpaquePointer? = nil
+    nonisolated(unsafe) var engine: OpaquePointer? = nil
+
+    nonisolated(unsafe) var pixelsPerScreenCoord: Double = 1.0
+
+    // Pointer state machine (mirrors flutter_glfw.cc)
+    nonisolated(unsafe) var pointerAdded = false
+    nonisolated(unsafe) var pointerDown = false
+    nonisolated(unsafe) var buttons: Int64 = 0
+
+    /// Set to true after the first frame has been processed (layout complete).
+    /// Pointer events are suppressed until this is true to avoid hit-testing
+    /// render objects that haven't been laid out yet.
+    nonisolated(unsafe) var firstFrameProcessed = false
+
+    /// Texture registry for external texture compositing (set after engine init).
+    nonisolated(unsafe) var textureRegistry: LinuxTextureRegistry? = nil
+
+    nonisolated let taskQueue = FlutterTaskQueue()
+    nonisolated let mainThreadPthread = pthread_self()
+}
+
+// ─── FlutterTaskQueue ────────────────────────────────────────────────────────
+
+/// Thread-safe priority queue of engine tasks. The engine posts tasks from
+/// arbitrary threads; we drain them on the main GLFW thread.
+class FlutterTaskQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tasks: [(task: FlutterTask, targetNanos: UInt64)] = []
+
+    func enqueue(_ task: FlutterTask, targetNanos: UInt64) {
+        lock.lock()
+        tasks.append((task, targetNanos))
+        lock.unlock()
+    }
+
+    /// Returns (expired tasks, next-deadline-nanos-or-nil).
+    func drainExpired() -> (expired: [(FlutterTask, UInt64)], nextNanos: UInt64?) {
+        let now = FlutterEngineGetCurrentTime()
+        lock.lock()
+        var expired: [(FlutterTask, UInt64)] = []
+        var remaining: [(task: FlutterTask, targetNanos: UInt64)] = []
+        for entry in tasks {
+            if entry.targetNanos <= now {
+                expired.append((entry.task, entry.targetNanos))
+            } else {
+                remaining.append(entry)
+            }
+        }
+        tasks = remaining
+        let nextNanos = remaining.map(\.targetNanos).min()
+        lock.unlock()
+        return (expired, nextNanos)
+    }
+}
+
+// ─── Pointer helpers ─────────────────────────────────────────────────────────
+
+/// Sends a pointer event to the Flutter engine, handling the add/remove
+/// synthesis protocol that the engine requires.
+func sendPointerEvent(
+    _ state: AppState,
+    phase: FlutterPointerPhase,
+    x: Double,
+    y: Double,
+    signalKind: FlutterPointerSignalKind = kFlutterPointerSignalKindNone,
+    scrollDeltaX: Double = 0,
+    scrollDeltaY: Double = 0,
+    buttons: Int64 = 0
+) {
+    guard let engine = state.engine else { return }
+    // Suppress pointer events until the first frame is laid out, otherwise
+    // hit testing crashes on render boxes that have never been laid out.
+    guard state.firstFrameProcessed else { return }
+
+    // Synthesise kAdd if the pointer hasn't been added yet
+    if !state.pointerAdded && phase != kAdd {
+        sendPointerEvent(state, phase: kAdd, x: x, y: y)
+    }
+    // Don't double-add
+    if state.pointerAdded && phase == kAdd { return }
+
+    var event = FlutterPointerEvent()
+    event.struct_size = MemoryLayout<FlutterPointerEvent>.size
+    event.phase = phase
+    event.timestamp = Int(FlutterEngineGetCurrentTime() / 1000)  // ns → µs
+    event.x = x * state.pixelsPerScreenCoord
+    event.y = y * state.pixelsPerScreenCoord
+    event.device = 0
+    event.signal_kind = signalKind
+    event.scroll_delta_x = scrollDeltaX
+    event.scroll_delta_y = scrollDeltaY
+    event.device_kind = kFlutterPointerDeviceKindMouse
+    event.buttons = buttons
+    event.view_id = 0
+
+    FlutterEngineSendPointerEvent(engine, &event, 1)
+
+    // Update state machine
+    switch phase {
+    case kAdd:    state.pointerAdded = true
+    case kRemove: state.pointerAdded = false
+    case kDown:   state.pointerDown = true
+    case kUp:     state.pointerDown = false
+    default: break
+    }
+}
+
+/// Determines the correct pointer phase based on current button state,
+/// matching the flutter_glfw.cc state machine.
+func pointerPhaseForButtonState(_ state: AppState) -> FlutterPointerPhase {
+    if state.buttons == 0 {
+        return state.pointerDown ? kUp : kHover
+    } else {
+        return state.pointerDown ? kMove : kDown
+    }
+}
+
+
+// ─── DRM/KMS mode (--drm flag) ───────────────────────────────────────────────
+
+/// Global reference to the DRM texture registry (used by the DRM texture callback).
+nonisolated(unsafe) var drmTextureRegistry: LinuxTextureRegistry? = nil
+
+/// The engine view handle — hotplug callbacks and the multi-view content
+/// builder's fallback path query outputs through it.
+nonisolated(unsafe) var drmViewHandle: OpaquePointer? = nil
+
+/// The real-output virtual desktop, derived deterministically from the
+/// engine's enumeration: primary at (0,0) at the shell DPI, secondaries to
+/// its right in enumeration order at 1x (per-output scale settings come
+/// later). Startup, hotplug, and the content builder's fallback all use
+/// this, so they always agree on the arrangement.
+func computeRealLayoutFromEngine(_ view: OpaquePointer?) -> DisplayLayout? {
+    guard let view else { return nil }
+    let count = Int(fl_drm_view_get_output_count(view))
+    guard count > 0 else { return nil }
+    var outputs: [DisplayOutput] = []
+    var nameBuf = [CChar](repeating: 0, count: 32)
+    for i in 0..<count {
+        var w: UInt32 = 0, h: UInt32 = 0, refresh: UInt32 = 0
+        var isPrimary: Int32 = 0
+        guard fl_drm_view_get_output_info(
+            view, UInt32(i), &w, &h, &refresh, &isPrimary,
+            &nameBuf, UInt32(nameBuf.count)) == 1 else { continue }
+        let primary = isPrimary == 1
+        outputs.append(DisplayOutput(
+            id: i, name: String(cString: nameBuf),
+            physicalWidth: Int(w), physicalHeight: Int(h),
+            scale: primary ? currentShellDpi : 1.0,
+            originX: 0, originY: 0, isPrimary: primary,
+            refreshMhz: Int(refresh)))
+    }
+    guard !outputs.isEmpty else { return nil }
+    var cursorX = 0.0
+    if let p = outputs.firstIndex(where: { $0.isPrimary }) {
+        outputs[p].originX = 0
+        cursorX = outputs[p].logicalWidth
+    }
+    for i in outputs.indices where !outputs[i].isPrimary {
+        outputs[i].originX = cursorX
+        cursorX += outputs[i].logicalWidth
+    }
+    return DisplayLayout(outputs: outputs)
+}
+
+/// Give every secondary output without a Flutter view one, and (re)install
+/// the engine's pointer-space placements. Must run on a thread the engine
+/// accepts AddView from: main during startup (before fl_drm_view_run), the
+/// engine platform thread at hotplug.
+func syncEngineViewsAndLayout(_ view: OpaquePointer?, _ dl: DisplayLayout) {
+    guard let view else { return }
+    let mapped = Set(secondaryViewOutputs.outputIds)
+    for output in dl.outputs where !output.isPrimary && !mapped.contains(output.id) {
+        let viewId = secondaryViewOutputs.allocateViewId()
+        // Mapped BEFORE AddView: the content builder reads it on the view's
+        // first frame.
+        secondaryViewOutputs[viewId] = output.id
+        if fl_drm_view_add_output_view(
+            view, UInt32(output.id), Int64(viewId), output.scale) != 1 {
+            secondaryViewOutputs[viewId] = nil
+        }
+    }
+    guard dl.outputs.count > 1 else { return }
+    for output in dl.outputs {
+        fl_drm_view_set_output_layout(
+            view, UInt32(output.id), output.originX, output.originY, output.scale)
+    }
+}
+
+/// DRM connector hotplug — runs on the ENGINE PLATFORM thread (the thread
+/// AddView requires). The engine has already built the new output's swap
+/// chain and modeset it black; here the shell gives it a view + pointer
+/// placement, then publishes the layout to the main thread (DisplayLayout,
+/// wl_output advertisement, repaint).
+func drmOutputsChanged() {
+    guard let view = drmViewHandle,
+          let dl = computeRealLayoutFromEngine(view) else { return }
+    // Unplugged outputs (their get_output_info now fails) lose their view
+    // mapping so a later reconnect gets a fresh view.
+    secondaryViewOutputs.removeMappings(notIn: Set(dl.outputs.map { $0.id }))
+    syncEngineViewsAndLayout(view, dl)
+    DispatchQueue.main.async {
+        displayLayout = dl
+        FileHandle.standardError.write(Data(
+            "[DisplayLayout] hotplug: \(dl.describe())\n".utf8))
+        // Always re-advertise on hotplug — shrinking back to one output
+        // must reach clients too.
+        waylandIntegration?.setOutputs(dl.outputs)
+        // Windows stranded on an unplugged output come home to the primary
+        // (macOS behavior), keeping their size.
+        if let shell = _shellState {
+            for win in shell.windowManager.visibleWindows
+            where dl.outputs(intersectingRect: win.rect).isEmpty {
+                let p = dl.primary
+                let w = win.rect.width
+                let h = win.rect.height
+                let nx = min(max(win.rect.left, p.logicalLeft),
+                             max(p.logicalLeft, p.logicalRight - w))
+                let ny = min(max(win.rect.top, p.logicalTop),
+                             max(p.logicalTop, p.logicalBottom - h))
+                win.rect = Rect.fromLTWH(nx, ny, w, h)
+            }
+        }
+        _shellState?.setState {}
+    }
+}
+
+func runDRM() -> Never {
+    // Content for non-implicit Flutter views — one per secondary output,
+    // created below once the engine is up and the display layout is known.
+    multiViewContentBuilder = { flutterView in
+        guard let outputId = secondaryViewOutputs[flutterView.viewId] else {
+            return ColoredBox(color: Color(0xFF000000))
+        }
+        // The published layout can lag a hotplug by a beat (it's posted to
+        // the main queue); the engine-derived layout is identical by
+        // construction, so fall back to it for the missing output.
+        let output = displayLayout?.outputs.first(where: { $0.id == outputId })
+            ?? computeRealLayoutFromEngine(drmViewHandle)?
+                .outputs.first(where: { $0.id == outputId })
+        guard let output else {
+            return ColoredBox(color: Color(0xFF000000))
+        }
+        return SecondaryScreenHost(output: output)
+    }
+
+    // Build the widget tree and runtime callbacks.
+    runApp(
+        FluentApp(
+            themeMode: .dark,
+            home: DesktopShell(),
+            title: "Desktop Shell"
+        )
+    )
+    var callbacks = createRuntimeCallbacks()
+
+    let engineOutDir = ProcessInfo.processInfo.environment["FLUTTER_ENGINE_OUT"] ?? "../engine/src/out/host_debug"
+    let assetsPath = "\(engineOutDir)/flutter_assets"
+    let icuPath = "\(engineOutDir)/icudtl.dat"
+
+    // Ensure FLUTTER_DRM_DPI is in the environment so the C engine
+    // (fl_drm_view.cc) uses the same default as Swift's currentShellDpi.
+    if ProcessInfo.processInfo.environment["FLUTTER_DRM_DPI"] == nil {
+        setenv("FLUTTER_DRM_DPI", "\(currentShellDpi)", 1)
+    }
+
+    // Create the DRM view — this initializes DRM display, GBM, EGL,
+    // the Flutter engine, and input handling.
+    guard let view = withUnsafeMutablePointer(to: &callbacks, { cbPtr in
+        fl_drm_view_create(assetsPath, icuPath, UnsafeMutableRawPointer(cbPtr))
+    }) else {
+        fatalError("[DesktopShellApp] fl_drm_view_create failed")
+    }
+
+    let drmEngine = fl_drm_view_get_engine(view)!
+    let screenW = fl_drm_view_get_width(view)
+    let screenH = fl_drm_view_get_height(view)
+
+    // Build the display layout (virtual desktop). STARLING_SIM_OUTPUTS
+    // fabricates a hardware-free arrangement for development; otherwise the
+    // engine's REAL output enumeration drives it: primary at (0,0), secondary
+    // outputs to its right, each with its own Flutter view rendering a
+    // SecondaryOutputScreen. At N=1 this reproduces the previous
+    // single-screen behavior exactly.
+    drmViewHandle = view
+    let simSpec = ProcessInfo.processInfo.environment["STARLING_SIM_OUTPUTS"] ?? ""
+    let realOutputCount = Int(fl_drm_view_get_output_count(view))
+    if simSpec.isEmpty && realOutputCount > 1,
+       let dl = computeRealLayoutFromEngine(view) {
+        displayLayout = dl
+    } else {
+        displayLayout = DisplayLayout.build(
+            physicalWidth: Int(screenW), physicalHeight: Int(screenH),
+            scale: currentShellDpi, refreshMhz: Int(fl_drm_view_get_refresh_mhz(view)))
+    }
+    FileHandle.standardError.write(Data(
+        "[DisplayLayout] \(displayLayout!.describe())\n".utf8))
+
+    // One Flutter view per REAL secondary output (sim outputs render inside
+    // the primary's scale-to-fit overview instead), pointer-space placements,
+    // and runtime hotplug: a monitor plugged in later gets the same
+    // treatment via the outputs-changed callback (engine platform thread).
+    if simSpec.isEmpty {
+        if let dl = displayLayout {
+            syncEngineViewsAndLayout(view, dl)
+        }
+        fl_drm_view_set_outputs_changed_callback(view, { _ in
+            drmOutputsChanged()
+        }, nil)
+    }
+
+    // Wire the global cursor-shape setter so widgets (resize handles, title
+    // bars, content areas) can ask for a different hardware cursor bitmap.
+    DesktopCursor.shapeSetter = { shape in
+        fl_drm_view_set_cursor_shape(view, shape.rawValue)
+    }
+    // Export screen resolution so child apps (SettingsApp) can compute max DPI.
+    setenv("FLUTTER_SCREEN_WIDTH", "\(screenW)", 1)
+    setenv("FLUTTER_SCREEN_HEIGHT", "\(screenH)", 1)
+
+    // Set up texture registry with DRM proc address resolver (eglGetProcAddress).
+    let textureRegistry = LinuxTextureRegistry()
+    textureRegistry.glProcAddressResolver = { name in
+        return fl_drm_view_get_proc_address(name)
+    }
+    drmTextureRegistry = textureRegistry
+
+    // Set up external app manager in vsync-driven mode.
+    let engine = OpaquePointer(drmEngine)
+    let manager = LinuxExternalAppManager(
+        engine: engine,
+        textureRegistry: textureRegistry
+    )
+    manager.enableVsyncDriven()
+    linuxExternalAppManager = manager
+    let processManager = LinuxProcessAppManager(
+        engine: engine,
+        textureRegistry: textureRegistry
+    )
+    FrameCallbackScheduler.shared.register(processManager) { [weak processManager] in
+        processManager?.tick()
+    }
+    linuxProcessAppManager = processManager
+
+    // Appearance change requests from child processes (SettingsApp's Dark
+    // Mode toggle) route to the shell's appearance switch.
+    processManager.onThemeChangeRequested = { dark in
+        _shellState?._setAppearance(dark: dark)
+    }
+
+    // Window-manager layout requests (SettingsApp's Tiling toggle).
+    processManager.onLayoutChangeRequested = { tiling in
+        _shellState?._setTiling(tiling)
+    }
+
+    // Caret reports from child apps drive the IME candidate panel placement.
+    processManager.onCaretChanged = { texId, x, y, w, h, visible in
+        _shellState?._imeCaretChanged(textureId: texId, x: x, y: y,
+                                      width: w, height: h, visible: visible)
+    }
+
+    // Handle runtime DPI change requests from child processes (e.g. SettingsApp).
+    processManager.onDpiChangeRequested = { newDpi in
+        let oldDpi = currentShellDpi
+        // Update the global DPI used for coordinate conversion
+        currentShellDpi = newDpi
+        // Keep the primary output's scale in step with the runtime DPI change.
+        displayLayout?.updatePrimaryScale(newDpi)
+        // Persist so child processes (SettingsApp) inherit the current value
+        setenv("FLUTTER_DRM_DPI", "\(newDpi)", 1)
+        // Update parent engine metrics
+        fl_drm_view_send_metrics(view, newDpi)
+        // Don't update Wayland scale factors — existing clients (Chrome) have
+        // buffers rendered at the original scale. Changing shellDpi/fractionalScale
+        // would break coordinate conversions for those buffers. The engine's
+        // pixel_ratio change + texture scaling handles the visual mapping.
+        // Notify all child processes (SettingsApp, FlutterDemoApp) to re-render at new DPI
+        processManager.broadcastDpiChange(newDpi)
+    }
+
+    // Set up Wayland compositor server.
+    let wayland = WaylandIntegration(engine: engine, textureRegistry: textureRegistry)
+    let drmWidth = Int(fl_drm_view_get_width(view))
+    let drmHeight = Int(fl_drm_view_get_height(view))
+    let drmDpiInt = max(1, Int(currentShellDpi))
+    // Advertise integer scale for wl_output, fractional via wp_fractional_scale_v1.
+    // shellDpi uses the actual fractional value for correct coordinate conversion.
+    // refreshMhz: the panel's real refresh rate from the active DRM mode.
+    wayland.start(screenWidth: drmWidth, screenHeight: drmHeight, scale: drmDpiInt, shellDpi: currentShellDpi,
+                  refreshMhz: Int(fl_drm_view_get_refresh_mhz(view)))
+    // REAL multi-output: advertise the arrangement to clients — one
+    // wl_output per display with logical positions (replaces the single
+    // config-built output). Surface enter/leave follows window rects via
+    // updateWaylandSurfaceOutputs(). Sim outputs stay single-output: clients
+    // really do render onto the one physical panel there.
+    if let dl = displayLayout, dl.outputs.count > 1, !secondaryViewOutputs.isEmpty {
+        wayland.setOutputs(dl.outputs)
+    }
+    // Advertise the dma-buf modifiers our EGL can actually import (v3
+    // modifier events + v4 feedback table) so external clients negotiate
+    // layouts explicitly instead of relying on implicit-modifier guessing.
+    wayland.advertiseDmaBufFormats(eglDisplay: fl_drm_view_get_egl_display(view))
+    FrameCallbackScheduler.shared.register(wayland) { [weak wayland] in
+        wayland?.tick()
+    }
+    waylandIntegration = wayland
+    _onWaylandIntegrationReady?()  // Wire up DesktopShell callbacks now that waylandIntegration is set
+
+    // Register Wayland server fd with DRM epoll so client connections
+    // wake the event loop and dispatch events on the platform thread.
+    let waylandFd = wayland.serverFd
+    if waylandFd >= 0 {
+        fl_drm_view_add_external_fd(view, Int32(waylandFd), { userData in
+            guard let wl = waylandIntegration else { return }
+            wl.dispatchEvents()
+        }, nil)
+    }
+
+    // Register wakeup pipe fd so UI thread commands are drained promptly.
+    let wakeupFd = wayland.wakeupReadFd
+    if wakeupFd >= 0 {
+        fl_drm_view_add_external_fd(view, wakeupFd, { userData in
+            guard let wl = waylandIntegration else { return }
+            wl.drainWakeupPipe()
+        }, nil)
+    }
+
+    // Real-vsync frame pacing: page-flip completions (platform thread, same
+    // thread as the Wayland event loop) drive client frame callbacks and
+    // presentation feedback with kernel scanout timestamps.
+    fl_drm_view_set_present_callback(view, { userData, flipTimeNs, refreshNs in
+        guard let wl = waylandIntegration else { return }
+        wl.handlePresent(flipTimeNs: flipTimeNs, refreshNs: refreshNs)
+    }, nil)
+
+    // Mark as epoll-driven so tick() doesn't dispatch (epoll handles it).
+    wayland.setEpollDriven()
+
+    // Set up X11 server (listens on :1 to avoid conflict with any existing X)
+    let x11 = X11Integration(engine: engine, textureRegistry: textureRegistry)
+    x11.start(displayNum: 1, screenWidth: drmWidth, screenHeight: drmHeight, drmView: view)
+    x11Integration = x11
+    _onX11IntegrationReady?()  // Wire up DesktopShell callbacks now that x11Integration is set
+
+    // Register X11 listen fd with DRM epoll for new connections.
+    let x11Fd = x11.serverFd
+    if x11Fd >= 0 {
+        fl_drm_view_add_external_fd(view, Int32(x11Fd), { userData in
+            guard let x = x11Integration else { return }
+            x.dispatchEvents()
+        }, nil)
+    }
+    // Dispatch X11 on every engine frame to process client requests
+    // on already-connected sockets (not in epoll set).
+    /* NOTE: Do NOT register X11 with FrameCallbackScheduler.
+     * The FrameCallbackScheduler runs on the raster thread (io.flutter.raster),
+     * but x11_server_dispatch is also called from the DRM epoll thread (main).
+     * Concurrent dispatch from two threads causes data races → SIGABRT crash.
+     * X11 dispatch is handled solely by the epoll fd callbacks. */
+
+    // Register the external texture callback with the DRM view.
+    fl_drm_view_set_external_texture_callback(view, { (userData, textureId, width, height, textureOut) -> Int32 in
+        guard let registry = drmTextureRegistry,
+              let out = textureOut?.assumingMemoryBound(to: FlutterOpenGLTexture.self) else {
+            return 0
+        }
+        return registry.populateTexture(
+            id: textureId,
+            width: Int(width),
+            height: Int(height),
+            textureOut: out
+        ) ? 1 : 0
+    }, nil)
+
+    // Start the portal service (Settings + FileChooser) on THIS session's bus
+    // — $XDG_RUNTIME_DIR/bus, which is the bus app-run points every client at.
+    //
+    // Pin the address explicitly in both cases. Letting sd-bus pick (the old
+    // unprivileged path) makes it honour an inherited DBUS_SESSION_BUS_ADDRESS,
+    // and under GDM that is the user's real /run/user/<uid>/bus: the portal
+    // then claims org.freedesktop.portal.Desktop on a bus no client in this
+    // session ever talks to. On the session's own bus the name is left
+    // unowned, so the first client request D-Bus-activates the stock
+    // xdg-desktop-portal there instead — which finds no Starling backend and
+    // serves no FileChooser, breaking every file dialog. Running as root hid
+    // this completely, because that branch always pinned the address.
+    //
+    // targetUid only matters as root: the portal thread drops euid to the
+    // login user before connecting, so it can reach their runtime dir.
+    let portal = PortalIntegration()
+    portal.start(busAddress: "unix:path=\(LoginUser.runtimeDir)/bus",
+                 targetUid: getuid() == 0 ? UInt32(LoginUser.uid) : 0)
+    // Advertise the persisted appearance (1 = dark, 2 = light) — Wayland
+    // clients (Chrome, GTK/Qt) read org.freedesktop.appearance/color-scheme
+    // and follow SettingChanged on switches (_setAppearance emits it).
+    _DesktopShellState.loadPersistedAppearance()
+    portal.setColorScheme(shellTheme.isDark ? 1 : 2)
+    // FileChooser: launch FileExplorerApp --picker as a composited DMA-BUF
+    // child window (see PortalFileChooser.swift). userdata unused — the thunk
+    // reaches the shell via the _shellState global.
+    portal.setChooserLauncher(portalChooserLaunchThunk, userdata: nil)
+    portalIntegration = portal
+
+    // Schedule first frame.
+    PlatformDispatcher.instance.scheduleFrame()
+
+    // Run the event loop (blocks until shutdown).
+    // fl_drm_view_run installs its own SIGUSR1 handler (ScreenshotSignalHandler)
+    // which sets g_screenshot_requested and schedules a frame. But the Swift
+    // adapter skips compositing when nothing is dirty, so the present callback
+    // (which does glReadPixels) never fires. We re-install SIGUSR1 after the
+    // C++ handler is set, chaining both: set _forceNextComposite AND call the
+    // C++ function to set g_screenshot_requested.
+    //
+    // fl_drm_view_run calls signal(SIGUSR1, ...) synchronously before entering
+    // the epoll loop, so we use DispatchQueue to install our handler on the
+    // next run loop iteration (after the C++ handler is already installed).
+    DispatchQueue.main.async {
+        signal(SIGUSR1) { _ in
+            Flutter._forceNextComposite = true
+            fl_drm_view_request_screenshot()
+        }
+    }
+
+    // SIGRTMIN+1: toggle DPI between 2.0 and 1.5 for testing.
+    // SIGUSR2 is used by VT switching — cannot use it.
+    fl_drm_view_run(view)
+
+    // Cleanup.
+    portalIntegration?.stop()
+    portalIntegration = nil
+    x11Integration?.stop()
+    x11Integration = nil
+    waylandIntegration?.stop()
+    waylandIntegration = nil
+    linuxProcessAppManager = nil
+    linuxExternalAppManager = nil
+    drmTextureRegistry = nil
+    fl_drm_view_destroy(view)
+    exit(0)
+}
+
+// ─── Headless fallback (--headless flag) ─────────────────────────────────────
+
+func runHeadless() -> Never {
+    runApp(
+        FluentApp(
+            themeMode: .dark,
+            home: DesktopShell(),
+            title: "Desktop Shell"
+        )
+    )
+    var callbacks = createRuntimeCallbacks()
+
+    var rendererConfig = FlutterRendererConfig()
+    rendererConfig.type = kSoftware
+    rendererConfig.software.struct_size = MemoryLayout<FlutterSoftwareRendererConfig>.size
+    rendererConfig.software.surface_present_callback = {
+        (_userData, _allocation, rowBytes, height) -> Bool in
+        return true
+    }
+
+    var args = FlutterProjectArgs()
+    args.struct_size = MemoryLayout<FlutterProjectArgs>.size
+    let engineOutDir = ProcessInfo.processInfo.environment["FLUTTER_ENGINE_OUT"] ?? "../engine/src/out/host_debug"
+    let assetsPath = strdup("\(engineOutDir)/flutter_assets")!
+    let icuPath = strdup("\(engineOutDir)/icudtl.dat")!
+    args.assets_path = UnsafePointer(assetsPath)
+    args.icu_data_path = UnsafePointer(icuPath)
+
+    let argv0 = strdup("DesktopShellApp")!
+    let argv1 = strdup("--enable-impeller=false")!
+    let argvBuf = UnsafeMutableBufferPointer<UnsafePointer<CChar>?>.allocate(capacity: 3)
+    argvBuf[0] = UnsafePointer(argv0)
+    argvBuf[1] = UnsafePointer(argv1)
+    argvBuf[2] = nil
+    args.command_line_argc = 2
+    args.command_line_argv = UnsafePointer(argvBuf.baseAddress!)
+
+    var engine: OpaquePointer? = nil
+    let initResult = withUnsafeMutablePointer(to: &callbacks) { cbPtr in
+        FlutterEngineInitializeSwift(
+            Int(FLUTTER_ENGINE_VERSION),
+            &rendererConfig,
+            &args,
+            nil,
+            UnsafeRawPointer(cbPtr),
+            &engine
+        )
+    }
+    guard initResult == kSuccess, let engine = engine else {
+        fatalError("[DesktopShellApp] FlutterEngineInitializeSwift failed")
+    }
+    let runResult = FlutterEngineRunInitializedSwift(engine)
+    guard runResult == kSuccess else {
+        fatalError("[DesktopShellApp] FlutterEngineRunInitializedSwift failed")
+    }
+    var metrics = FlutterWindowMetricsEvent()
+    metrics.struct_size = MemoryLayout<FlutterWindowMetricsEvent>.size
+    metrics.width = 1440; metrics.height = 900
+    metrics.pixel_ratio = 1.0; metrics.view_id = 0
+    FlutterEngineSendWindowMetricsEvent(engine, &metrics)
+    PlatformDispatcher.instance.scheduleFrame()
+    Foundation.RunLoop.main.run()
+    exit(0)
+}
+
+// ─── Windowed entry point ────────────────────────────────────────────────────
+
+// Check for --drm flag (DRM/KMS direct rendering)
+if CommandLine.arguments.contains("--drm") {
+    runDRM()
+}
+
+// Check for --headless flag
+if CommandLine.arguments.contains("--headless") {
+    runHeadless()
+}
+
+// The windowed X11/GLFW dev path has been removed — the shell is DRM-only
+// (plus --headless). runDRM()/runHeadless() above never return.
+fatalError("[DesktopShellApp] requires --drm (or --headless); windowed mode is not supported")
+#endif  // os(Linux)

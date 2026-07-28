@@ -1,0 +1,4 @@
+module CGCompatShims {
+    header "CGCompatShims.h"
+    export *
+}
