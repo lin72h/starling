@@ -1,0 +1,236 @@
+// Copyright 2013 The Flutter Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// DMA-BUF helpers for cross-process GPU buffer sharing on Linux.
+// Wraps GBM, SCM_RIGHTS fd passing, and EGL DMA-BUF import.
+
+#ifndef DMABUF_BRIDGE_H_
+#define DMABUF_BRIDGE_H_
+
+#include <gbm.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <unistd.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ─── SCM_RIGHTS fd passing ──────────────────────────────────────────────────
+// The CMSG_* macros cannot be imported into Swift directly.
+
+/// Send a file descriptor over a Unix domain socket via SCM_RIGHTS.
+/// |meta| and |meta_len| carry an optional metadata payload alongside the fd.
+/// Returns 0 on success, -1 on error (errno set).
+int dmabuf_send_fd(int socket, int fd, const void* meta, size_t meta_len);
+
+/// Receive a file descriptor from a Unix domain socket via SCM_RIGHTS.
+/// |meta| and |meta_len| receive the metadata payload.
+/// Returns the received fd on success, -1 on error (errno set).
+int dmabuf_recv_fd(int socket, void* meta, size_t meta_len);
+
+/// Receive data from a Unix domain socket, optionally receiving an fd via
+/// SCM_RIGHTS.  Uses recvmsg() so both regular data and ancillary data are
+/// handled in a single call.
+/// |buf|/|buf_len|: buffer for regular data (frame signals, metadata, etc.)
+/// |out_fd|: set to received fd (>= 0) if SCM_RIGHTS present, else -1.
+/// Returns bytes read (0 = EOF, -1 = error).
+ssize_t dmabuf_recv_with_fd(int socket, void* buf, size_t buf_len,
+                            int* out_fd);
+
+// ─── EGL DMA-BUF import ─────────────────────────────────────────────────────
+
+/// Check if the EGL display supports EGL_EXT_image_dma_buf_import.
+/// Returns 1 if supported, 0 if not.
+int dmabuf_check_egl_support(void* egl_display);
+
+/// Import a DMA-BUF fd as an EGLImage.
+/// If modifier != DRM_FORMAT_MOD_INVALID, includes modifier attributes.
+/// Returns the EGLImage handle (cast to void*), or NULL on failure.
+void* dmabuf_import_egl_image(void* egl_display, int fd,
+                              int width, int height, int stride,
+                              uint32_t fourcc);
+
+/// Import a DMA-BUF fd as an EGLImage with explicit DRM format modifier.
+/// Returns the EGLImage handle (cast to void*), or NULL on failure.
+void* dmabuf_import_egl_image_with_modifier(void* egl_display, int fd,
+                                             int width, int height, int stride,
+                                             uint32_t fourcc, uint64_t modifier);
+
+/// Bind an EGLImage to the currently bound GL_TEXTURE_2D target.
+/// Calls glEGLImageTargetTexture2DOES.
+void dmabuf_bind_texture(void* egl_image);
+
+/// Query the DRM modifiers this EGL display can import for `fourcc`
+/// (EGL_EXT_image_dma_buf_import_modifiers). Fills up to `max` entries in
+/// `modifiers` and returns the count, or 0 if the extension is missing or
+/// the format is unsupported.
+int dmabuf_query_modifiers(void* egl_display, uint32_t fourcc,
+                           uint64_t* modifiers, int max);
+
+/// Blit an EGLImage-backed texture into an output texture with vertical flip.
+/// Creates a temporary FBO, binds the EGLImage as source, reads pixels with
+/// glReadPixels, then uploads to output_tex with rows reversed.
+/// This is needed because Wayland client buffers have top-left origin but the
+/// Flutter engine assumes kBottomLeft_GrSurfaceOrigin for external textures.
+/// Returns 1 on success, 0 on failure.
+int dmabuf_blit_flipped_180(void* egl_image, uint32_t output_tex,
+                            int width, int height);
+
+/// Destroy an EGLImage created by dmabuf_import_egl_image.
+void dmabuf_destroy_egl_image(void* egl_display, void* egl_image);
+
+// ─── DMA-BUF metadata ──────────────────────────────────────────────────────
+
+/// Metadata sent alongside the DMA-BUF fd.
+struct DmaBufMeta {
+    int32_t width;
+    int32_t height;
+    int32_t stride;
+    uint32_t fourcc;
+};
+
+// ─── Parent → child input events ────────────────────────────────────────────
+
+/// Input event sent from parent process to child over the Unix domain socket.
+/// Fields are ordered for natural alignment (no padding).
+#define DMABUF_INPUT_POINTER    0x01
+#define DMABUF_INPUT_RESIZE     0x02
+#define DMABUF_CONFIGURE        0x03
+#define DMABUF_CONTROL_SET_DPI  0x04
+#define DMABUF_INPUT_KEY        0x05
+/* Appearance change (either direction): x = 1 dark, 0 light. */
+#define DMABUF_CONTROL_SET_THEME 0x06
+/* Mouse-wheel scroll: x/y = pointer position (logical px); buttons packs
+ * the deltas as two Float32 bit patterns (dx low, dy high), logical px. */
+#define DMABUF_INPUT_SCROLL     0x07
+/* Window-manager layout (either direction): x = 1 tiling, 0 floating. */
+#define DMABUF_CONTROL_SET_LAYOUT 0x09
+/* Caret rect report (child→parent): x/y = caret top-left in the child's
+ * logical content coordinates; buttons packs width (low Float32) and
+ * height (high Float32); phase = 1 caret visible / 0 hidden. Drives the
+ * shell's IME candidate panel placement. */
+#define DMABUF_CARET            0x08
+
+/// Configure message sent from parent to child before the child creates its
+/// buffer. Tells the child the content area dimensions (logical pixels).
+struct DmaBufConfigure {
+    int32_t width;
+    int32_t height;
+    int32_t type;       // DMABUF_CONFIGURE
+    int32_t _reserved;
+};
+
+struct DmaBufInputEvent {
+    double x;           // x coord (POINTER) / new width (RESIZE) / physical HID key (KEY)
+    double y;           // y coord (POINTER) / new height (RESIZE) / logical keysym (KEY)
+    int64_t buttons;    // FlutterPointerMouseButtons mask (POINTER) / Unicode scalar or 0 (KEY)
+    int32_t type;       // DMABUF_INPUT_* event type
+    int32_t phase;      // FlutterPointerPhase (POINTER) / 0=down 1=up (KEY)
+};
+
+// ─── EGL context management (headless, render node) ─────────────────────
+
+/// Create an EGL display from a GBM device (GBM_MESA platform).
+/// Returns EGLDisplay, or NULL on failure.
+void* dmabuf_egl_create_display(struct gbm_device* gbm_dev);
+
+/// Initialize EGL display. Returns 1 on success, 0 on failure.
+int dmabuf_egl_initialize(void* egl_display);
+
+/// Choose an EGL config suitable for offscreen Skia rendering.
+/// Requires GLES2, stencil=8, RGBA8888. Returns config, or NULL.
+void* dmabuf_egl_choose_config(void* egl_display);
+
+/// Create an EGL context (GLES2). If share_context is non-NULL, resources
+/// are shared (needed for resource context). Returns context, or NULL.
+void* dmabuf_egl_create_context(void* egl_display, void* config,
+                                void* share_context);
+
+/// Make context current with no surface (surfaceless rendering).
+int dmabuf_egl_make_current(void* egl_display, void* context);
+
+/// Clear (unbind) the current context.
+int dmabuf_egl_clear_current(void* egl_display);
+
+/// Call eglGetProcAddress. Returns function pointer.
+void* dmabuf_egl_get_proc_address(const char* name);
+
+/// Call glFinish (ensure GPU commands complete — blocks CPU).
+void dmabuf_gl_finish(void);
+
+/// Call glFlush (submit GPU commands without blocking CPU).
+void dmabuf_gl_flush(void);
+
+/// Clear the current FBO to black (RGBA 0,0,0,1).
+void dmabuf_gl_clear_black(void);
+
+/// Dump the current FBO's pixels to a PPM file (diagnostic).
+void dmabuf_gl_dump_fbo(int width, int height, const char* path);
+
+/// Log the current GL viewport and FBO binding to stderr (diagnostic).
+void dmabuf_gl_log_state(void);
+
+// ─── Offscreen FBO backed by GBM BO ────────────────────────────────────
+
+/// Create an offscreen FBO with:
+///   - Color attachment: GL texture backed by GBM BO (via EGLImage from DMA-BUF fd)
+///   - Stencil attachment: renderbuffer (GL_STENCIL_INDEX8)
+/// Returns FBO name on success, 0 on failure.
+/// |out_egl_image| receives the EGLImage handle (caller must destroy).
+/// |out_color_tex| receives the GL texture name.
+/// |out_stencil_rb| receives the stencil renderbuffer name.
+uint32_t dmabuf_create_fbo(void* egl_display, int dma_fd,
+                           int width, int height, int stride,
+                           uint32_t fourcc,
+                           void** out_egl_image,
+                           uint32_t* out_color_tex,
+                           uint32_t* out_stencil_rb);
+
+/// Destroy FBO and associated GL/EGL resources.
+void dmabuf_destroy_fbo(void* egl_display, uint32_t fbo,
+                        void* egl_image, uint32_t color_tex,
+                        uint32_t stencil_rb);
+
+// ─── GPU texture copy (compositor buffer independence) ──────────────────
+
+// ─── GL texture helpers (for external texture API) ─────────────────────
+
+/// Generate a single GL texture name.
+uint32_t dmabuf_gen_gl_texture(void);
+
+/// Delete a GL texture name.
+void dmabuf_delete_gl_texture(uint32_t tex);
+
+/// Import a DMA-BUF as a GL_TEXTURE_2D with linear filtering.
+/// Creates texture, imports EGLImage, binds, sets filter params.
+/// Returns texture name on success, 0 on failure.
+/// out_egl_image receives the EGLImage (caller must destroy).
+uint32_t dmabuf_import_as_gl_texture(void* egl_display, int fd,
+                                      int width, int height, int stride,
+                                      uint32_t fourcc, uint64_t modifier,
+                                      void** out_egl_image);
+
+/// Rebind an EGLImage to an existing GL texture.
+void dmabuf_rebind_gl_texture(uint32_t tex, void* egl_image);
+
+// ─── GPU texture copy (compositor buffer independence) ──────────────────
+
+/// GPU-copy an EGLImage-backed source texture to an independent destination
+/// texture using glBlitFramebuffer. After this call, the destination texture
+/// owns the pixel data and the source DMA-BUF can be safely released.
+///
+/// |src_tex|: GL texture with EGLImage bound (from dmabuf_bind_texture).
+/// |dst_tex|: GL texture to receive the copy. Will be (re)allocated to
+///            width x height RGBA8 if current size doesn't match.
+/// |width|, |height|: dimensions in pixels.
+/// Returns 1 on success, 0 on failure.
+int dmabuf_gpu_copy_texture(uint32_t src_tex, uint32_t dst_tex,
+                            int width, int height);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // DMABUF_BRIDGE_H_

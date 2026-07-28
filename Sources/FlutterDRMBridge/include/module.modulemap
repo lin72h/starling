@@ -1,0 +1,4 @@
+module FlutterDRMBridge {
+  header "FlutterDRMBridge.h"
+  export *
+}
