@@ -23,7 +23,7 @@ docs/    porting guides and design notes
 
 ## Status
 
-**Early development — version 0.2.** The desktop boots as a real session, runs
+**Early development — version 0.2.1.** The desktop boots as a real session, runs
 its own compositor and apps, and installs from a `.deb` on a stock Ubuntu
 26.04. It is also the work of one person and a few months, so expect rough
 edges, missing pieces, and bugs. Nothing here is load-bearing for anyone yet,
@@ -43,7 +43,7 @@ What follows is deliberately specific about what is and is not done, because
 | **Apps** | Settings, Files, Terminal (a real PTY), Calculator, App Store — five first-party apps, all written against the Swift framework port. |
 | **Portals** | `xdg-desktop-portal` implementing `Settings`, `FileChooser` (OpenFile/SaveFile/SaveFiles, via a helper window) and `Request`. |
 | **Third-party clients** | Launch and render as native Wayland clients: Chrome, VS Code, Slack, Discord, Teams, Telegram, IntelliJ IDEA, GIMP, Blender, GNOME Web, GNOME Text Editor — covering Chromium/Electron, Qt6, GTK3, GTK4, the JetBrains Runtime's Wayland toolkit, and Blender's own GHOST, which drives the viewport (EEVEE included) through our `linux-dmabuf`. Both buffer paths are live: GPU clients via `linux-dmabuf`, software clients via `wl_shm`. Zoom runs with a caveat (below). X11 clients run against the in-tree X server (DRI3/Present). |
-| **Packaging** | A 52.6 MB `.deb` that installs on a *minimal* 26.04 image, pulling 26 dependency packages; `Depends` is computed from the shipped binaries by `dpkg-shlibdeps`. |
+| **Packaging** | A 52.8 MB `.deb` that installs on a *minimal* 26.04 image, pulling 26 dependency packages; `Depends` is computed from the shipped binaries by `dpkg-shlibdeps`. |
 | **Framework port** | 137 test files under `sdk/Tests`. |
 
 ### Known limitations

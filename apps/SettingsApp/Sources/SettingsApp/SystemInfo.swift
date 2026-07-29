@@ -10,7 +10,7 @@ import Glibc
 
 struct SystemInfo {
 
-    static let starlingVersion = "0.2"
+    static let starlingVersion = "0.2.1"
 
     static func osVersion() -> String {
         #if os(Linux)
