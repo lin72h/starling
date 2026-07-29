@@ -114,10 +114,13 @@ final class AgentBroker: @unchecked Sendable {
 
     /// Apps an agent may launch (design: scope.launch). Rects follow the
     /// dock launch table; position is irrelevant for agent windows.
-    private static let launchable: [String: (exec: String, title: String, w: Double, h: Double)] = [
-        "files": ("FileExplorerApp", "Files", 900, 620),
-        "settings": ("SettingsApp", "Settings", 800, 592),
-        "terminal": ("TerminalApp", "Terminal", 660, 1140),
+    /// Apps an agent may launch. No sizes here on purpose: the window is
+    /// given the AI Space's pane size at launch, so a nominal size in this
+    /// table could only ever disagree with the one that gets applied.
+    private static let launchable: [String: (exec: String, title: String)] = [
+        "files": ("FileExplorerApp", "Files"),
+        "settings": ("SettingsApp", "Settings"),
+        "terminal": ("TerminalApp", "Terminal"),
     ]
 
     // MARK: Lifecycle
@@ -431,15 +434,23 @@ final class AgentBroker: @unchecked Sendable {
             launchSeq += 1
             let appId = "\(agentId):\(app)#\(launchSeq)"
             let replied = ReplyOnce()
+            // Launch at the pane size this window will be given, not the
+            // table's nominal size: the panes are what the AI Space actually
+            // lays out, and a child launched larger draws an overflow marker
+            // on its first frame. It also means the `content` size we report
+            // back is the one the agent will really get.
+            let pane = app == "terminal" ? shell._agentChatContentSize()
+                                         : shell._agentStageContentSize()
             shell._launchAgentChildApp(
                 agentId: agentId, execName: spec.exec, appId: appId,
                 title: spec.title,
-                rect: Rect.fromLTWH(0, 0, spec.w, spec.h),
+                rect: Rect.fromLTWH(0, 0, pane.width,
+                                    pane.height + DesktopTheme.kTitleBarHeight),
                 isTerminal: app == "terminal",
                 onWindow: { [weak self] winId in
                     guard replied.claim() else { return }
                     conn.send(["id": id, "ok": true, "win": winId,
-                               "content": [spec.w, spec.h - DesktopTheme.kTitleBarHeight]])
+                               "content": [pane.width, pane.height]])
                     self?.audit(agentId, op, true, "\(app) -> \(winId)")
                 })
             // Child never produced a window (missing binary, crash-on-start).

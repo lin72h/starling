@@ -506,16 +506,29 @@ extension _DesktopShellState {
         let agentId = "agent-\(n)"
         let agent = AgentInfo(id: agentId, name: "Agent \(n) — Claude Code")
         setState { windowManager.agents.append(agent) }
+        // Launch at the size the pane will actually be. These used to be
+        // fixed (660x1140 / 900x620), which is taller than the chat column
+        // on a 1080-tall logical screen: the child laid out once at the
+        // launch size, overflowed, and drew the framework's overflow marker
+        // until the geometry pass below resized it and something forced a
+        // reflow. _applyAgentWindowGeometry() still corrects these on every
+        // build — this only makes the FIRST frame right.
+        let chat = _agentChatContentSize()
+        let stage = _agentStageContentSize()
         _launchAgentChildApp(
             agentId: agentId, execName: "TerminalApp",
             appId: "\(agentId):terminal", title: "Agent Terminal",
             // Tall and narrow: Claude Code renders chat-shaped at native
             // scale in the conversation column.
-            rect: Rect.fromLTWH(0, 0, 660, 1140), isTerminal: true)
+            rect: Rect.fromLTWH(0, 0, chat.width,
+                                chat.height + DesktopTheme.kTitleBarHeight),
+            isTerminal: true)
         _launchAgentChildApp(
             agentId: agentId, execName: "FileExplorerApp",
             appId: "\(agentId):files", title: "Files",
-            rect: Rect.fromLTWH(0, 0, 900, 620), isTerminal: false)
+            rect: Rect.fromLTWH(0, 0, stage.width,
+                                stage.height + DesktopTheme.kTitleBarHeight),
+            isTerminal: false)
         #endif
     }
 
