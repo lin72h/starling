@@ -280,6 +280,112 @@ public class GpuDmaBufRenderer {
     // Event loop control
     private var running: Bool = false
 
+    // MARK: - DRM device selection
+
+    /// GBM_FORMAT_ABGR8888 — matches Skia's RGBA byte order.
+    static let bufferFormat: UInt32 = 0x34324241
+
+    /// A DRM device we can both allocate on and export a DMA-BUF from.
+    struct DrmTarget {
+        let path: String
+        let fd: Int32
+        let device: OpaquePointer      // gbm_device*
+        let bo: OpaquePointer          // gbm_bo*
+        let dmaBufFd: Int32
+    }
+
+    /// The symlink target of a DRM node's sysfs `device`, which is the same
+    /// string for the card and render nodes of one GPU. Used to pair them.
+    private static func sysfsDevice(_ node: String) -> String? {
+        try? FileManager.default.destinationOfSymbolicLink(
+            atPath: "/sys/class/drm/\(node)/device")
+    }
+
+    /// DRM devices to try, best first: the render node of the card the shell
+    /// renders on, then any other render node, then the primary nodes (which
+    /// is where a GPU-less software stack has to allocate). A non-empty
+    /// `STARLING_APP_DRM_DEVICE` replaces the list outright.
+    static func drmCandidates() -> [String] {
+        let env = ProcessInfo.processInfo.environment
+        if let forced = env["STARLING_APP_DRM_DEVICE"], !forced.isEmpty {
+            return [forced]
+        }
+
+        let nodes = ((try? FileManager.default.contentsOfDirectory(atPath: "/dev/dri")) ?? [])
+            .sorted()
+        let renderNodes = nodes.filter { $0.hasPrefix("renderD") }
+        let cardNodes = nodes.filter { $0.hasPrefix("card") }
+
+        // The shell's own card (FLUTTER_DRM_DEVICE) decides which GPU we pair
+        // with: on a hybrid machine the wrong render node allocates on a
+        // device the compositor cannot import from.
+        let shellCard = (env["FLUTTER_DRM_DEVICE"].flatMap { $0.isEmpty ? nil : $0 }
+                         ?? "/dev/dri/card0")
+        let shellCardNode = (shellCard as NSString).lastPathComponent
+        let shellCardDevice = sysfsDevice(shellCardNode)
+
+        let matching = renderNodes.filter {
+            shellCardDevice != nil && sysfsDevice($0) == shellCardDevice
+        }
+        let ordered = matching
+            + renderNodes.filter { !matching.contains($0) }
+            + [shellCardNode]
+            + cardNodes.filter { $0 != shellCardNode }
+
+        var seen = Set<String>()
+        return ordered.compactMap { seen.insert($0).inserted ? "/dev/dri/\($0)" : nil }
+    }
+
+    /// Opens the first DRM device that can actually allocate a shareable
+    /// buffer of this size. Opening proves nothing — on a render node with no
+    /// GPU behind it, `gbm_create_device` succeeds and the allocation is what
+    /// fails — so each candidate is carried all the way to a DMA-BUF fd and
+    /// torn down again if it does not get there.
+    static func openDrmDevice(width: Int, height: Int) -> DrmTarget? {
+        // GBM_BO_USE_LINEAR = (1 << 4), GBM_BO_USE_RENDERING = (1 << 2)
+        let useFlags = GBM_BO_USE_LINEAR.rawValue | GBM_BO_USE_RENDERING.rawValue
+
+        for path in drmCandidates() {
+            let fd = Glibc.open(path, O_RDWR)
+            guard fd >= 0 else {
+                reject(path, "open: \(String(cString: strerror(errno)))")
+                continue
+            }
+            guard let dev = gbm_create_device(fd) else {
+                reject(path, "gbm_create_device failed")
+                Glibc.close(fd)
+                continue
+            }
+            guard let bo = gbm_bo_create(dev, UInt32(width), UInt32(height),
+                                         bufferFormat, useFlags) else {
+                reject(path, "gbm_bo_create failed")
+                gbm_device_destroy(dev)
+                Glibc.close(fd)
+                continue
+            }
+            let dmaBufFd = gbm_bo_get_fd(bo)
+            guard dmaBufFd >= 0 else {
+                reject(path, "gbm_bo_get_fd failed")
+                gbm_bo_destroy(bo)
+                gbm_device_destroy(dev)
+                Glibc.close(fd)
+                continue
+            }
+            FileHandle.standardError.write(Data(
+                "[GpuDmaBufRenderer] rendering on \(path)\n".utf8))
+            return DrmTarget(path: path, fd: fd, device: dev, bo: bo, dmaBufFd: dmaBufFd)
+        }
+        return nil
+    }
+
+    /// Why one candidate was passed over. stderr, not `print`: the shell pipes
+    /// a child's stdout and drops it, so a `print` here is invisible — which is
+    /// how a launch that fails this early looked like nothing happening at all.
+    private static func reject(_ path: String, _ reason: String) {
+        FileHandle.standardError.write(Data(
+            "[GpuDmaBufRenderer] \(path): \(reason)\n".utf8))
+    }
+
     // MARK: - Init
 
     /// Creates a GpuDmaBufRenderer. Returns nil if GBM/EGL setup fails.
@@ -347,49 +453,40 @@ public class GpuDmaBufRenderer {
             print("[GpuDmaBufRenderer] DPI=\(dpi): logical \(logicalW)x\(logicalH) → physical \(physicalWidth)x\(physicalHeight)")
         }
 
-        // 4. Open render node (no root needed)
-        let fd = Glibc.open("/dev/dri/renderD128", O_RDWR)
-        guard fd >= 0 else {
-            print("[GpuDmaBufRenderer] Cannot open /dev/dri/renderD128: \(String(cString: strerror(errno)))")
+        // 4–7. Open a DRM device, and allocate the shared buffer on it.
+        //
+        // These are one step because only the allocation proves the device is
+        // usable. A render node is the right answer whenever there is a GPU:
+        // it needs no privilege and it is what every accelerated stack uses.
+        // But with no GPU at all — a VM with 3D acceleration switched off,
+        // which is the DEFAULT in GNOME Boxes, VirtualBox and VMware — Mesa
+        // falls back to kms_swrast, and that allocates through
+        // DRM_IOCTL_MODE_CREATE_DUMB, an ioctl render nodes reject outright
+        // (EACCES, "KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Permission
+        // denied"). The primary node allows it for anyone who can open the
+        // device, which the seat's active user can through the logind ACL.
+        //
+        // So the render node is tried first and the primary node second, and
+        // each candidate is proven by allocating rather than by opening. The
+        // shell renders on the primary node either way (it holds it via
+        // libseat), so the fallback lands both halves on the same device.
+        guard let picked = Self.openDrmDevice(width: self.width, height: self.height) else {
+            FileHandle.standardError.write(Data((
+                "[GpuDmaBufRenderer] no usable DRM device — tried " +
+                Self.drmCandidates().joined(separator: ", ") + "\n"
+            ).utf8))
             Glibc.close(sock)
             return nil
         }
+        // Steps 8–14 below share the failure cleanup, so keep the locals.
+        let fd = picked.fd
+        let dev = picked.device
+        let bo = picked.bo
+        let dmaBufFd = picked.dmaBufFd
+        let formatABGR8888 = Self.bufferFormat
         renderFd = fd
-
-        // 5. Create GBM device
-        guard let dev = gbm_create_device(fd) else {
-            print("[GpuDmaBufRenderer] gbm_create_device failed")
-            Glibc.close(fd)
-            Glibc.close(sock)
-            return nil
-        }
         gbmDevice = dev
-
-        // 6. Create GBM buffer object
-        // GBM_FORMAT_ABGR8888 = 0x34324241 (matches Skia's RGBA byte order)
-        let formatABGR8888: UInt32 = 0x34324241
-        // GBM_BO_USE_LINEAR = (1 << 4) = 16, GBM_BO_USE_RENDERING = (1 << 2) = 4
-        let useFlags = GBM_BO_USE_LINEAR.rawValue | GBM_BO_USE_RENDERING.rawValue
-        guard let bo = gbm_bo_create(dev, UInt32(self.width), UInt32(self.height),
-                                     formatABGR8888, useFlags) else {
-            print("[GpuDmaBufRenderer] gbm_bo_create failed")
-            gbm_device_destroy(dev)
-            Glibc.close(fd)
-            Glibc.close(sock)
-            return nil
-        }
         gbmBo = bo
-
-        // 7. Get DMA-BUF fd and stride
-        let dmaBufFd = gbm_bo_get_fd(bo)
-        guard dmaBufFd >= 0 else {
-            print("[GpuDmaBufRenderer] gbm_bo_get_fd failed")
-            gbm_bo_destroy(bo)
-            gbm_device_destroy(dev)
-            Glibc.close(fd)
-            Glibc.close(sock)
-            return nil
-        }
         dmaFd = dmaBufFd
         stride = Int32(gbm_bo_get_stride(bo))
 
