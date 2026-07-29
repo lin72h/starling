@@ -124,6 +124,19 @@ is SSH-launched and therefore not it, so the App Store's Install and Remove
 buttons *cannot* work on the dev box — the gate proves they do in a real
 login, using `pkcheck` against the session's own shell process.
 
+It then reboots the same installed desktop onto **plain `virtio-vga` — no 3D
+acceleration** — and runs the functional checks a second time. A GPU hides a
+class of bug this pass exists to catch: the shell holds the primary DRM node
+through libseat and can allocate on it, while a child app has only what it can
+open for itself. v0.2 shipped with every app allocating on a render node,
+which rejects the dumb-buffer ioctl software Mesa falls back to, so on a
+machine with no GPU the desktop came up and **not one app could start** — and
+no tier could see it, because every tier had a GPU. GNOME Boxes, VirtualBox
+and VMware all default to 3D acceleration off, so that is the configuration
+most people evaluating the .deb are in. The pass asserts the guest really
+reports `-virgl` first, or it would silently be a second run of the tier
+above.
+
 Note it needs port 2222 free: the harness forwards a fixed port, and the
 minimal dependency-testing VM uses the same one. The script refuses rather
 than testing the wrong machine.

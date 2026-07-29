@@ -42,7 +42,7 @@ fail() { echo; echo "FAIL — $*"; exit 1; }
 step() { echo; echo "══ $* ═══════════════════════════════════════════"; }
 
 [ -d "$VM" ] || fail "no VM harness at $VM (set STARLING_VM)"
-for f in launch-vm-2604.sh ssh-vm.sh scp-vm.sh disk2604.qcow2 \
+for f in launch-vm-2604.sh launch-vm-2604-nogl.sh ssh-vm.sh scp-vm.sh disk2604.qcow2 \
          g1-install.sh g2-setup-login.sh g3-check.sh; do
     [ -e "$VM/$f" ] || fail "$VM/$f is missing — harness incomplete"
 done
@@ -173,10 +173,58 @@ ssh_vm 'sudo XDG_RUNTIME_DIR=/run/user/1000 STARLING_TEST_INSTALL=1 \
 # ${PIPESTATUS[0]}, not $? — after a pipeline $? is tail's status, which is
 # always 0, and the gate would report PASS for a failed run.
 functional=${PIPESTATUS[0]}
-ssh_vm 'sudo rm -f /usr/share/starling/catalog.d/starling*.app'
 [ "$functional" -eq 0 ] || fail "functional checks failed against the .deb"
+
+# ── 7. the same desktop, with 3D acceleration switched OFF ───────────────────
+# Everything above runs on virgl, and a GPU hides a whole class of bug: the
+# shell holds the primary DRM node through libseat and can allocate on it,
+# while a child app has only what it can open for itself. v0.2 shipped with
+# every app allocating on a render node, which rejects the dumb-buffer ioctl
+# software Mesa falls back to — so on a machine with no GPU the desktop came
+# up and NOT ONE app could start. The gate could not see it, because no tier
+# ran without a GPU.
+#
+# That is not an exotic configuration: GNOME Boxes, VirtualBox and VMware all
+# default to 3D acceleration OFF, which is what most people evaluating the
+# .deb are running. So the same installed desktop is rebooted onto plain
+# virtio-vga (llvmpipe) and put through the same checks. STARLING_TEST_INSTALL
+# stays off — the store's install path was proved above and does not depend on
+# the GPU; what this pass is for is whether apps still render.
+step "reboot the same desktop with NO 3D acceleration (virtio-vga, llvmpipe)"
+ssh_vm 'sudo systemctl poweroff' >/dev/null 2>&1
+for _ in $(seq 1 40); do
+    pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null || break
+    sleep 3
+done
+pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null \
+    && fail "the VM did not power off for the no-3D pass"
+(cd "$VM" && setsid bash launch-vm-2604-nogl.sh >/dev/null 2>&1 &)
+
+echo -n "waiting for the graphical boot"
+for _ in $(seq 1 60); do
+    ssh_vm true 2>/dev/null && break
+    echo -n "."
+    sleep 5
+done
+echo
+ssh_vm true 2>/dev/null || fail "the VM never came back without 3D acceleration"
+
+# Prove the guest really has no 3D before trusting the pass — if virgl were
+# somehow still on, this tier would be a second run of the tier above.
+ssh_vm 'sudo dmesg | grep -q "features:.*-virgl"' \
+    || fail "the guest still reports virgl; this pass is not testing software GL"
+ssh_vm 'pgrep -x DesktopShellApp >/dev/null' \
+    || fail "the shell is not running after a login with no 3D acceleration"
+
+step "functional checks with no GPU"
+ssh_vm 'sudo XDG_RUNTIME_DIR=/run/user/1000 python3 ~/functional.py' 2>&1 | tail -24
+nogl=${PIPESTATUS[0]}
+ssh_vm 'sudo rm -f /usr/share/starling/catalog.d/starling*.app'
+[ "$nogl" -eq 0 ] || fail "the desktop fails on a machine with no GPU
+      (the session came up, so look for apps that start and die: the child
+      renderer's device choice is logged to /tmp/starling-session-*.log)"
 
 step "result"
 echo "PASS — the packaged desktop installs, logs in through GDM, is"
 echo "       seat-active, authorises its own privileged helper, and passes"
-echo "       the functional checks."
+echo "       the functional checks both on a GPU and with none."
