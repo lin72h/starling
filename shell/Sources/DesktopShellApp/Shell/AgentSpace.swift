@@ -500,8 +500,70 @@ extension _DesktopShellState {
     /// enters the devbox via $STARLING_DEV_SHELL — Claude Code's home) and
     /// one Files window for the scripted P0 task. Both are tagged with the
     /// agent's id at creation and never appear on any desktop.
+    /// Make the desktop-driving skill discoverable by the agent that is about
+    /// to run in this session — otherwise it has a broker, a CLI and no idea
+    /// either exists.
+    ///
+    /// Claude Code finds skills under `~/.claude/skills`, and that directory
+    /// is the user's, not ours. So: link rather than copy (a package upgrade
+    /// then updates the skill too), and never replace something we did not put
+    /// there. The link is refreshed when it points into a shipped tree,
+    /// because that is how an install that moves the skill keeps resolving.
+    func _linkAgentSkill() {
+        #if os(Linux)
+        let fm = FileManager.default
+        var sources: [String] = []
+        if let shipped = Self.dataFilePath("skills/starling-desktop") {
+            sources.append(shipped)
+        }
+        // Dev tree: the skill sits beside the CLI in build/, not under sdk/,
+        // so dataFilePath's own source fallback does not find it.
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Shell/
+            .deletingLastPathComponent()   // DesktopShellApp/
+            .deletingLastPathComponent()   // Sources/
+            .deletingLastPathComponent()   // shell/
+            .deletingLastPathComponent()   // repo root
+        sources.append(repoRoot.appendingPathComponent("build/skills/starling-desktop").path)
+        guard let source = sources.first(where: { fm.fileExists(atPath: $0) }) else { return }
+
+        let skillsDir = LoginUser.home + "/.claude/skills"
+        let link = skillsDir + "/starling-desktop"
+
+        var st = stat()
+        if lstat(link, &st) == 0 {
+            let existing = try? fm.destinationOfSymbolicLink(atPath: link)
+            // Ours to refresh only if it is a symlink into a skills tree; a
+            // real directory, or a link somewhere else, is the user's.
+            guard (st.st_mode & S_IFMT) == S_IFLNK,
+                  let dest = existing, dest.hasSuffix("/skills/starling-desktop") else { return }
+            if dest == source { return }
+            try? fm.removeItem(atPath: link)
+        }
+
+        try? fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o755])
+        do {
+            try fm.createSymbolicLink(atPath: link, withDestinationPath: source)
+        } catch {
+            return
+        }
+
+        // Dev mode runs the shell as root. Hand what we just made to the login
+        // user, or their own agent cannot write beside it later.
+        if getuid() == 0 {
+            let uid = LoginUser.uid
+            let gid = getpwuid(uid)?.pointee.pw_gid ?? gid_t(uid)
+            _ = chown(LoginUser.home + "/.claude", uid, gid)
+            _ = chown(skillsDir, uid, gid)
+            _ = lchown(link, uid, gid)
+        }
+        #endif
+    }
+
     func _newAgent() {
         #if os(Linux)
+        _linkAgentSkill()
         let n = windowManager.agents.count + 1
         let agentId = "agent-\(n)"
         let agent = AgentInfo(id: agentId, name: "Agent \(n) — Claude Code")

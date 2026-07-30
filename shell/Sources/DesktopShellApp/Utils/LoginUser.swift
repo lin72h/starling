@@ -33,6 +33,13 @@ enum LoginUser {
         return "root"
     }
 
+    /// The login user's home — the one a terminal, and anything an agent runs
+    /// inside it, will actually use, even when the shell itself is root.
+    static var home: String {
+        if let pw = getpwuid(uid) { return String(cString: pw.pointee.pw_dir) }
+        return ProcessInfo.processInfo.environment["HOME"] ?? "/tmp"
+    }
+
     /// Directory for shell persistence (appearance, …): $STARLING_CONFIG_DIR,
     /// else `<login user's home>/.config/starling` — the login user's home
     /// even when the shell itself runs as root.

@@ -414,6 +414,22 @@ final class AgentBroker: @unchecked Sendable {
             return win
         }
 
+        /// Take-over: the human has the controls of this window until Esc.
+        ///
+        /// Every op that acts on a window OR reads its contents refuses while
+        /// this holds — a hand-off that still let the agent act semantically,
+        /// or screenshot what the human is typing, would be a hint rather than
+        /// a boundary. It was checked only in `inject` before, which by then
+        /// was the one path an agent driving a web page did not use.
+        ///
+        /// Not complete: a CDP session opened before the take-over keeps its
+        /// socket. Refusing `cdp_endpoint` stops an agent picking the controls
+        /// back up, not one already holding them; revoking mid-session needs
+        /// the shell to close the page's debugger connection.
+        func humanHasControls(_ win: WindowInfo) -> Bool {
+            shell._humanControlledWindows.contains(win.id)
+        }
+
         switch op {
         case "list_windows":
             let wins = wm.windows(ownedBy: agentId).map { w -> [String: Any] in
@@ -442,6 +458,10 @@ final class AgentBroker: @unchecked Sendable {
                 guard started else { return fail("chrome launch unavailable") }
                 let bail: () -> Void = { [weak self] in
                     guard replied.claim() else { return }
+                    // Drop the claim on the next arriving toplevel. Left set,
+                    // it is still armed when the human opens a browser later,
+                    // and their window becomes the agent's.
+                    shell._pendingAgentWayland = nil
                     conn.send(["id": id, "ok": false, "error": "chrome launch timed out"])
                     self?.audit(agentId, op, false, "chrome timeout")
                 }
@@ -583,6 +603,7 @@ final class AgentBroker: @unchecked Sendable {
 
         case "capture":
             guard let win = ownedWindow() else { return fail("no such owned window") }
+            if humanHasControls(win) { return fail("paused: human has the controls") }
             guard let texId = win.textureId,
                   let info = linuxProcessAppManager?.dmaBufInfo(textureId: Int64(texId)) else {
                 return fail("window has no capturable buffer")
@@ -675,6 +696,7 @@ final class AgentBroker: @unchecked Sendable {
             // endpoint (same ownership chokepoint — the window must be
             // an owned Wayland toplevel).
             guard let win = ownedWindow() else { return fail("no such owned window") }
+            if humanHasControls(win) { return fail("paused: human has the controls") }
             guard win.appId.hasPrefix("wayland-") else {
                 return fail("not a Wayland client window")
             }
@@ -713,6 +735,7 @@ final class AgentBroker: @unchecked Sendable {
             // agent addresses labels and node ids — no coordinates, no
             // pixels; the same ownership chokepoint applies.
             guard let win = ownedWindow() else { return fail("no such owned window") }
+            if humanHasControls(win) { return fail("paused: human has the controls") }
             guard let endpoint = win.agentEndpointPath else {
                 return fail("window has no semantics endpoint")
             }

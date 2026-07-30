@@ -116,6 +116,56 @@ def ask(op: str, timeout: float = 5.0) -> dict:
     return reply
 
 
+
+
+class Session:
+    """A stateful broker connection, for ops that need an agent identity.
+
+    `ask()` above opens a connection per request, which is fine for the
+    unscoped read-only ops but useless for anything agent-scoped: `hello`
+    registers on the connection, so a one-shot request is always anonymous.
+    """
+
+    def __init__(self, name="functional.py", agent=None, token=None):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(30.0)
+        self.sock.connect(broker_path())
+        self.f = self.sock.makefile("rwb")
+        self._id = 0
+        args = {"name": name}
+        if agent and token:
+            args.update(agent=agent, token=token)
+        hello = self.call("hello", **args)
+        self.agent_id = hello["agent"]
+        self.token = hello["token"]
+
+    def call(self, op, **args):
+        self._id += 1
+        req = {"id": self._id, "op": op}
+        req.update(args)
+        self.f.write((json.dumps(req) + "\n").encode())
+        self.f.flush()
+        while True:
+            line = self.f.readline()
+            if not line:
+                raise AssertionError("broker closed the connection")
+            msg = json.loads(line)
+            if msg.get("id") != self._id:
+                continue
+            return msg
+
+    def ok(self, op, **args):
+        reply = self.call(op, **args)
+        assert reply.get("ok"), f"{op} failed: {reply.get('error')}"
+        return reply
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 def apps() -> dict[str, dict]:
     return {a["app"]: a for a in ask("list_apps")["apps"]}
 
@@ -387,6 +437,75 @@ def check_real_remove() -> None:
 
 
 # ── runner ───────────────────────────────────────────────────────────────────
+
+
+
+@check("agents: an agent sees only the windows it launched")
+def check_agent_scope() -> None:
+    """The whole scope model in one assertion. An agent addresses windows it
+    owns; another agent's — and the human's — are not listed, not injectable,
+    not capturable, and not readable through the semantics endpoint."""
+    a = Session(name="scope-a")
+    b = Session(name="scope-b")
+    try:
+        assert a.agent_id != b.agent_id, "two hellos returned the same agent"
+        win = a.ok("launch", app="files")["win"]
+        try:
+            assert [w["win"] for w in a.ok("list_windows")["windows"]] == [win]
+            assert b.ok("list_windows")["windows"] == [], \
+                "agent B can see agent A's window"
+            for op, extra in (("capture", {}),
+                              ("semantic_tree", {}),
+                              ("inject", {"ev": {"type": "click", "x": 5, "y": 5}})):
+                denied = b.call(op, win=win, **extra)
+                assert not denied.get("ok"), f"agent B was allowed to {op}"
+                assert "no such owned window" in denied.get("error", ""), \
+                    f"{op} denied for the wrong reason: {denied.get('error')}"
+            log(f"{win} is addressable by {a.agent_id} and invisible to {b.agent_id}")
+        finally:
+            # The broker has no close op, so the window outlives the check.
+            # Harmless — agent windows have no desktop presence and are drawn
+            # only in the AI Space — but it is why this tier ends with a
+            # Files process still running.
+            pass
+    finally:
+        a.close()
+        b.close()
+
+
+@check("agents: an agent can re-attach to its own identity, not another's")
+def check_agent_reattach() -> None:
+    """Window ownership is per agent and each command of a CLI is its own
+    process, so re-attaching is what makes `launch` then `click` possible at
+    all. The token is what stops agent-2 rejoining as agent-1 by guessing."""
+    first = Session(name="reattach")
+    agent, token = first.agent_id, first.token
+    win = first.ok("launch", app="files")["win"]
+    first.close()                      # the CLI's process exits here
+
+    back = Session(name="reattach", agent=agent, token=token)
+    try:
+        assert back.agent_id == agent, f"re-attach gave {back.agent_id}, not {agent}"
+        assert [w["win"] for w in back.ok("list_windows")["windows"]] == [win], \
+            "re-attached agent lost the window it launched"
+        log(f"{agent} came back to {win} on a new connection")
+    finally:
+        back.close()
+
+    impostor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    impostor.settimeout(10.0)
+    impostor.connect(broker_path())
+    try:
+        impostor.send(json.dumps(
+            {"id": 1, "op": "hello", "name": "impostor",
+             "agent": agent, "token": "0" * len(token)}).encode() + b"\n")
+        reply = json.loads(impostor.recv(65536).split(b"\n", 1)[0])
+        assert not reply.get("ok"), "a wrong token was accepted"
+        assert "bad token" in reply.get("error", ""), reply
+        log("a wrong token is refused")
+    finally:
+        impostor.close()
+
 
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
