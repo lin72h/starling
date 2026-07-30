@@ -69,6 +69,11 @@ products += [
     .library(name: "FlutterDRMBridge", targets: ["FlutterDRMBridge"]),
     .library(name: "GLFWBridge", targets: ["GLFWBridge"]),
     .library(name: "DmaBufBridge", targets: ["DmaBufBridge"]),
+    // The windowed host: a Swift Flutter app in an ordinary desktop window,
+    // X11 or Wayland. Deliberately NOT part of FlutterShared — the desktop's
+    // own apps composite through the shell and must not drag libglfw into
+    // the shipped dylib.
+    .library(name: "FlutterRunner", targets: ["FlutterRunner"]),
     // One shared dylib carrying the whole framework stack (plus the C shim
     // modules apps import directly). Apps that link this single product get
     // binaries with only their own code — the packaged desktop ships one
@@ -243,6 +248,24 @@ targets += [
     // Clang module exposing DRM shell public API (fl_drm_view.h) to Swift
     .target(
         name: "FlutterDRMBridge"
+    ),
+    // The windowed host — GLFW window + EGL surface + the embedder API, so an
+    // app can call runAppWindowed() instead of carrying its own ~600-line
+    // host. `.linkedLibrary` rather than an -L/-lglfw unsafeFlag on purpose:
+    // a product with unsafe flags cannot be depended on by version, which
+    // this one has to be if the SDK is ever consumed from outside this tree.
+    .target(
+        name: "FlutterRunner",
+        dependencies: ["Flutter", "SwiftRuntime", "FlutterSwiftBridge",
+                       "FlutterEmbedderBridge", "GLFWBridge"],
+        path: "Sources/FlutterRunner",
+        swiftSettings: [
+            .interoperabilityMode(.Cxx),
+            .unsafeFlags(toolchainSwiftCFlags),
+        ],
+        linkerSettings: [
+            .linkedLibrary("glfw"),
+        ]
     ),
     // Clang module wrapping GBM + SCM_RIGHTS + EGL DMA-BUF import helpers
     .target(
