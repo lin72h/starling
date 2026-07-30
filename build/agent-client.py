@@ -27,6 +27,7 @@ fails loudly instead of silently clicking empty space.
 
 import base64
 import json
+import zlib
 import os
 import socket
 import struct
@@ -362,6 +363,54 @@ def cmd_text(argv):
     print((out or "").strip())
 
 
+def write_png(path: str, rgba: bytes, width: int, height: int):
+    """Minimal PNG writer — the client stays stdlib-only, and zlib is stdlib."""
+    raw = b"".join(b"\x00" + rgba[y * width * 4:(y + 1) * width * 4]
+                   for y in range(height))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n")
+        fh.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)))
+        fh.write(chunk(b"IDAT", zlib.compress(raw, 6)))
+        fh.write(chunk(b"IEND", b""))
+
+
+def capture_to_rgba(shot: dict) -> tuple:
+    """Turn a broker capture into (rgba, width, height).
+
+    `capture` hands back the window's buffer as it sits in memory — raw
+    pixels plus the three facts needed to read them, none of which are
+    optional: `stride` (rows are padded), `fourcc` (channel order), and
+    `row_order` (first-party children render bottom-up because GL's origin is
+    bottom-left, Wayland buffers are top-down). Writing `data` straight to a
+    .png produces a file that is not a PNG.
+    """
+    data = base64.b64decode(shot["data"])
+    width, height, stride = shot["w"], shot["h"], shot["stride"]
+    fourcc = (shot.get("fourcc") or "")
+    # 'AB24'/'XB24' are R,G,B,A in memory — already RGBA. 'AR24'/'XR24' are
+    # B,G,R,A and need the red and blue channels swapped. An X format carries
+    # no alpha, so force it opaque rather than trusting the padding byte.
+    swap_rb = fourcc.startswith(("AR", "XR"))
+    opaque = fourcc.startswith(("X",))
+    rows = []
+    for y in range(height):
+        off = y * stride
+        row = bytearray(data[off:off + width * 4])
+        if swap_rb:
+            row[0::4], row[2::4] = row[2::4], row[0::4]
+        if opaque:
+            row[3::4] = b"\xff" * width
+        rows.append(bytes(row))
+    if shot.get("row_order") == "bottom-up":
+        rows.reverse()
+    return b"".join(rows), width, height
+
+
 def cmd_shot(argv):
     if len(argv) < 2:
         raise SystemExit("shot needs <win> <out.png>")
@@ -371,10 +420,21 @@ def cmd_shot(argv):
     # back to the page's own screenshot and say which produced the image.
     try:
         shot = agent.call("capture", win=argv[0])
-        with open(argv[1], "wb") as fh:
-            fh.write(base64.b64decode(shot["data"]))
-        print("captured %dx%d via the broker -> %s"
-              % (shot.get("width", 0), shot.get("height", 0), argv[1]))
+        rgba, width, height = capture_to_rgba(shot)
+        # An all-zero buffer is not a black window, it is a failed read, and
+        # writing it out as a screenshot would be the worst outcome: an agent
+        # would "see" a black app and reason about it. Observed on a
+        # virtualised GPU, where the compositor still composites the window
+        # correctly — it imports the DMA-BUF as a GPU texture and never maps
+        # it — while the CPU mapping this op relies on comes back empty.
+        if not any(rgba[::499]):
+            raise SystemExit(
+                "capture of %s read back as entirely empty (%dx%d, %s). The "
+                "window is composited from the GPU, so the buffer has content;"
+                " the CPU mapping does not see it. Known on virtualised GPUs."
+                % (argv[0], width, height, shot.get("fourcc")))
+        write_png(argv[1], rgba, width, height)
+        print("captured %dx%d via the broker -> %s" % (width, height, argv[1]))
         return
     except RuntimeError as exc:
         broker_error = exc
@@ -393,7 +453,8 @@ def cmd_tree(argv):
     reply = agent.call("semantic_tree", win=argv[0])
     for node in reply.get("nodes", []):
         actions = ",".join(node.get("actions", []))
-        print("%-5s %-40s %s" % (node.get("id"), (node.get("label") or "")[:40], actions))
+        # The id field is "node" — "id" is the request/response envelope's.
+        print("%-5s %-40s %s" % (node.get("node"), (node.get("label") or "")[:40], actions))
 
 
 def cmd_act(argv):
