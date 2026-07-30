@@ -279,6 +279,12 @@ struct WaylandServer {
         void (*on_title_changed)(void* ctx, uint32_t surface_id, const char* title);
         void (*on_app_id_changed)(void* ctx, uint32_t surface_id, const char* app_id);
         void (*on_toplevel_destroy)(void* ctx, uint32_t surface_id);
+        /* A client connection went away. client_id is the same opaque value
+         * on_new_toplevel reported — and the ONLY point at which it stops
+         * being meaningful, because it is the wl_client pointer: once freed,
+         * the allocator can hand the same address to the next client that
+         * connects. Anything the shell keyed on it must be dropped here. */
+        void (*on_client_destroy)(void* ctx, uint64_t client_id);
         void (*on_surface_commit)(void* ctx, uint32_t surface_id,
                                    int fd, int w, int h, int stride,
                                    uint32_t fourcc, uint64_t modifier,

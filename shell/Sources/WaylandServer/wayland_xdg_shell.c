@@ -348,6 +348,52 @@ static void xdg_surface_resource_destroy(struct wl_resource* resource) {
     }
 }
 
+/* --------------------------------------------------------------------------
+ * Client-lifetime watch
+ *
+ * on_new_toplevel hands the shell the wl_client pointer as an opaque id, and
+ * the shell keys window ownership on it. That value is only meaningful while
+ * the client is connected: libwayland frees the wl_client on disconnect and
+ * the allocator is free to reuse the address, so a stale entry silently
+ * adopts whichever client lands there next. For an agent-owned Chrome that
+ * meant the human's own browser, opened later, could be claimed for the agent
+ * and drawn only in the AI Space — their window would appear to vanish.
+ *
+ * One destroy listener per client, attached the first time we report a
+ * toplevel for it, tells the shell exactly when to forget.
+ * -------------------------------------------------------------------------- */
+
+struct ClientWatch {
+    struct wl_listener destroy;
+    struct WaylandServer* server;
+    uint64_t client_id;
+};
+
+static void client_watch_destroyed(struct wl_listener* listener, void* data) {
+    (void)data;
+    struct ClientWatch* watch = wl_container_of(listener, watch, destroy);
+    if (watch->server->cb.on_client_destroy) {
+        watch->server->cb.on_client_destroy(watch->server->cb_ctx,
+                                            watch->client_id);
+    }
+    wl_list_remove(&watch->destroy.link);
+    free(watch);
+}
+
+/* Attach once per client. wl_client_get_destroy_listener returns the listener
+ * we already installed, which is what keeps this idempotent across the many
+ * toplevels one client maps. */
+static void watch_client(struct WaylandServer* server, struct wl_client* client) {
+    if (!client) return;
+    if (wl_client_get_destroy_listener(client, client_watch_destroyed)) return;
+    struct ClientWatch* watch = calloc(1, sizeof(*watch));
+    if (!watch) return;
+    watch->server = server;
+    watch->client_id = (uint64_t)(uintptr_t)client;
+    watch->destroy.notify = client_watch_destroyed;
+    wl_client_add_destroy_listener(client, &watch->destroy);
+}
+
 static void xdg_surface_get_toplevel(struct wl_client* client,
                                       struct wl_resource* resource,
                                       uint32_t id) {
@@ -384,6 +430,9 @@ static void xdg_surface_get_toplevel(struct wl_client* client,
      * wayland_server_configure_toplevel() to send the initial configure
      * with the window's content area size. */
     if (server->cb.on_new_toplevel) {
+        /* Watch before reporting: the shell keys ownership on this id, so it
+         * must be told when the id dies. */
+        watch_client(server, client);
         server->cb.on_new_toplevel(server->cb_ctx, surface->id,
                                    (uint64_t)(uintptr_t)client);
     }

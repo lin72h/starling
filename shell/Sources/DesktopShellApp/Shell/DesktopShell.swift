@@ -280,7 +280,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// (new windows, undocked devtools) is claimed for the same agent.
     var _pendingAgentWayland: (agentId: String, onWindow: ((String) -> Void)?)? = nil
     /// Wayland client connection → owning agent (ownership by launch
-    /// chain: the wl_client identity, never process trees).
+    /// chain: the wl_client identity, never process trees). Pruned when the
+    /// client disconnects — the key is a pointer value and is reusable the
+    /// moment it does.
     var _agentWaylandClients: [UInt64: String] = [:]
     /// Last frame-throttle interval applied per agent window (diff guard —
     /// the policy is re-evaluated on every fleet build).
@@ -875,6 +877,25 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             self.setState {
                 self.windowManager.closeWindow(windowId)
             }
+        }
+
+        // A client connection closed: forget the agent ownership keyed on it.
+        // clientId is the wl_client pointer, so once the client is gone the
+        // allocator can hand the same value to an unrelated one — a stale
+        // entry would claim THAT client's toplevels for the agent, giving them
+        // no desktop presence. An agent's Chrome exiting could therefore make
+        // the human's own browser, opened later, appear to vanish.
+        wayland.onClientDestroyed = { [weak self] (clientId: UInt64) in
+            guard let self = self else { return }
+            guard let agentId = self._agentWaylandClients.removeValue(forKey: clientId)
+            else { return }
+            // Logged because this is the C→Swift registration path that has
+            // silently gone missing twice in this codebase: a callback that
+            // is declared, defined and called, but never registered, looks
+            // exactly like a feature that works until something depends on it.
+            // One line per agent-owned client exit is cheap and says it ran.
+            FileHandle.standardError.write(Data(
+                "[AgentSpace] wayland client gone; dropped \(agentId) ownership\n".utf8))
         }
 
         wayland.onTextInputState = { [weak self] windowId, enabled, x, y, w, h in

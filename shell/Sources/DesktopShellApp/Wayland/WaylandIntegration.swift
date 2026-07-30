@@ -56,6 +56,9 @@ private enum WaylandEvent: @unchecked Sendable {
                           firstCommit: Bool, bufferScale: Int,
                           viewportWidth: Int, viewportHeight: Int)
     case toplevelDestroy(surfaceId: UInt32)
+    /// A client connection closed. The last moment its clientId means
+    /// anything — see WaylandIntegration.onClientDestroyed.
+    case clientDestroy(clientId: UInt64)
     case titleChanged(surfaceId: UInt32, title: String)
     case appIdChanged(surfaceId: UInt32, appId: String)
     case newPopup(surfaceId: UInt32, parentSurfaceId: UInt32,
@@ -149,6 +152,11 @@ class WaylandIntegration {
 
     var onNewWindow: ((_ surfaceId: UInt32, _ textureId: Int, _ title: String, _ clientId: UInt64) -> String)?
     var onWindowDestroyed: ((_ windowId: String) -> Void)?
+    /// A client connection went away, so its clientId is now free for reuse
+    /// by an unrelated client. Anything the shell keyed on it — agent window
+    /// ownership, most of all — must be dropped here, or the next client to
+    /// land on the same address inherits it.
+    var onClientDestroyed: ((_ clientId: UInt64) -> Void)?
     var onTitleChanged: ((_ windowId: String, _ title: String) -> Void)?
     /// The client's own name for itself (`xdg_toplevel.set_app_id`). This is
     /// how a window is tied back to an installed app — it matches the
@@ -284,6 +292,11 @@ class WaylandIntegration {
         wayland_server_on_toplevel_destroy(server, { (ctx, surfaceId) in
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             this.handleToplevelDestroy(surfaceId)
+        }, ctx)
+
+        wayland_server_on_client_destroy(server, { (ctx, clientId) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.handleClientDestroy(clientId)
         }, ctx)
 
         wayland_server_on_text_input_state(server, { (ctx, surfaceId, enabled, x, y, w, h) in
@@ -478,6 +491,8 @@ class WaylandIntegration {
                                         viewportWidth: vpW, viewportHeight: vpH)
             case .toplevelDestroy(let surfaceId):
                 processToplevelDestroy(surfaceId)
+            case .clientDestroy(let clientId):
+                onClientDestroyed?(clientId)
             case .titleChanged(let surfaceId, let title):
                 processTitleChanged(surfaceId, title: title)
             case .appIdChanged(let surfaceId, let appId):
@@ -893,6 +908,13 @@ class WaylandIntegration {
         var events = pendingEvents.value
         events.append(.textInputState(surfaceId: surfaceId, enabled: enabled,
                                       x: x, y: y, w: w, h: h))
+        pendingEvents.value = events
+        _needsFrame = true
+    }
+
+    private func handleClientDestroy(_ clientId: UInt64) {
+        var events = pendingEvents.value
+        events.append(.clientDestroy(clientId: clientId))
         pendingEvents.value = events
         _needsFrame = true
     }

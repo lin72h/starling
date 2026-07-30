@@ -97,9 +97,13 @@ void wayland_server_set_surface_throttle(WaylandServer* server,
  * All callbacks are optional. Pass NULL to unregister.
  * -------------------------------------------------------------------------- */
 
-/* client_id identifies the wl_client connection (opaque, stable for the
- * connection's lifetime) — the shell uses it to attribute every toplevel a
- * client maps to the agent that launched it. */
+/* client_id identifies the wl_client connection — the shell uses it to
+ * attribute every toplevel a client maps to the agent that launched it.
+ *
+ * Stable for the connection's lifetime and NOT beyond it: the value is the
+ * client pointer, so after the client disconnects the same value can be
+ * handed to an unrelated one. Anything keyed on it must be dropped in
+ * on_client_destroy, or a later client inherits the earlier one's identity. */
 void wayland_server_on_new_toplevel(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id, uint64_t client_id), void* ctx);
 
@@ -111,6 +115,10 @@ void wayland_server_on_app_id_changed(WaylandServer* server,
 
 void wayland_server_on_toplevel_destroy(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
+
+/* Client connection closed — the end of client_id's meaning. See above. */
+void wayland_server_on_client_destroy(WaylandServer* server,
+    void (*cb)(void* ctx, uint64_t client_id), void* ctx);
 
 /* DMA-BUF surface commit. */
 void wayland_server_on_surface_commit(WaylandServer* server,
