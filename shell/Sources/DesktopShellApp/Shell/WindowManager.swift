@@ -184,6 +184,26 @@ final class AgentInfo {
     /// unless they launch one.
     var isExternal: Bool = false
 
+    /// Secret handed out at registration, required to re-attach to this agent
+    /// on a later connection. Window ownership is per-agent, so a client that
+    /// runs as a series of short-lived processes — a CLI invoked once per
+    /// command, which is how an agent harness drives one — would otherwise get
+    /// a fresh identity every time and be unable to touch the window it
+    /// launched a moment earlier.
+    ///
+    /// This is NOT a defence against a hostile process on the same machine:
+    /// the broker already accepts any client with the session's uid, and that
+    /// same process can read the client's state file. It exists so that ids
+    /// (`agent-1`, `agent-2`) cannot be re-attached by *guessing* them, which
+    /// two unrelated agents starting at the same time would otherwise do.
+    let token: String = AgentInfo.newToken()
+
+    private static func newToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        for i in bytes.indices { bytes[i] = UInt8.random(in: 0...255) }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
     init(id: String, name: String) {
         self.id = id
         self.name = name

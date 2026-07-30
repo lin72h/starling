@@ -116,11 +116,39 @@ else
             # remote debugging on the default profile dir; a per-agent
             # profile also keeps each agent in its own browser instance).
             # The chosen port lands in <profile>/DevToolsActivePort, which
-            # the shell's broker reads from the host side of the app home.
+            # the shell's broker reads back.
+            #
+            # WHERE that profile goes depends on which runtime this is, and
+            # getting it wrong is silent: /home/user exists only inside the
+            # bwrap sandbox on the sealed image, where APP_HOME is bound to
+            # it. On a host install — every Ubuntu machine we ship to — there
+            # is no /home/user and no way to create one, so Chrome cannot
+            # write the profile and DevToolsActivePort never appears. The
+            # endpoint then reports "Chrome still starting" forever.
+            #
+            # So the path is chosen per runtime, and written to a pointer
+            # file in the session runtime dir. The broker reads the pointer
+            # instead of reconstructing the path, which is what let the two
+            # sides disagree in the first place.
             if [ -n "${STARLING_CDP:-}" ]; then
+                if is_starling_os; then
+                    CDP_GUEST="/home/user/.config/chrome-cdp-$STARLING_CDP"
+                    CDP_HOST="$HOMES/$NAME/.config/chrome-cdp-$STARLING_CDP"
+                else
+                    # Host install: the app runs as the login user with its
+                    # own HOME, resolved the same way the exec below does.
+                    _cdp_user="${SUDO_USER:-$(stat -c %U "$XDG_DIR" 2>/dev/null || true)}"
+                    [ -n "$_cdp_user" ] || _cdp_user="$(id -un)"
+                    _cdp_home="$(getent passwd "$_cdp_user" | cut -d: -f6)"
+                    [ -n "$_cdp_home" ] || _cdp_home="$HOME"
+                    CDP_GUEST="$_cdp_home/.config/chrome-cdp-$STARLING_CDP"
+                    CDP_HOST="$CDP_GUEST"
+                fi
                 set -- "$@" \
-                    --user-data-dir="/home/user/.config/chrome-cdp-$STARLING_CDP" \
+                    --user-data-dir="$CDP_GUEST" \
                     --remote-debugging-port=0
+                mkdir -p "$XDG_DIR" 2>/dev/null || true
+                printf '%s\n' "$CDP_HOST" > "$XDG_DIR/chrome-cdp-$STARLING_CDP.path" 2>/dev/null || true
             fi
             ;;
         vscode)

@@ -148,6 +148,17 @@ install -m755 "$REPO/build/app-install.sh" "$OUT/bin/app-install"
 install -m755 "$REPO/build/wechat-run.sh" "$OUT/bin/wechat-run"
 install -m755 "$REPO"/build/appbin/* "$LIB/appbin/"
 
+# --- agent surface: the CLI an agent drives the desktop with, and the skill
+# that teaches one how. The CLI goes on PATH because an agent invokes it as a
+# shell command; the skill ships as data and is linked into an agent's
+# ~/.claude/skills/ (see the README beside it) rather than installed there
+# outright, since that directory belongs to the user, not the package.
+install -m755 "$REPO/build/agent-client.py" "$OUT/bin/agent-client"
+mkdir -p "$SHARE/skills/starling-desktop"
+install -m644 "$REPO/build/skills/starling-desktop/SKILL.md" \
+    "$SHARE/skills/starling-desktop/"
+install -m644 "$REPO/build/skills/README.md" "$SHARE/skills/"
+
 echo "staged -> $OUT"
 echo "  engine: $E"
 echo "  config: $CONFIG"

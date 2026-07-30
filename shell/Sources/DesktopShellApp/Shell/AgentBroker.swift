@@ -299,6 +299,27 @@ final class AgentBroker: @unchecked Sendable {
 
         if op == "hello" {
             let name = (req["name"] as? String) ?? "external"
+
+            // Re-attach. Windows are owned per agent, so a client that runs as
+            // a series of short-lived processes — one per command — needs to
+            // come back as the SAME agent or it cannot address the window it
+            // just launched. Requires the token issued at registration.
+            if let want = req["agent"] as? String, let token = req["token"] as? String,
+               let existing = shell.windowManager.agents.first(where: { $0.id == want }) {
+                guard existing.token == token else {
+                    audit(want, op, false, "bad token")
+                    return fail("bad token for \(want)")
+                }
+                conn.agentId = existing.id
+                agentLastOpMs[existing.id] = nowMs
+                conn.send(["id": id, "ok": true, "proto": 1, "agent": existing.id,
+                           "token": existing.token, "reattached": true,
+                           "scope": ["launch": (Array(Self.launchable.keys) + ["chrome"]).sorted(),
+                                     "windows": "owned"]])
+                audit(existing.id, op, true, "reattach \(name)")
+                return
+            }
+
             let n = shell.windowManager.agents.count + 1
             let agent = AgentInfo(id: "agent-\(n)", name: "\(name) (socket)")
             agent.isExternal = true
@@ -306,6 +327,7 @@ final class AgentBroker: @unchecked Sendable {
             conn.agentId = agent.id
             agentLastOpMs[agent.id] = nowMs
             conn.send(["id": id, "ok": true, "proto": 1, "agent": agent.id,
+                       "token": agent.token,
                        "scope": ["launch": (Array(Self.launchable.keys) + ["chrome"]).sorted(),
                                  "windows": "owned"]])
             audit(agent.id, op, true, name)
@@ -656,9 +678,24 @@ final class AgentBroker: @unchecked Sendable {
             guard win.appId.hasPrefix("wayland-") else {
                 return fail("not a Wayland client window")
             }
+            // Where the profile went is app-run's decision, not ours: it
+            // differs between the sandboxed image (the app home bound at
+            // /home/user) and a host install (the login user's own home).
+            // Reconstructing it here is what made this op answer "still
+            // starting" forever on every Ubuntu machine — the path it
+            // rebuilt was one only the sandbox ever has. Read the pointer
+            // app-run leaves instead, and keep the old path as a fallback
+            // for a Chrome started by an older launcher.
+            let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp"
             let homes = ProcessInfo.processInfo.environment["STARLING_APP_HOMES"]
                 ?? "/var/lib/starling-apps/homes"
-            let portFile = homes + "/chrome/.config/chrome-cdp-\(agentId)/DevToolsActivePort"
+            var profileDir = homes + "/chrome/.config/chrome-cdp-\(agentId)"
+            if let pointer = try? String(
+                contentsOfFile: runtimeDir + "/chrome-cdp-\(agentId).path", encoding: .utf8) {
+                let line = pointer.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !line.isEmpty { profileDir = line }
+            }
+            let portFile = profileDir + "/DevToolsActivePort"
             guard let contents = try? String(contentsOfFile: portFile, encoding: .utf8) else {
                 return fail("no CDP endpoint (launched without CDP, or Chrome still starting)")
             }
