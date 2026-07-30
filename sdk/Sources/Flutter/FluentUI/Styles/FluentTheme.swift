@@ -147,7 +147,15 @@ public struct FluentThemeData: Equatable {
             ? Color(0xFFd6d6d6)
             : Color(0xFF292929))
         self.shadowColor = shadowColor ?? (isLight ? FluentColors.black : FluentColors.grey[130])
-        self.scaffoldBackgroundColor = scaffoldBackgroundColor ?? resolvedResources.layerOnAcrylicFillColorDefault
+        // A page background has to be OPAQUE. The acrylic layer colours are
+        // 0x40ffffff (light) and 0x09ffffff (dark) — 25% and 3.5% white, meant
+        // to be composited over something already there. Painting one as the
+        // page background composites it over whatever the host cleared to,
+        // which in a plain windowed app is black: a light theme then renders
+        // as dark grey. `solidBackgroundFillColorTertiary` (#f9f9f9 / #282828)
+        // is the opaque page fill, and what fluent_ui uses here.
+        self.scaffoldBackgroundColor = scaffoldBackgroundColor
+            ?? resolvedResources.solidBackgroundFillColorTertiary
         self.acrylicBackgroundColor = acrylicBackgroundColor ?? (isLight
             ? resolvedResources.layerOnAcrylicFillColorDefault
             : Color(0xFF2c2c2c))
