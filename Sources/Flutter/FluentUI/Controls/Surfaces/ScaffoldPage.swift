@@ -161,6 +161,17 @@ public class ScaffoldPage: StatelessWidget {
             columnChildren.append(bottomBar)
         }
 
-        return Column(children: columnChildren)
+        // The page paints the theme's background, as fluent_ui's ScaffoldPage
+        // does. Nothing above it does: FluentApp supplies the theme, the
+        // Directionality and a Navigator, but no paint — the same division as
+        // MaterialApp and Scaffold. Without this a page composites onto
+        // whatever the host cleared the surface to, which for a plain windowed
+        // app is black, and the theme's near-black body text is then invisible
+        // on it. A window that renders a button and no text is what that looks
+        // like from the outside.
+        return ColoredBox(
+            color: FluentTheme.of(context).scaffoldBackgroundColor,
+            child: Column(children: columnChildren)
+        )
     }
 }
