@@ -92,11 +92,47 @@ else
     echo "  run with --sdk (needs a one-off swift-testing module prebuild on 26.04)."
 fi
 
+# An app that vendors a prebuilt native library built for another architecture
+# cannot link, and nothing in this repo can make it. apps/ImageViewerApp ships an
+# x86-64 .deps/pdfium/lib/libpdfium.so, so on arm64 it dies with
+# `cannot find -lpdfium` — ld does say "skipping incompatible" first, but that
+# scrolls past and the error names a missing library rather than a wrong one.
+#
+# Skipped by *architecture*, not by name: there is no list of app ids here to
+# drift out of step with the registry, and the moment a matching libpdfium.so is
+# dropped in, the app builds again with no change to this file. Announced rather
+# than silent — a package that stops being built without saying so is how you
+# ship a desktop with a missing app.
+#
+# The host's ELF machine word is read off /bin/true instead of mapping uname -m
+# to an ELF name, so this needs no architecture table either.
+elf_machine() { readelf -h "$1" 2>/dev/null | sed -n 's/^ *Machine: *//p'; }
+HOST_MACHINE="$(elf_machine /bin/true)"
+
+# Prints "<lib> (<its arch>, host is <ours>)" and succeeds when a vendored
+# library cannot be linked on this host; fails silently when all of them can.
+vendored_arch_mismatch() {
+    local lib m
+    for lib in "$1"/.deps/*/lib/*.so; do
+        [ -f "$lib" ] || continue
+        m="$(elf_machine "$lib")"
+        [ -n "$m" ] && [ -n "$HOST_MACHINE" ] && [ "$m" != "$HOST_MACHINE" ] && {
+            printf '%s (%s, host is %s)\n' "$(basename "$lib")" "$m" "$HOST_MACHINE"
+            return 0
+        }
+    done
+    return 1
+}
+
 if [ "$BUILD" = 1 ]; then
     step "build: shell + apps"
     for pkg in shell apps/*/; do
         [ -f "$REPO/$pkg/Package.swift" ] || continue
         name=$(basename "$pkg")
+        if mismatch=$(vendored_arch_mismatch "$REPO/$pkg"); then
+            echo "  skip  $name — vendored $mismatch"
+            continue
+        fi
         out=$(cd "$REPO/$pkg" && as_user "$SWIFT" build -c release 2>&1)
         # Every package builds on Linux, including the macOS-only ones: they
         # select a placeholder target off macOS (see apps/DSATool/Package.swift)
