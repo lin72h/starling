@@ -7,6 +7,31 @@ import Testing
 
 // MARK: - Test Helpers
 
+/// `MultiChildRenderObjectElement.insertRenderObjectChild` casts its render
+/// object to this protocol unconditionally, as Dart does, so a bare
+/// `RenderObject` traps the moment a child is inserted.
+private class UCTestContainerRenderObject: RenderBox, ContainerRenderObjectHost {
+    private(set) var children: [RenderBox] = []
+
+    func insert(_ child: RenderBox, after: RenderBox?) {
+        guard let after else {
+            children.insert(child, at: 0)   // nil means "first", as in Dart
+            return
+        }
+        let i = children.firstIndex { $0 === after }
+        children.insert(child, at: i.map { $0 + 1 } ?? children.count)
+    }
+
+    func remove(_ child: RenderBox) {
+        children.removeAll { $0 === child }
+    }
+
+    func move(_ child: RenderBox, after: RenderBox?) {
+        remove(child)
+        insert(child, after: after)
+    }
+}
+
 /// A concrete MultiChildRenderObjectWidget for testing updateChildren.
 /// Tracks an `id` property for identity verification and supports keys.
 private class TestMultiChildWidget: MultiChildRenderObjectWidget {
@@ -18,7 +43,7 @@ private class TestMultiChildWidget: MultiChildRenderObjectWidget {
     }
 
     override func createRenderObject(_ context: any BuildContext) -> RenderObject {
-        return RenderObject()
+        return UCTestContainerRenderObject()
     }
 }
 
@@ -73,6 +98,11 @@ private func makeParentWithChildren(_ childWidgets: [Widget]) -> (MultiChildRend
     rootElement.owner = buildOwner
     rootElement._lifecycleState = .active
     rootElement.depth = 0
+    // The root is assembled by hand rather than mounted, so nothing creates its
+    // render object — but mounting the parent under it calls
+    // insertRenderObjectChild on the root, which needs one. Left nil, that cast
+    // aborted the whole test process.
+    rootElement.renderObject = rootWidget.createRenderObject(rootElement)
 
     // Mount the parent under the root
     parentElement.mount(rootElement, nil)

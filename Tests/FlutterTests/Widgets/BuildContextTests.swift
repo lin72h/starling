@@ -29,7 +29,14 @@ private class TestLeafWidget: LeafRenderObjectWidget {
 }
 
 /// A concrete RenderObject subclass for testing.
-private class TestRenderObject: RenderObject {}
+/// Conforms to `SingleChildRenderObjectHost` because `TestSingleChildROWidget`
+/// below hands it to a real `SingleChildRenderObjectElement`, whose
+/// `insertRenderObjectChild` casts to that protocol to store the child — as
+/// Dart's does. Without the conformance, mounting a child crashed the whole
+/// test run inside the cast rather than failing one case.
+private class TestRenderObject: RenderBox, SingleChildRenderObjectHost {
+    var child: RenderBox?
+}
 
 /// A concrete SingleChildRenderObjectWidget for testing render object ancestor queries.
 private class TestSingleChildROWidget: SingleChildRenderObjectWidget {
