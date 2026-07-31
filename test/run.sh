@@ -68,71 +68,25 @@ step "unit tests: registry"
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Executed [0-9]+ tests|error:|failed") || fails=$((fails + 1))
 
-# sdk/'s test targets need two things on Ubuntu 26.04 that a plain `swift test`
-# does not give them. Both come from the same root: the 6.2.4 toolchain is an
-# ubuntu24.04 build, and under C++ interop 26.04's libstdc++ 15 headers make
-# Foundation's _CStdlib.h pull <cmath> textually against the prebuilt std module
-# ("redefinition of 'acos'"). docs/BUILDING.md has the full write-up.
+# sdk/'s test targets cannot be run with a plain `swift test` on Ubuntu 26.04:
+# the 6.2.4 toolchain is an ubuntu24.04 build, and under C++ interop 26.04's
+# libstdc++ 15 headers make Foundation's _CStdlib.h pull <cmath> textually
+# against the prebuilt std module ("redefinition of 'acos'"). swift-testing
+# ships as a textual .swiftinterface, so it gets recompiled in our interop
+# context and hits that before reaching any of our code.
 #
-#  1. swift-testing ships Testing, _Testing_Foundation and _TestDiscovery as
-#     *textual* .swiftinterface only — XCTest, by contrast, ships a binary
-#     .swiftmodule. An interface has to be recompiled in the importing target's
-#     context, and ours are C++-interop, so that rebuild hits the clash before
-#     ever reaching our code. Compiling them once here, outside C++ interop,
-#     yields binary modules the test build consumes as-is, so no rebuild happens.
-#     This is unavoidable even for an all-XCTest target: SwiftPM's generated test
-#     runner opens with `#if canImport(Testing) import Testing #endif`.
-#
-#  2. The compat flags have to reach *every* frontend invocation, not just our
-#     targets. SwiftPM generates the runner and the test-discovery module itself,
-#     and those carry none of a target's swiftSettings while still inheriting C++
-#     interop — so the package-level .unsafeFlags cannot cover them. Passing the
-#     flags through -Xswiftc does.
-#
-# Keep these flags in step with `glibcMathCompat` in sdk/Package.swift.
-SDK_TESTING_CFLAGS=(-Xcc -D_GLIBCXX_MATH_H -Xcc -include -Xcc /usr/include/math.h)
-# Each one has to be introduced by its own -Xswiftc, so build the list rather
-# than trying to prefix the array in place (that yields one word per flag, with
-# the space embedded, and swift silently treats it as an unknown argument).
-SDK_TEST_XFLAGS=()
-for _f in "${SDK_TESTING_CFLAGS[@]}"; do SDK_TEST_XFLAGS+=(-Xswiftc "$_f"); done
-
-# Build binary .swiftmodule files for the interface-only swift-testing modules.
-# Idempotent: skipped entirely once the cache is populated.
-prebuild_swift_testing() {
-    local out="$1"
-    [ -f "$out/Testing.swiftmodule" ] && return 0
-    local res
-    res="$(as_user "${SWIFT}c" -print-target-info 2>/dev/null \
-           | sed -n 's/.*"runtimeResourcePath": *"\([^"]*\)".*/\1/p' | head -1)"
-    [ -n "$res" ] || { echo "  could not locate the Swift resource dir" >&2; return 1; }
-    local triple="x86_64-unknown-linux-gnu"
-    mkdir -p "$out"
-    # _TestDiscovery and _Testing_Foundation first: Testing imports them.
-    for m in _TestDiscovery _Testing_Foundation Testing; do
-        local iface="$res/linux/$m.swiftmodule/$triple.swiftinterface"
-        [ -f "$iface" ] || continue
-        as_user "${SWIFT}c" -frontend -compile-module-from-interface \
-            -target "$triple" -module-name "$m" -I "$out" \
-            -o "$out/$m.swiftmodule" "$iface" 2>&1 | grep -E "error:" && return 1
-    done
-    return 0
-}
-
+# The workaround — prebuild those modules outside interop, and pass the compat
+# flags to every frontend invocation — now lives with the framework, in
+# sdk/tools/run-tests.sh. Delegate to it rather than keeping a second copy: the
+# copy that used to live here hardcoded an x86_64 triple, so on aarch64 it
+# matched no interface, prebuilt nothing, and reported success.
 if [ "$SDK" = 1 ]; then
     step "unit tests: sdk"
-    PREBUILT="$REPO/sdk/.build/swift-testing-prebuilt"
-    if prebuild_swift_testing "$PREBUILT"; then
-        (cd "$REPO/sdk" && as_user "$SWIFT" test \
-            -Xswiftc -I -Xswiftc "$PREBUILT" \
-            "${SDK_TEST_XFLAGS[@]}" 2>&1 \
-            | grep -vE "libxml2.so.2: no version information" \
-            | grep -E "Executed [0-9]+ tests|error:|failed" | tail -5) \
-            || fails=$((fails + 1))
-    else
-        echo "  FAIL  could not prebuild swift-testing modules"
-        fails=$((fails + 1))
-    fi
+    (cd "$REPO/sdk" && as_user env SWIFT="$SWIFT" ./tools/run-tests.sh 2>&1 \
+        | grep -vE "libxml2.so.2: no version information" \
+        | grep -E "Test run with [0-9]+ tests|Executed [0-9]+ tests|error:|failed" \
+        | tail -5) \
+        || fails=$((fails + 1))
 else
     step "unit tests: sdk — SKIPPED"
     echo "  run with --sdk (needs a one-off swift-testing module prebuild on 26.04)."

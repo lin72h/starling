@@ -1,7 +1,10 @@
+# Both are symlinks into sibling checkouts, made by ./bootstrap.sh — machine
+# paths, not content.
 /engine
+/sdk
 .build/
 .build-starling/
 .DS_Store
 .stage/
-/sdk/tools/drm_screenshot
+/build/tools/drm_screenshot
 __pycache__/

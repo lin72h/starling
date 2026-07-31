@@ -812,7 +812,7 @@ checkout. So adding a bridge header is two steps:
 
 ```bash
 # 1. declare it in the modulemap (the line above), then
-sdk/tools/sync-engine-headers.sh
+sdk/tools/sync-vendored-headers.sh
 ```
 
 The modulemap is the manifest that script reads, so the header list lives in one

@@ -46,13 +46,18 @@ nothing extra to type. What they are and why is in
   means re-running `gn gen`, a full ~4400-step rebuild per config, and
   relinking every Swift binary.
 
-The two repos sit side by side, which is what `bootstrap.sh` expects:
+The three repos sit side by side, which is what `bootstrap.sh` expects:
 
 ```
 ~/dev/starling-build/
     starling-engine/     the C++ half (also the flutter monorepo root)
-    starling-desktop/    the Swift half
+    flutter-swift/       the Flutter→Swift framework port (SwiftPM "FlutterSwift")
+    starling/            the desktop — shell, compositor, apps, packaging
 ```
+
+`bootstrap.sh` makes `starling/engine` and `starling/sdk` symlinks into the
+first two, so every manifest in the desktop can say `../engine` and `../../sdk`
+without hardcoding where you cloned things.
 
 ---
 
@@ -163,7 +168,7 @@ binds only the engine's stable C API.
 
 The engine's public headers are **vendored** into `sdk/`, not read out of the
 checkout, so `sdk/` compiles with no engine tree present and needs the engine
-only at link time. `sdk/tools/sync-engine-headers.sh` refreshes them and
+only at link time. `sdk/tools/sync-vendored-headers.sh` refreshes them and
 `--check` reports drift; re-run it after changing a bridge header in the engine.
 
 ---
@@ -216,17 +221,23 @@ fine — the path is what matters, not how the toolchain got there.
 On 26.04, `swift-build` cannot start until the toolchain gets a libxml2 compat
 symlink; `./bootstrap.sh` in the next step creates it.
 
-### 2.3 Clone, and point it at the engine
+### 2.3 Clone, and point it at the engine and the framework
+
+The Flutter→Swift framework is its own repo. Clone it beside this one:
 
 ```bash
 cd ~/dev/starling-build
+git clone https://github.com/starling-build/flutter-swift.git
 git clone https://github.com/starling-build/starling.git
 cd starling
 ./bootstrap.sh                  # engine -> ../starling-engine/engine
+                                # sdk    -> ../flutter-swift
 ```
 
-Every engine reference in this repo goes through that symlink; pass a path to
-`bootstrap.sh` to use an engine checkout elsewhere.
+Every engine and framework reference in this repo goes through those two
+symlinks; pass paths to `bootstrap.sh` to use checkouts elsewhere
+(`./bootstrap.sh <engine> <flutter-swift>`, or `$STARLING_ENGINE` /
+`$STARLING_SDK`).
 
 ### 2.4 Build the shell and the apps
 

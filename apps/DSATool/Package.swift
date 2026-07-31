@@ -3,7 +3,7 @@
 import PackageDescription
 
 // DSATool drives DesktopShellApp on macOS through AppKit and CGWindowList
-// (click, screenshot, window info) — see `sdk/macos-compat/`, which develops
+// (click, screenshot, window info) — see `macos-compat/`, which develops
 // macOS-first. Neither framework exists on Linux, where `build/shell-drive.py`
 // does that job, so off macOS this package builds a placeholder library and
 // `Sources/DSATool` is not compiled at all.
