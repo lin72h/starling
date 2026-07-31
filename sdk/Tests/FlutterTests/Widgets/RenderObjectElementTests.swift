@@ -8,7 +8,13 @@ import Testing
 // MARK: - Test Helpers
 
 /// A concrete RenderObject with observable state for testing.
-private class TestRenderObject: RenderObject {
+// Conforms to `SingleChildRenderObjectHost` because `ParentWidget` below is a
+// `SingleChildRenderObjectWidget`, and `SingleChildRenderObjectElement` casts
+// its render object to that protocol unconditionally when a child attaches —
+// as Dart does. Without it, mounting a child aborted the whole test process
+// inside the cast instead of failing a single case.
+private class TestRenderObject: RenderBox, SingleChildRenderObjectHost {
+    var child: RenderBox?
     var updateCount = 0
     var didUnmountCount = 0
     var isDisposed = false
@@ -91,10 +97,16 @@ private class TestConcreteRenderTreeRootElement: RenderTreeRootElement {
 }
 
 /// Helper: creates a parent element with a BuildOwner, ready for mounting children.
-private func makeParent() -> Element {
+private func makeParent(owner: BuildOwner = BuildOwner()) -> Element {
     let parentWidget = ParentWidget()
     let parent = parentWidget.createElement()
-    parent.owner = BuildOwner()
+    parent.owner = owner
+    // The parent is deliberately never mounted, so nothing runs the step that
+    // would build its render object — but mounting a *child* under it calls
+    // insertRenderObjectChild on this element, which needs one. Left nil, that
+    // cast aborted the whole test process. The other helpers here already set
+    // this by hand for the same reason.
+    (parent as! RenderObjectElement).renderObject = parentWidget.createRenderObject(parent)
     return parent
 }
 
@@ -157,9 +169,7 @@ struct RenderObjectElementMountTests {
         let widget = TestLeafWidget()
         let element = widget.createElement() as! LeafRenderObjectElement
         let owner = BuildOwner()
-        let parentWidget = ParentWidget()
-        let parent = parentWidget.createElement()
-        parent.owner = owner
+        let parent = makeParent(owner: owner)
 
         element.mount(parent, nil)
 

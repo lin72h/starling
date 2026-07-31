@@ -14,6 +14,14 @@ private class TestLeafWidget: LeafRenderObjectWidget {
     }
 }
 
+/// `SingleChildRenderObjectElement.insertRenderObjectChild` casts its render
+/// object to this protocol unconditionally, as Dart does, so the widget under
+/// test cannot hand it a bare `RenderObject` — that trapped and took the whole
+/// test process with it rather than failing one case.
+private class SCTestRenderObject: RenderBox, SingleChildRenderObjectHost {
+    var child: RenderBox?
+}
+
 /// A concrete SingleChildRenderObjectWidget with controllable child.
 private class TestSCROWidget: SingleChildRenderObjectWidget {
     init(child: Widget? = nil) {
@@ -21,7 +29,7 @@ private class TestSCROWidget: SingleChildRenderObjectWidget {
     }
 
     override func createRenderObject(_ context: any BuildContext) -> RenderObject {
-        return RenderObject()
+        return SCTestRenderObject()
     }
 }
 

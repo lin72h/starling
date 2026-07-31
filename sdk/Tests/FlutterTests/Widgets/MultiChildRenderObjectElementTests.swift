@@ -8,6 +8,38 @@ import Testing
 // MARK: - Test Helpers
 
 /// A concrete LeafRenderObjectWidget used as a child in multi-child tests.
+/// Leaves have to be `RenderBox`es: `MultiChildRenderObjectElement`
+/// force-casts each inserted child to one, mirroring Dart.
+private class MCTestLeafRenderBox: RenderBox {}
+
+/// The parent's render object has to conform to `ContainerRenderObjectHost` —
+/// `MultiChildRenderObjectElement.insertRenderObjectChild` casts to it to place
+/// children. A bare `RenderObject` does not, and the cast is unconditional, so
+/// mounting any child brought down the whole test process rather than failing
+/// one case. Keeping the child list also lets the tests assert what the element
+/// actually did to the render tree.
+private class MCTestContainerRenderObject: RenderBox, ContainerRenderObjectHost {
+    private(set) var children: [RenderBox] = []
+
+    func insert(_ child: RenderBox, after: RenderBox?) {
+        guard let after else {
+            children.insert(child, at: 0)   // nil means "first", as in Dart
+            return
+        }
+        let i = children.firstIndex { $0 === after }
+        children.insert(child, at: i.map { $0 + 1 } ?? children.count)
+    }
+
+    func remove(_ child: RenderBox) {
+        children.removeAll { $0 === child }
+    }
+
+    func move(_ child: RenderBox, after: RenderBox?) {
+        remove(child)
+        insert(child, after: after)
+    }
+}
+
 private class MCTestLeafWidget: LeafRenderObjectWidget {
     let id: String
 
@@ -17,7 +49,7 @@ private class MCTestLeafWidget: LeafRenderObjectWidget {
     }
 
     override func createRenderObject(_ context: any BuildContext) -> RenderObject {
-        return RenderObject()
+        return MCTestLeafRenderBox()
     }
 }
 
@@ -28,7 +60,7 @@ private class MCTestWidget: MultiChildRenderObjectWidget {
     }
 
     override func createRenderObject(_ context: any BuildContext) -> RenderObject {
-        return RenderObject()
+        return MCTestContainerRenderObject()
     }
 }
 

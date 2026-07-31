@@ -37,8 +37,15 @@ private class MockTickerProvider: TickerProvider {
 /// A concrete RenderBox subclass with a configurable size for layout,
 /// used as a child in tests.
 private class FixedSizeRenderBox: RenderBox {
-    var fixedWidth: Double
-    var fixedHeight: Double
+    // These stand in for whatever determines a real box's size, so changing one
+    // has to dirty layout exactly as a real RenderBox would. Without this the
+    // tests that resize the child in-place never re-run layout at all:
+    // `RenderObject.layout` short-circuits when the node is clean and the
+    // constraints are unchanged, so RenderAnimatedSize stayed in .stable and
+    // every state-machine transition looked broken. `didSet` does not fire
+    // during init, so construction is unaffected.
+    var fixedWidth: Double { didSet { markNeedsLayout() } }
+    var fixedHeight: Double { didSet { markNeedsLayout() } }
 
     init(width: Double, height: Double) {
         self.fixedWidth = width
@@ -444,6 +451,12 @@ final class RenderAnimatedSizeStateMachineTests: XCTestCase {
         XCTAssertEqual(box.state, .changed)
 
         // Same size again -> changed -> stable (child stabilized)
+        // RenderAnimatedSize drives its own relayout from the animation
+        // controller's listener, as Dart does; MockTickerProvider never
+        // advances it, so nothing dirties the box here and `layout` would
+        // short-circuit on unchanged constraints without ever running the
+        // state machine. Mark it as the running animation would.
+        box.markNeedsLayout()
         box.layout(constraints)
         XCTAssertEqual(box.state, .stable)
         box.dispose()
@@ -498,6 +511,7 @@ final class RenderAnimatedSizeStateMachineTests: XCTestCase {
         XCTAssertEqual(box.state, .unstable)
 
         // unstable -> stable (same size in next layout)
+        box.markNeedsLayout()  // as the running animation would; see above
         box.layout(constraints)
         XCTAssertEqual(box.state, .stable)
         box.dispose()
@@ -556,6 +570,7 @@ final class RenderAnimatedSizeStateMachineTests: XCTestCase {
         XCTAssertEqual(box.state, .changed)
 
         // changed -> stable (child stabilizes)
+        box.markNeedsLayout()  // as the running animation would; see above
         box.layout(constraints)
         XCTAssertEqual(box.state, .stable)
         box.dispose()
@@ -585,6 +600,7 @@ final class RenderAnimatedSizeStateMachineTests: XCTestCase {
         XCTAssertEqual(box.state, .unstable)
 
         // unstable -> stable (size stabilizes)
+        box.markNeedsLayout()  // as the running animation would; see above
         box.layout(constraints)
         XCTAssertEqual(box.state, .stable)
         box.dispose()

@@ -74,6 +74,14 @@ private func mountTree(_ widget: Widget) -> Element {
     return rootElement
 }
 
+/// The render object behind `TestRootWidget`. It has to conform to
+/// `SingleChildRenderObjectHost`, because `SingleChildRenderObjectElement`
+/// casts to that protocol unconditionally when a child attaches — as Dart
+/// does. A bare `RenderObject` brought down the whole test process there.
+private class PDTestSingleChildRenderObject: RenderBox, SingleChildRenderObjectHost {
+    var child: RenderBox?
+}
+
 /// Root widget to host a tree.
 private class TestRootWidget: SingleChildRenderObjectWidget {
     init(child: Widget) {
@@ -81,7 +89,7 @@ private class TestRootWidget: SingleChildRenderObjectWidget {
     }
 
     override func createRenderObject(_ context: any BuildContext) -> RenderObject {
-        return RenderObject()
+        return PDTestSingleChildRenderObject()
     }
 }
 
@@ -257,8 +265,13 @@ struct ParentDataElementTests {
 
     @Test("_applyParentData applies to direct RenderObjectElement child (MultiChild)")
     func applyParentDataToMultiChildRenderObject() {
-        let renderObj1 = RenderObject()
-        let renderObj2 = RenderObject()
+        // RenderBox, not RenderObject: these leaves are inserted into a
+        // multi-child host, and ContainerRenderObjectHost.insert takes a
+        // RenderBox — MultiChildRenderObjectElement force-casts to it, as Dart
+        // does. The single-child tests above can stay on RenderObject, whose
+        // insert path uses a conditional cast.
+        let renderObj1 = RenderBox()
+        let renderObj2 = RenderBox()
         let leaf1 = TestLeafRenderObjectWidget(renderObject: renderObj1)
         let leaf2 = TestLeafRenderObjectWidget(renderObject: renderObj2)
 
@@ -296,6 +309,31 @@ struct ParentDataElementTests {
 
 // MARK: - Additional Test Helpers
 
+/// The multi-child counterpart of `PDTestSingleChildRenderObject`:
+/// `MultiChildRenderObjectElement` casts to `ContainerRenderObjectHost` to
+/// place each child, so a bare `RenderObject` crashes on the first insert.
+private class PDTestContainerRenderObject: RenderBox, ContainerRenderObjectHost {
+    private(set) var children: [RenderBox] = []
+
+    func insert(_ child: RenderBox, after: RenderBox?) {
+        guard let after else {
+            children.insert(child, at: 0)   // nil means "first", as in Dart
+            return
+        }
+        let i = children.firstIndex { $0 === after }
+        children.insert(child, at: i.map { $0 + 1 } ?? children.count)
+    }
+
+    func remove(_ child: RenderBox) {
+        children.removeAll { $0 === child }
+    }
+
+    func move(_ child: RenderBox, after: RenderBox?) {
+        remove(child)
+        insert(child, after: after)
+    }
+}
+
 /// A multi-child RenderObjectWidget for testing multiple children.
 private class TestMultiChildWidget: MultiChildRenderObjectWidget {
     init(children: [Widget]) {
@@ -303,6 +341,6 @@ private class TestMultiChildWidget: MultiChildRenderObjectWidget {
     }
 
     override func createRenderObject(_ context: any BuildContext) -> RenderObject {
-        return RenderObject()
+        return PDTestContainerRenderObject()
     }
 }
