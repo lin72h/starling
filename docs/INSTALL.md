@@ -63,10 +63,10 @@ passthrough.
 sudo apt install gdm3
 
 # 2. Download the package (or use the button on https://starling.build):
-curl -fLO https://github.com/starling-build/starling/releases/download/v0.2.2/starling_0.2.2-1_amd64.deb
+curl -fLO https://github.com/starling-build/starling/releases/download/v0.2.2/starling_0.2.2-2_amd64.deb
 
 # 3. Install it. `apt` (not `dpkg -i`) so it also pulls the dependencies:
-sudo apt install ./starling_0.2.2-1_amd64.deb
+sudo apt install ./starling_0.2.2-2_amd64.deb
 ```
 
 `apt install ./file.deb` is deliberate — plain `dpkg -i` installs the package
@@ -89,7 +89,7 @@ If you do not see it, see [Troubleshooting](#no-starling-in-the-session-menu).
 ```bash
 dpkg -s starling | grep -E '^(Package|Version|Status)'
 #   Package: starling
-#   Version: 0.2.2-1
+#   Version: 0.2.2-2
 #   Status: install ok installed
 ```
 
