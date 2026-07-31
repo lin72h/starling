@@ -538,15 +538,30 @@ open class RenderObject: HitTestTarget {
 
     /// Called when a child render object is removed from this parent.
     ///
-    /// Clears the parent reference and marks this object for layout.
+    /// Tears down the parent data, clears the parent reference, and marks this
+    /// object for layout.
     ///
-    /// **Dart Source:** `object.dart:1991-2001`
+    /// **Dart Source:** `object.dart:2058-2073`
     public func dropChild(_ child: RenderObject) {
+        // Dart detaches and clears the parent data here. Leaving it in place
+        // left every dropped child carrying its old parent's slot: a cell
+        // pulled out of a RenderTable kept its TableCellParentData, so the
+        // next parent's setupParentData saw a non-nil value of the wrong type.
+        child.parentData?.detach()
+        child.parentData = nil
         child.parent = nil
         markNeedsLayout()
+        markNeedsCompositingBitsUpdate()
         // Mirror adoptChild: the departed child's pixels must not linger in
         // this node's retained recording.
         markNeedsPaint()
+        // DIFFERENCE FROM DART: `dropChild` also does `if (attached)
+        // child.detach()` and `markNeedsSemanticsUpdate()`.
+        // REASON: neither has a counterpart to pair with here. `adoptChild`
+        // never calls `child.attach`, so detaching on drop would be one half of
+        // a lifecycle the port does not otherwise run, and there is no
+        // semantics update to schedule. Wiring attach/detach symmetrically is a
+        // change to the live compositor, not to this method.
     }
 
     // MARK: - Depth
