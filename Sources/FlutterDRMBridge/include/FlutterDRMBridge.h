@@ -7,6 +7,6 @@
 #ifndef FLUTTER_DRM_BRIDGE_H_
 #define FLUTTER_DRM_BRIDGE_H_
 
-#include "../../../../engine/src/flutter/shell/platform/linux_drm/fl_drm_view.h"
+#include "engine/fl_drm_view.h"
 
 #endif  // FLUTTER_DRM_BRIDGE_H_
