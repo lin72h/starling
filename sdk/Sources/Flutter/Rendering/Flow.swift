@@ -1061,8 +1061,18 @@ public class RenderFlow: RenderBox, RenderBoxContainerDefaults, FlowPaintingCont
 // MARK: - ContainerRenderObjectHost Conformance
 
 extension RenderFlow: ContainerRenderObjectHost {
+    /// Reorders a child that is already ours.
+    ///
+    /// Relinks in place rather than `remove`/`insert`: those drop and re-adopt,
+    /// and `dropChild` clears the parent data (see `RenderObject.dropChild`),
+    /// which a move has no way to restore.
+    ///
+    /// **Dart Source:** `object.dart:4448-4460`
     public func move(_ child: RenderBox, after: RenderBox?) {
-        remove(child)
-        insert(child, after: after)
+        guard let childParentData = child.parentData as? FlowParentData else { return }
+        if childParentData.previousSibling === after { return }
+        _removeFromChildList(child)
+        _insertIntoChildList(child, after: after)
+        markNeedsLayout()
     }
 }

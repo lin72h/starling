@@ -1199,8 +1199,23 @@ public class RenderIndexedStack: RenderStack {
 // MARK: - ContainerRenderObjectHost Conformance
 
 extension RenderStack: ContainerRenderObjectHost {
+    /// Reorders a child that is already ours.
+    ///
+    /// Relinks the child in place. It must NOT go through `remove`/`insert`:
+    /// those drop and re-adopt, `dropChild` clears the parent data, and
+    /// `setupParentData` then hands back a blank `StackParentData` — so a
+    /// reordered child would silently lose its `Positioned`
+    /// top/left/bottom/right and be laid out as an unpositioned child, aligned
+    /// instead of placed. Nothing would restore it: parent data is re-applied
+    /// by `attachRenderObject`, which a move does not call. Reordering is
+    /// routine — any stack whose children list changes shape between builds.
+    ///
+    /// **Dart Source:** `object.dart:4448-4460`
     public func move(_ child: RenderBox, after: RenderBox?) {
-        remove(child)
-        insert(child, after: after)
+        guard let childParentData = child.parentData as? StackParentData else { return }
+        if childParentData.previousSibling === after { return }
+        _removeFromChildList(child)
+        _insertIntoChildList(child, after: after)
+        markNeedsLayout()
     }
 }
