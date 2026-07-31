@@ -123,7 +123,7 @@ A static-engine route that would allow true versioned consumption has been
 prototyped and works (`tools/make-static-engine.sh`); it was shelved because it
 needs 13 `-dev` packages on every consumer and a ~109 MB artifact per platform
 per version. The write-up lives in the Starling repo at
-`sdk/plans/standalone-sdk.md`.
+`docs/plans/standalone-sdk.md`.
 
 ## Vendored headers
 
