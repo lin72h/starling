@@ -114,6 +114,49 @@ not the JSON the GTK keyboard handler expects, so focus changes log a
 
 ## Consuming it
 
+Two ways, by how the engine arrives.
+
+### As a versioned dependency (static engine)
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/starling-build/flutter-swift.git", from: "0.1.0"),
+],
+targets: [
+    .executableTarget(
+        name: "App",
+        dependencies: [
+            .product(name: "Flutter", package: "flutter-swift"),
+            .product(name: "FlutterSwiftBridge", package: "flutter-swift"),
+            .product(name: "FlutterGTK", package: "flutter-swift"),  // desktop window host
+        ],
+        swiftSettings: [.interoperabilityMode(.Cxx)]
+    ),
+]
+```
+
+When no engine checkout or bundle is present (the consumer case), the manifest
+switches to **static mode**: the engine — embedder core, Swift bridge, DRM
+view and GTK embedder in one symbol-localized archive — arrives as a SwiftPM
+`binaryTarget` (an SE-0482 staticLibrary artifactbundle, ~50 MB, built by
+`tools/make-static-engine.sh`), and the manifest carries no unsafe flags. The
+executable comes out self-contained: no `libflutter_engine.so` to ship. Build
+with `--gc-sections` in your own target to drop the unused half of the archive.
+
+The prerequisites are ordinary system libraries the engine expects
+(`-dev` packages at build time): `libdrm libgbm libegl libgles libxkbcommon
+libinput libudev` and, for `FlutterGTK`, `libgtk-3 libepoxy`. At run time it
+needs `<executable dir>/data/{icudtl.dat,flutter_assets}` — copy them from
+this repo's release assets or `Resources/`.
+
+Caveats: Linux x86_64 only so far (the artifact is per-triple; more can be
+added to the bundle), and **not Ubuntu 26.04 yet** — the glibc math compat
+flags below are genuinely required there and have no safe expression, so
+26.04 consumers use the bundle route until a native swift.org toolchain
+lands. `FLUTTER_SWIFT_LINK=static|dynamic` overrides the mode choice.
+
+### As a download-and-point SDK (dynamic engine)
+
 `tools/make-bundle.sh` produces a self-contained tree carrying the framework and
 the engine binaries together:
 
@@ -146,21 +189,17 @@ targets: [
 ]
 ```
 
-**A path dependency, not `.package(url:from:)`, and that is inherent.** SwiftPM
-cannot carry a native *library* as a `binaryTarget` on Linux — XCFramework is
-Apple-only and Linux artifactbundles hold executables — and pointing at the
-bundled engine needs `-L`/`-rpath`, which SwiftPM classes as unsafe and rejects
-for version-resolved dependencies while permitting for path dependencies. So the
-bundle sidesteps that restriction rather than satisfying it. This is a
-download-and-point SDK, the same shape as the Flutter SDK itself.
+**This route is a path dependency, not `.package(url:from:)`.** Pointing at
+the bundled engine needs `-L`/`-rpath`, which SwiftPM classes as unsafe and
+rejects for version-resolved dependencies while permitting for path
+dependencies. It exists alongside the static route because it is what in-tree
+development and the Starling desktop use, it works on Ubuntu 26.04 today, and
+it ships the engine as a shared library — a fleet of apps loads one copy.
+This is a download-and-point SDK, the same shape as the Flutter SDK itself.
 
 Two consequences: there is no `swift package update`, and the engine path is
 baked into your binary's RUNPATH, so moving an unpacked bundle means rebuilding.
-
-A static-engine route that would allow true versioned consumption has been
-prototyped and works (`tools/make-static-engine.sh`); it was shelved because it
-needs 13 `-dev` packages on every consumer and a ~109 MB artifact per platform
-per version. The write-up lives in the Starling repo at
+The original design notes live in the Starling repo at
 `docs/plans/standalone-sdk.md`.
 
 ## Vendored headers

@@ -97,9 +97,88 @@ let engineCandidates = [
 ]
 #endif
 
-let engineOutDir = canonical(env("FLUTTER_SWIFT_ENGINE_OUT",
-    default: dirContaining(engineCandidates.map { ($0, engineMarker) })
-             ?? engineCandidates[0]))
+// nil when no engine is present locally — which flips the package into
+// static mode (below) instead of pointing -L at a directory that isn't there.
+let engineDirFound: String? = {
+    if let v = Context.environment["FLUTTER_SWIFT_ENGINE_OUT"], !v.isEmpty { return v }
+    return dirContaining(engineCandidates.map { ($0, engineMarker) })
+}()
+
+let engineOutDir = canonical(engineDirFound ?? engineCandidates[0])
+
+// --- Linkage mode --------------------------------------------------------------
+//
+// dynamic — an engine checkout or bundle is present: link its .so with
+//           -L/-rpath. Those are .unsafeFlags, so this mode is for path
+//           consumption (in-tree development, the make-bundle.sh SDK).
+// static  — no local engine: the engine arrives as a SwiftPM binaryTarget
+//           (SE-0482 staticLibrary artifactbundle, tools/make-static-engine.sh)
+//           and the manifest carries no unsafe linker flags at all, which is
+//           what makes versioned `.package(url:from:)` consumption legal.
+//           System libraries the archive expects become plain .linkedLibrary.
+//
+// The mode is chosen by whether an engine was found; FLUTTER_SWIFT_LINK=static
+// or =dynamic overrides. On Ubuntu 26.04 the glibc math compat flags (below)
+// are still unsafe and unavoidable, so versioned consumption works on other
+// platforms first — see README.
+#if os(Linux)
+let linkModeOverride = env("FLUTTER_SWIFT_LINK", default: "")
+let staticEngine = linkModeOverride == "static"
+    || (linkModeOverride != "dynamic" && engineDirFound == nil)
+#else
+let staticEngine = false
+#endif
+
+// Where the static artifactbundle comes from: a locally built one wins (its
+// checksum changes on every rebuild, so pre-release verification cannot go
+// through the published URL), otherwise the released artifact.
+let staticBundleLocal: String? = {
+    guard staticEngine else { return nil }
+    if let v = Context.environment["FLUTTER_SWIFT_ENGINE_BUNDLE"], !v.isEmpty { return v }
+    let inTree = packageDir + "/.build/static-engine/FlutterEngineStatic.artifactbundle"
+    return FileManager.default.fileExists(atPath: inTree + "/info.json")
+        ? ".build/static-engine/FlutterEngineStatic.artifactbundle" : nil
+}()
+let staticBundleURL =
+    "https://github.com/starling-build/flutter-swift/releases/download/v0.1.0/FlutterEngineStatic.artifactbundle.zip"
+let staticBundleChecksum =
+    "acc453fd93119e9d1ddd6aa1a9fcf63b545c7f8b8ae9adfee5458d7f695d4646"
+
+// The engine .so link flags for dynamic mode; empty in static mode, where the
+// binaryTarget supplies the objects and these system libraries — dynamic
+// dependencies of the engine core — are declared safely instead.
+let engineLinkSettings: [LinkerSetting]
+let staticSystemLibs: [LinkerSetting]
+#if os(Linux)
+if staticEngine {
+    engineLinkSettings = []
+    staticSystemLibs = [
+        .linkedLibrary("drm"),
+        .linkedLibrary("gbm"),
+        .linkedLibrary("EGL"),
+        .linkedLibrary("GLESv2"),
+        .linkedLibrary("input"),
+        .linkedLibrary("udev"),
+        .linkedLibrary("xkbcommon"),
+    ]
+} else {
+    engineLinkSettings = [
+        .unsafeFlags([
+            "-L\(engineOutDir)", "-l\(engineLinkName)",
+            "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
+        ]),
+    ]
+    staticSystemLibs = []
+}
+#else
+engineLinkSettings = [
+    .unsafeFlags([
+        "-L\(engineOutDir)", "-l\(engineLinkName)",
+        "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
+    ]),
+]
+staticSystemLibs = []
+#endif
 
 // The 6.2.4 toolchain is an ubuntu24.04 build, and Ubuntu 26.04 — the base
 // platform — pairs glibc 2.43 with libstdc++ 15. That combination makes the
@@ -210,18 +289,21 @@ let flutterDeps: [Target.Dependency] = [
 ]
 #endif
 
+#if os(Linux)
+let bridgeDeps: [Target.Dependency] = staticEngine
+    ? ["FlutterSwiftBridgeCxx", "FlutterEngineStatic"]
+    : ["FlutterSwiftBridgeCxx"]
+#else
+let bridgeDeps: [Target.Dependency] = ["FlutterSwiftBridgeCxx"]
+#endif
+
 var targets: [Target] = [
     // Main Swift target containing the dart:ui Swift implementation
     .target(
         name: "FlutterSwiftBridge",
-        dependencies: ["FlutterSwiftBridgeCxx"],
+        dependencies: bridgeDeps,
         swiftSettings: cxxInteropSettings,
-        linkerSettings: [
-            .unsafeFlags([
-                "-L\(engineOutDir)", "-l\(engineLinkName)",
-                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
-            ]),
-        ]
+        linkerSettings: engineLinkSettings + staticSystemLibs
     ),
     // C++ bridge module with modulemap pointing to engine headers
     .target(
@@ -268,36 +350,21 @@ var targets: [Target] = [
         name: "FlutterSwiftBridgeTests",
         dependencies: ["FlutterSwiftBridge"],
         swiftSettings: cxxInteropSettings,
-        linkerSettings: [
-            .unsafeFlags([
-                "-L\(engineOutDir)", "-l\(engineLinkName)",
-                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
-            ]),
-        ]
+        linkerSettings: engineLinkSettings
     ),
     .testTarget(
         name: "FlutterTests",
         dependencies: ["Flutter"],
         path: "Tests/FlutterTests",
         swiftSettings: cxxInteropSettings,
-        linkerSettings: [
-            .unsafeFlags([
-                "-L\(engineOutDir)", "-l\(engineLinkName)",
-                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
-            ]),
-        ]
+        linkerSettings: engineLinkSettings
     ),
     .testTarget(
         name: "SwiftRuntimeTests",
         dependencies: ["SwiftRuntime", "FlutterSwiftBridge"],
         path: "Tests/SwiftRuntimeTests",
         swiftSettings: cxxInteropSettings,
-        linkerSettings: [
-            .unsafeFlags([
-                "-L\(engineOutDir)", "-l\(engineLinkName)",
-                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
-            ]),
-        ]
+        linkerSettings: engineLinkSettings
     ),
 ]
 
@@ -351,15 +418,22 @@ targets += [
     // C glue around the engine's GTK embedder: FlView in a GtkWindow with the
     // engine in Swift mode. The vendored flutter_linux headers stay inside
     // this target — GTK types never reach the C++-interop importer.
+    // In static mode the fl_* symbols come out of the engine archive (the
+    // GTK embedder is merged into it) and epoxy — a dynamic dependency the
+    // shared library would have carried as NEEDED — is declared explicitly.
     .target(
         name: "FlutterGTKBridge",
-        dependencies: ["CGtk3"],
-        linkerSettings: [
-            .unsafeFlags([
-                "-L\(engineOutDir)", "-lflutter_linux_gtk",
-                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
-            ]),
-        ]
+        dependencies: staticEngine
+            ? ["CGtk3", "FlutterEngineStatic"]
+            : ["CGtk3"],
+        linkerSettings: staticEngine
+            ? [.linkedLibrary("epoxy")]
+            : [
+                .unsafeFlags([
+                    "-L\(engineOutDir)", "-lflutter_linux_gtk",
+                    "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
+                ]),
+            ]
     ),
     // The desktop-session host: the real Flutter Linux embedder, Swift-driven.
     .target(
@@ -383,14 +457,25 @@ targets += [
             .target(name: "SwiftRuntime"),
         ],
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
-        linkerSettings: [
-            .unsafeFlags([
-                "-L\(engineOutDir)", "-l\(engineLinkName)",
-                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
-            ]),
-        ]
+        linkerSettings: engineLinkSettings
     ),
 ]
+
+// The engine as a binary target (static mode only): one archive carrying the
+// embedder core, the Swift bridge, the DRM view and the GTK embedder. Its
+// module declares nothing — headers come from this package's targets; the
+// artifact exists to be linked.
+if staticEngine {
+    if let local = staticBundleLocal {
+        targets += [.binaryTarget(name: "FlutterEngineStatic", path: local)]
+    } else {
+        targets += [.binaryTarget(
+            name: "FlutterEngineStatic",
+            url: staticBundleURL,
+            checksum: staticBundleChecksum
+        )]
+    }
+}
 #endif
 
 // --- Package declaration -----------------------------------------------------
