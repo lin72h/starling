@@ -24,7 +24,72 @@ OUT="${1:-/tmp/starling-pkg}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 E=$REPO/engine/src/out/host_release
 SHELL_BUILD=$REPO/shell/.build
-APPS="SettingsApp FileExplorerApp TerminalApp CalculatorApp AppStoreApp"
+
+# The apps to ship, read out of the registry — NOT a list maintained here.
+#
+# This was a hardcoded five, and it had silently drifted from the catalog by
+# two: Text Editor and Image Viewer were declared in registry/catalog.d, built
+# by every tier, staged into .stage, and then simply left out of the .deb.
+# Text Editor carries Dock=4, so an installed desktop showed a dock icon whose
+# binary was not on disk — which is what
+# https://github.com/starling-build/starling/issues/4 ("Add native Text Editor
+# app") is: from a user's seat there was no text editor, because the one we
+# wrote never shipped. It is the exact failure CLAUDE.md describes — an app id
+# living in a table apart from the registry, and the two disagreeing in silence.
+#
+# `Kind=first-party` is the discriminator: for those records `Exec=` IS the
+# executable name (AppRecord.swift:30), while third-party records name an
+# app-run recipe and ship no binary of ours. So adding a first-party app is
+# still one file, the way "Apps are data, not code" promises, and apps/ entries
+# with no record (DSATool, BlueScreenApp, FlutterDemoApp — dev and demo tools)
+# stay out on purpose.
+first_party_execs() {
+    local f kind exec
+    for f in "$REPO"/registry/catalog.d/*.app; do
+        [ -f "$f" ] || continue
+        kind=$(sed -n 's/^Kind=//p'  "$f" | head -1)
+        exec=$(sed -n 's/^Exec=//p'  "$f" | head -1)
+        [ "$kind" = first-party ] && [ -n "$exec" ] && printf '%s\n' "$exec"
+    done | sort -u
+}
+
+# An app that vendors a prebuilt library for another architecture cannot link,
+# and nothing here can make it — apps/ImageViewerApp ships an x86-64
+# libpdfium.so, so it does not build on arm64. Same rule test/run.sh applies:
+# skipped by architecture rather than by name, so there is no second list to
+# drift, and announced rather than dropped in silence. The host's ELF machine
+# word is read off /bin/true instead of mapping uname -m to an ELF name.
+elf_machine() { readelf -h "$1" 2>/dev/null | sed -n 's/^ *Machine: *//p'; }
+HOST_MACHINE="$(elf_machine /bin/true)"
+vendored_arch_mismatch() {
+    local lib m
+    for lib in "$1"/.deps/*/lib/*.so; do
+        [ -f "$lib" ] || continue
+        m="$(elf_machine "$lib")"
+        [ -n "$m" ] && [ -n "$HOST_MACHINE" ] && [ "$m" != "$HOST_MACHINE" ] && {
+            printf '%s (%s, host is %s)\n' "$(basename "$lib")" "$m" "$HOST_MACHINE"
+            return 0
+        }
+    done
+    return 1
+}
+
+APPS=""
+for a in $(first_party_execs); do
+    if [ -x "$REPO/apps/$a/.build/release/$a" ]; then
+        APPS="$APPS $a"
+    elif mismatch=$(vendored_arch_mismatch "$REPO/apps/$a"); then
+        echo "warning: $a is NOT in this .deb — vendored $mismatch" >&2
+    else
+        # Hard error, not a warning. The registry says this app exists, so the
+        # installed desktop will show it in the launcher and possibly the dock;
+        # shipping without the binary is the bug this whole block replaces.
+        echo "error: $a is in registry/catalog.d but has no built binary at" >&2
+        echo "       apps/$a/.build/release/$a — build it, or drop its record" >&2
+        exit 1
+    fi
+done
+APPS="$(echo "$APPS" | xargs)"
 
 # The Debian architecture of the machine we are building on. Hardcoding amd64
 # here did not fail on arm64 — it produced starling_<ver>_amd64.deb containing
