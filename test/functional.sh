@@ -10,11 +10,41 @@
 # The fixture catalog is a COPY of registry/catalog.d plus test/fixtures/*.app,
 # handed to the shell through STARLING_CATALOG_DIR. The shipped catalog is
 # never modified, and the fake app never reaches a real install.
+#
+# Root is needed for /dev/uinput (the driver), NOT for the shell. The shell is
+# dropped back to the invoking user — see as_user below for why that matters.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ATTACH=0
 [ "${1:-}" = "--attach" ] && ATTACH=1
+
+# The tier needs root for /dev/uinput, but the SHELL must still run as the
+# invoking user. Two reasons, and the second is the one that matters:
+#
+#  - build/run-desktop.sh expects to be invoked by the user in *both* seat
+#    modes; it escalates internally for the bits that need it (the direct-mode
+#    DRM open). Its $XDG_RUNTIME_DIR guard refuses a /tmp/xdg-starling it does
+#    not own, so running the whole tier under sudo left the dir belonging to the
+#    real user while the script was root, and the shell never started at all:
+#    "run-desktop: /tmp/xdg-starling is not a directory owned by root — refusing".
+#    The tier reported only "the shell did not start", one file away from the
+#    cause.
+#  - Running the shell as root is the configuration CLAUDE.md warns about at
+#    length: third-party clients then run as root too, which both invents
+#    failures (Chromium's SUID sandbox, dconf in a root-owned XDG_RUNTIME_DIR)
+#    and hides real ones (the portal claiming its name on the wrong bus). A
+#    functional tier that does not exercise the unprivileged path the .deb ships
+#    is worth much less, and its third-party-app checks cannot be trusted.
+#
+# Same idiom as test/run.sh, which drops back for the Swift steps.
+as_user() {
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        sudo -u "$SUDO_USER" -H -- "$@"
+    else
+        "$@"
+    fi
+}
 
 CATALOG_DIR="${TMPDIR:-/tmp}/starling-test-catalog"
 RECORDS_DIR="${TMPDIR:-/tmp}/starling-test-records"
@@ -23,6 +53,12 @@ mkdir -p "$CATALOG_DIR" "$RECORDS_DIR"
 cp "$REPO"/registry/catalog.d/*.app "$CATALOG_DIR/"
 cp "$REPO"/test/fixtures/*.app "$CATALOG_DIR/"
 chmod 0755 "$CATALOG_DIR" "$RECORDS_DIR"
+# The shell writes app records here (app-install), and it no longer runs as
+# root — so root-owned 0755 would make every install check fail on EACCES
+# rather than on anything the test is about.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    chown -R "$SUDO_USER" "$CATALOG_DIR" "$RECORDS_DIR"
+fi
 
 export STARLING_CATALOG_DIR="$CATALOG_DIR"
 export STARLING_APP_RECORDS="$RECORDS_DIR"
@@ -44,8 +80,28 @@ if [ "$ATTACH" = 0 ]; then
         exit 2
     fi
     rm -f /tmp/xdg-starling/wayland-0.lock
+    # run-desktop.sh re-stages, and it now does so as the invoking user. A
+    # previous `sudo build/run-desktop.sh` (or `sudo build/stage.sh`) leaves
+    # .stage root-owned, and staging then dies on "Permission denied" from
+    # rm(1) — nothing to do with this tier. Hand it back rather than fail.
+    STAGE="${STARLING_STAGE:-$REPO/.stage}"
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ -e "$STAGE" ] &&
+       [ "$(stat -c '%U' "$STAGE" 2>/dev/null)" != "$SUDO_USER" ]; then
+        echo "handing $STAGE back to $SUDO_USER (left root-owned by an earlier sudo run)"
+        chown -R "$SUDO_USER" "$STAGE"
+    fi
     echo "starting the desktop with the fixture catalog"
-    "$REPO/build/run-desktop.sh" > "${TMPDIR:-/tmp}/starling-functional.log" 2>&1 &
+    # sudo -u scrubs the environment, so the two fixture vars have to be handed
+    # over explicitly rather than exported. STARLING_SEAT_MODE and
+    # LIBSEAT_BACKEND are forwarded only when set to something non-empty: they
+    # are read with a bare getenv() downstream, where "" is not the same as
+    # unset (see the env-knob trap in CLAUDE.md).
+    as_user env STARLING_CATALOG_DIR="$CATALOG_DIR" \
+                STARLING_APP_RECORDS="$RECORDS_DIR" \
+                ${STARLING_SEAT_MODE:+STARLING_SEAT_MODE="$STARLING_SEAT_MODE"} \
+                ${LIBSEAT_BACKEND:+LIBSEAT_BACKEND="$LIBSEAT_BACKEND"} \
+                "$REPO/build/run-desktop.sh" \
+        > "${TMPDIR:-/tmp}/starling-functional.log" 2>&1 &
     SHELL_PID=$!
     for _ in $(seq 1 60); do
         grep -q "listening on wayland" \
@@ -53,7 +109,12 @@ if [ "$ATTACH" = 0 ]; then
         sleep 2
     done
     if ! pgrep -x DesktopShellApp >/dev/null; then
+        # Surface the reason here rather than only naming the log. run-desktop.sh
+        # refuses on its own line for several ordinary conditions — GPU still
+        # held, no seat, a /tmp/xdg-starling it does not own — and "the shell did
+        # not start" alone sent one debugging session to the wrong file.
         echo "the shell did not start — see ${TMPDIR:-/tmp}/starling-functional.log" >&2
+        tail -3 "${TMPDIR:-/tmp}/starling-functional.log" 2>/dev/null | sed 's/^/    /' >&2
         exit 1
     fi
     sleep 6   # let the first frame and the app registry settle
