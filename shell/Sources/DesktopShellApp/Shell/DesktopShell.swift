@@ -112,6 +112,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // (typed while the launcher is open) that filters the app grid.
     var _launcherOpen: Bool = false
     var _launcherQuery: String = ""
+    // Blink phase of the Launchpad search caret. The search field is always
+    // focused while the launcher is open, but it is a drawn pill rather than a
+    // real text input, so the caret is the only thing telling a user the
+    // keyboard is live — see AppLauncher.searchBar.
+    var _launcherCaretOn: Bool = true
+    var _launcherCaretToken: Int = 0
 
     // Texture IDs for process-based apps (for cleanup on window close)
     var processTextureIds: [String: Int64] = [:]
@@ -1209,10 +1215,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                 self._launcherQuery = ""
                             }
                         }
+                        // Harmless if that closed the launcher — the loop bails.
+                        self._restartLauncherCaret()
                     case 0x2A:  // Backspace
                         self.setState {
                             if !self._launcherQuery.isEmpty { self._launcherQuery.removeLast() }
                         }
+                        self._restartLauncherCaret()
                     case 0x28, 0x58:  // Enter / keypad Enter — launch the top match
                         if let first = self._launcherFilteredApps().first {
                             self.setState { self._launcherOpen = false; self._launcherQuery = "" }
@@ -1223,6 +1232,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                            let s = ch.unicodeScalars.first,
                            s.value >= 0x20, s.value != 0x7F {
                             self.setState { self._launcherQuery += ch }
+                            self._restartLauncherCaret()
                         }
                     }
                 }
@@ -2495,6 +2505,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     child: AppLauncher(
                         apps: _launcherFilteredApps(),
                         query: _launcherQuery,
+                        caretOn: _launcherCaretOn,
                         onLaunch: { [self] appId in
                             setState { _launcherOpen = false; _launcherQuery = "" }
                             _launchOrFocusApp(appId)
@@ -3330,6 +3341,38 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
     }
 
+    /// Restart the Launchpad search caret, showing it immediately.
+    ///
+    /// Called when the launcher opens and on every keystroke, so the caret sits
+    /// solid while you type and only resumes blinking once you pause — what a
+    /// real text field does, and what makes the pill read as an input rather
+    /// than a label.
+    ///
+    /// The loop stops itself: each tick bails if the launcher has closed or a
+    /// newer restart has bumped the token, so no close path has to remember to
+    /// cancel it (and there are five of them). `Foundation.Timer` never fires
+    /// on the DRM embedder, so this is `asyncAfter` + a generation token — the
+    /// codebase idiom, see `AgentSpace._agentDemoToken`.
+    func _restartLauncherCaret() {
+        _launcherCaretToken &+= 1
+        let token = _launcherCaretToken
+        _launcherCaretOn = true
+
+        func schedule() {
+            let next: () -> Void = { [weak self] in
+                guard let self, self._launcherCaretToken == token, self._launcherOpen
+                else { return }
+                self.setState { self._launcherCaretOn.toggle() }
+                schedule()
+            }
+            // Main-queue-only state; @Sendable coercion is the codebase idiom.
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + .milliseconds(530),
+                execute: unsafeBitCast(next, to: (@Sendable () -> Void).self))
+        }
+        schedule()
+    }
+
     /// The launcher's app entries — installed apps only (no phantom tiles for
     /// uninstalled apps), in catalog order, filtered by the current search query.
     // Internal, not private: the agent broker reports this so a functional
@@ -4006,6 +4049,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                     _launcherQuery = ""
                                     _launcherOpen = true
                                 }
+                                // The pill is focused the moment it appears;
+                                // start the caret so it says so.
+                                _restartLauncherCaret()
                             },
                             behavior: .opaque,
                             child: tile

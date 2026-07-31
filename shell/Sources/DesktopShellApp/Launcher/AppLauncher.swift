@@ -39,17 +39,23 @@ class AppLauncher: StatelessWidget {
 
     let apps: [LauncherApp]
     let query: String
+    /// Blink phase of the search caret, driven by the shell (see
+    /// `_restartLauncherCaret`) — the widget is stateless, so the phase has to
+    /// come from above.
+    let caretOn: Bool
     let onLaunch: (String) -> Void
     let onDismiss: () -> Void
 
     init(
         apps: [LauncherApp],
         query: String = "",
+        caretOn: Bool = true,
         onLaunch: @escaping (String) -> Void,
         onDismiss: @escaping () -> Void
     ) {
         self.apps = apps
         self.query = query
+        self.caretOn = caretOn
         self.onLaunch = onLaunch
         self.onDismiss = onDismiss
     }
@@ -132,9 +138,41 @@ class AppLauncher: StatelessWidget {
     }
 
     /// Centered search pill showing the live query (typed via the shell's key
-    /// handler — see routeKey). Dim placeholder when empty; a caret otherwise.
+    /// handler — see routeKey), with a blinking caret.
+    ///
+    /// The caret shows from the moment the Launchpad opens, including on an
+    /// empty query. That is not cosmetic. This field is always focused while
+    /// the Launchpad is open — the key router hands it every keystroke — but it
+    /// is not a text input and has no hit target, so clicking it does nothing
+    /// and nothing ever *said* it was focused. It previously drew a caret only
+    /// once you had typed, so at the one moment a user looks for focus (just
+    /// opened, pill empty, click it) the pill was indistinguishable from a
+    /// label. It read as an input that ignores the keyboard, which is what was
+    /// reported against 0.2.1. The caret is the whole affordance; keep it
+    /// visible whenever the launcher is open.
     private func searchBar() -> Widget {
         let empty = query.isEmpty
+        // Blink by fading the glyph, never by swapping it out. The pill is
+        // centered and hugs its content, so anything that changes the caret's
+        // advance width — dropping it, or substituting a space, which is not
+        // the same width as "|" — shifts the label a few pixels twice a second.
+        // Same glyph, same metrics, alpha 0: the layout cannot move.
+        let caret = Text(
+            "|",
+            style: TextStyle(
+                color: caretOn ? Color(0xFFFFFFFF) : Color(0x00FFFFFF),
+                fontSize: 16
+            ),
+            maxLines: 1
+        )
+        let label = Text(
+            empty ? "Search" : query,
+            style: TextStyle(
+                color: empty ? Color(0x80FFFFFF) : Color(0xFFFFFFFF),
+                fontSize: 16
+            ),
+            maxLines: 1
+        )
         return DecoratedBox(
             decoration: BoxDecoration(
                 color: Color(0x24FFFFFF),
@@ -142,14 +180,12 @@ class AppLauncher: StatelessWidget {
             ),
             child: Padding(
                 padding: EdgeInsets(left: 20, top: 10, right: 20, bottom: 10),
-                child: Text(
-                    empty ? "Search" : (query + "|"),
-                    style: TextStyle(
-                        color: empty ? Color(0x80FFFFFF) : Color(0xFFFFFFFF),
-                        fontSize: 16
-                    ),
-                    textAlign: .center,
-                    maxLines: 1
+                // Caret leads the placeholder (an empty field with the cursor
+                // at the start) and trails real text, as a text field does.
+                child: Row(
+                    mainAxisAlignment: .center,
+                    mainAxisSize: .min,
+                    children: empty ? [caret, label] : [label, caret]
                 )
             )
         )
