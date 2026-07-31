@@ -797,20 +797,38 @@ public class RSuperellipse {
 4. No `deinit` needed - Swift ARC automatically calls Release()
 5. Document Dart source references for traceability
 
-**Step 4: Module Map (flutter_swift/Sources/FlutterSwiftBridgeCxx/include/module.modulemap)**
+**Step 4: Module Map (sdk/Sources/FlutterSwiftBridgeCxx/include/module.modulemap)**
 ```
 module FlutterSwiftBridgeCxx {
-    header "../../../../engine/src/flutter/lib/ui/swift/include/intrusive_reference_counted.h"
-    header "../../../../engine/src/flutter/lib/ui/swift/include/rsuperellipse_bridge.h"
+    header "engine/intrusive_reference_counted.h"
+    header "engine/rsuperellipse_bridge.h"
     export *
     requires cplusplus
 }
 ```
 
+The headers are **vendored** into `include/engine/`, not read out of the engine
+checkout. So adding a bridge header is two steps:
+
+```bash
+# 1. declare it in the modulemap (the line above), then
+sdk/tools/sync-vendored-headers.sh
+```
+
+The modulemap is the manifest that script reads, so the header list lives in one
+place. `sync-engine-headers.sh --check` reports drift, and drift is worth taking
+seriously: these headers describe the ABI of the `libflutter_engine` being linked,
+so a stale copy is not a compile error, it is a crash at runtime.
+
 **Key patterns in the module map:**
-1. Relative paths from the module.modulemap location to engine headers
+1. Paths are relative to `include/`, pointing at the vendored copies
 2. Include all bridge headers that Swift needs to compile
 3. `requires cplusplus` since these are C++ headers
+
+A bridge header that includes anything from the wider engine tree cannot be
+vendored — that is why `swift_runtime_controller.h` is deliberately absent: it
+reaches `flutter/runtime/runtime_controller_interface.h` and from there FML,
+tonic and `dart_api.h`. Keep bridge headers closed over their own directory.
 
 **Step 5: BUILD.gn (engine/src/flutter/lib/ui/swift/BUILD.gn)**
 ```python

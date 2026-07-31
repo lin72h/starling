@@ -6,16 +6,22 @@ A new Linux desktop environment, whose shell, compositor, framework, and apps
 are written in Swift (the framework is a full port of Flutter's Dart framework
 to Swift — no Dart VM). It brings its own Wayland compositor and its own X11
 server, so it runs native Wayland clients and X11 apps alike. Runs on the
-Flutter engine's C core via the sibling repo **starling-engine**.
+Flutter engine's C core via the sibling repo **starling-engine**, and on the
+Flutter→Swift framework from the sibling repo **flutter-swift**.
 
 ```
-sdk/     the Flutter→Swift framework port (SwiftPM package "FlutterSwift")
+sdk   -> symlink to a flutter-swift checkout — the Flutter→Swift framework port
+         (SwiftPM package "FlutterSwift"). Its own repo; ./bootstrap.sh links it.
+engine -> symlink to a starling-engine checkout
 shell/   the desktop shell: compositor (C Wayland server), window manager,
          dock, spaces, portals — SwiftPM package "DesktopShellApp"
 apps/    first-party apps (Settings, Files, Terminal, …), one SwiftPM package each
+host/    the windowed host (FlutterRunner + GLFWBridge): run a Swift Flutter app
+         in an ordinary window rather than through the shell. Demos only.
 build/   packaging: the Ubuntu .deb, session files, app-run/app-install tools,
          vendored flutter_assets
-docs/    porting guides and design notes
+docs/    porting guides and design notes, including plans/
+macos-compat/  research: unmodified Mach-O macOS binaries on Linux
 ```
 
 **Get started:** [Install Starling](docs/INSTALL.md) ·
@@ -182,8 +188,10 @@ shell came from a working branch (`flutter_swift/` → `sdk/`,
 from a second one. Neither is public, so the pre-import history is not
 reachable — everything since is in this repo's log.
 
-The framework port under `sdk/` is a derivative of Flutter and keeps Flutter's
-licence — see [sdk/LICENSE](sdk/LICENSE). The C++ half lives in
+The framework port has since moved out again, to
+[flutter-swift](https://github.com/starling-build/flutter-swift), with the
+`sdk/` history that led to it. It is a derivative of Flutter and keeps Flutter's
+licence. The C++ half lives in
 [starling-engine](https://github.com/starling-build/starling-engine), a fork of
 `flutter/flutter` whose `starling` branch carries the Starling delta on top of
 real upstream history.
@@ -233,8 +241,8 @@ possible:
 
 | Path | License |
 |---|---|
-| `shell/`, `apps/`, `build/`, `docs/` | Apache-2.0 — © the Starling authors |
-| `sdk/` | BSD-3-Clause — © the Flutter Authors ([sdk/LICENSE](sdk/LICENSE)) |
+| `shell/`, `apps/`, `build/`, `docs/`, `host/` | Apache-2.0 — © the Starling authors |
+| sibling `flutter-swift` (linked as `sdk`) | BSD-3-Clause — © the Flutter Authors |
 | `shell/Sources/WaylandServer/*-protocol.{c,h}` | MIT — generated from wayland-protocols XML; the upstream copyright sits in each file |
 | sibling `starling-engine` | BSD-3-Clause — a Flutter engine fork |
 

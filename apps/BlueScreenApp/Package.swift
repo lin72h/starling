@@ -12,14 +12,14 @@ let appPackageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().
 let swiftToolchainInclude = NSHomeDirectory() + "/.local/share/swiftly/toolchains/6.2.4/usr/include"
 let engineOutDir = appPackageDir + "/../../engine/src/out/host_debug"
 let engineFlutterRoot = "../../engine/src/flutter"
-let glfwInclude = "../../sdk/.deps/include"
-let glfwLib = "../../sdk/.deps/lib"
+let glfwInclude = "../../host/.deps/include"
+let glfwLib = "../../host/.deps/lib"
 #else
 let swiftToolchainInclude = NSHomeDirectory() + "/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/include"
 let engineOutDir = appPackageDir + "/../../engine/src/out/ci/host_debug_unopt_arm64"
 let engineFlutterRoot = "../../engine/src/flutter"
-let glfwInclude = "../../sdk/.deps/include"
-let glfwLib = "../../sdk/.deps/lib"
+let glfwInclude = "../../host/.deps/include"
+let glfwLib = "../../host/.deps/lib"
 #endif
 
 // Ubuntu 26.04 (glibc 2.43 + libstdc++ 15) vs the ubuntu24.04-built 6.2.4
@@ -44,6 +44,9 @@ let package = Package(
     platforms: platformConstraints.isEmpty ? nil : platformConstraints,
     dependencies: [
         .package(name: "FlutterSwift", path: "../../sdk"),
+        // GLFWBridge left the SDK when the framework was extracted to its own
+        // repo: it is a windowed-host concern, not a framework one.
+        .package(name: "FlutterSwiftHost", path: "../../host"),
     ],
     targets: [
         {
@@ -76,7 +79,7 @@ let package = Package(
                 dependencies: [
                     .product(name: "SwiftRuntime", package: "FlutterSwift"),
                     .product(name: "FlutterEmbedderBridge", package: "FlutterSwift"),
-                    .product(name: "GLFWBridge", package: "FlutterSwift"),
+                    .product(name: "GLFWBridge", package: "FlutterSwiftHost"),
                     .product(name: "FlutterDRMBridge", package: "FlutterSwift"),
                     .product(name: "Flutter", package: "FlutterSwift"),
                 ],
