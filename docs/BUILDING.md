@@ -157,10 +157,14 @@ that skip your profile are the usual way this bites.
   packaging requires.
 
 Each config yields `libflutter_engine.so`, `libflutter_linux_drm.so`, and
-`icudtl.dat` — plus the bridge headers under
-`engine/src/flutter/lib/ui/swift/include/`. That is the entire interface the
-desktop consumes. Later engine-only changes rebuild in seconds and need **no
-Swift relink**: the shell binds only the engine's stable C API.
+`icudtl.dat`. That is the entire interface the desktop consumes. Later
+engine-only changes rebuild in seconds and need **no Swift relink**: the shell
+binds only the engine's stable C API.
+
+The engine's public headers are **vendored** into `sdk/`, not read out of the
+checkout, so `sdk/` compiles with no engine tree present and needs the engine
+only at link time. `sdk/tools/sync-engine-headers.sh` refreshes them and
+`--check` reports drift; re-run it after changing a bridge header in the engine.
 
 ---
 

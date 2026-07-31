@@ -9,6 +9,6 @@
 #ifndef FLUTTER_EMBEDDER_BRIDGE_H_
 #define FLUTTER_EMBEDDER_BRIDGE_H_
 
-#include "../../../../engine/src/flutter/shell/platform/embedder/embedder.h"
+#include "engine/embedder.h"
 
 #endif  // FLUTTER_EMBEDDER_BRIDGE_H_
