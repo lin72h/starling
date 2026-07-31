@@ -23,10 +23,35 @@ the desktop once it is running, see the [User Guide](USER_GUIDE.md).
 - **~130 MB** of disk for the package and its dependencies. The `.deb` itself
   is about 53 MB and pulls in roughly 26 dependency packages on a minimal
   image.
+- **Bare metal or a virtual machine — not a container.** See below.
 
 Starling runs as your ordinary user through the normal login path. It does
 **not** run as root and does not replace your existing desktop — it installs
 alongside it as another session you select at login.
+
+### Containers won't work; virtual machines will
+
+Starling *is* the display server — it takes DRM master and drives the GPU
+through DRM/KMS. That needs a `/dev/dri/cardN`, a connector reporting
+`connected` under `/sys/class/drm/card*-*/status`, and a real logind **seat**
+for `libseat` to take DRM master from.
+
+A **container** (Proxmox LXC, Docker, systemd-nspawn) has none of these: it
+shares the host kernel and has no seat of its own. GNOME and KDE fail there
+for the same reason. You'll install cleanly, reboot, and land back at a
+terminal.
+
+A **virtual machine** works. What's tested:
+
+| Setting | Value |
+|---|---|
+| Display adapter | **VirtIO-GPU**, 3D acceleration (virgl) if the host supports it |
+| CPU / RAM | 2+ cores, 4 GB |
+| Firmware | either BIOS or UEFI |
+
+On Proxmox specifically, create a **VM (QEMU/KVM)**, not a **CT**. The virtual
+GPU is what matters — the host's GPU is not used unless you configure PCI
+passthrough.
 
 ---
 
