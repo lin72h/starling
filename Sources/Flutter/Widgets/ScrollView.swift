@@ -367,6 +367,28 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
         super.update(newWidget)
         let newAdaptorWidget = newWidget as! SliverMultiBoxAdaptorWidget
         if oldWidget.delegate !== newAdaptorWidget.delegate {
+            // Rebuild the children that are already inflated with the new
+            // delegate's widgets — a rebuilt list (setState) reaches its rows
+            // through here. Rows keep their index, so the update is in place
+            // and the render objects stay where the sliver put them. An index
+            // the new delegate no longer provides (the list shrank) must be
+            // dropped explicitly: this element's removeRenderObjectChild is
+            // a no-op, so nothing else detaches the render object.
+            for index in _childElements.keys.sorted() {
+                guard let oldElement = _childElements[index] else { continue }
+                if let newChildWidget = newAdaptorWidget.delegate.build(self, index: index) {
+                    _childElements[index] = updateChild(
+                        oldElement, newWidget: newChildWidget, newSlot: index)
+                } else {
+                    if let ro = oldElement.findRenderObject() as? RenderBox,
+                       let sliver = renderObject as? RenderSliverMultiBoxAdaptor,
+                       ro.parent != nil {
+                        sliver.remove(ro)
+                    }
+                    _childElements.removeValue(forKey: index)
+                    deactivateChild(oldElement)
+                }
+            }
             // Force re-layout which will re-create children
             (renderObject as? RenderSliverMultiBoxAdaptor)?.markNeedsLayout()
         }
@@ -408,8 +430,11 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
         let childElement = inflateWidget(childWidget, index)
         _childElements[index] = childElement
 
-        // Get the child's render object and insert it into the sliver.
-        if let childRO = (childElement as? RenderObjectElement)?.renderObject as? RenderBox {
+        // Get the child's render object and insert it into the sliver. The
+        // built widget is usually a component (ListTile, GestureDetector…),
+        // so descend to the first render object rather than assuming the
+        // element itself is a RenderObjectElement.
+        if let childRO = childElement.findRenderObject() as? RenderBox {
             let renderSliver = renderObject as! RenderSliverMultiBoxAdaptor
             if childRO.parent == nil {
                 renderSliver.insert(childRO, after: after)
@@ -425,8 +450,9 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
     func removeChild(_ child: RenderBox) {
         var foundIndex: Int?
         for (index, element) in _childElements {
-            if let roElement = element as? RenderObjectElement,
-               roElement.renderObject === child {
+            // Descend to the render object — children are usually component
+            // widgets, not RenderObjectElements themselves.
+            if element.findRenderObject() === child {
                 foundIndex = index
                 break
             }

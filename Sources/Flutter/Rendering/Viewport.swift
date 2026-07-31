@@ -591,8 +591,15 @@ open class RenderViewportBase: RenderBox, RenderAbstractViewport {
 
     // MARK: - Repaint Boundary
 
-    /// **Dart Source:** `viewport.dart:603-604`
-    open override var isRepaintBoundary: Bool { true }
+    /// **Dart Source:** `viewport.dart:603-604` — where this is `true`.
+    ///
+    /// DIFFERENCE FROM DART: this port has no interior repaint-boundary
+    /// layers (`RenderObject._layer` exists only on the `RenderView` root),
+    /// so a boundary child is never painted at all — see the KNOWN GAP note
+    /// on `PaintingContext._compositeChild`. Painting the viewport inline
+    /// costs a full-window repaint on scroll but actually renders; same
+    /// resolution as `TextureBox.isRepaintBoundary` (792f90f).
+    open override var isRepaintBoundary: Bool { false }
 
     // MARK: - layoutChildSequence
 
@@ -1380,7 +1387,12 @@ open class RenderViewport: RenderViewportBase {
     ///
     /// **Dart Source:** `viewport.dart:1516-1524`
     public var center: RenderSliver? {
-        get { _center }
+        // Defaults to the first sliver: children arrive through the element
+        // tree after construction (MultiChildRenderObjectElement.mount), so an
+        // explicit center can only be wired by whoever also owns the child
+        // list. Dart's ViewportElement resolves the center to the first child
+        // in exactly the same way when Viewport.center is null.
+        get { _center ?? firstChild }
         set {
             if newValue === _center { return }
             _center = newValue
@@ -2052,3 +2064,9 @@ open class RenderShrinkWrappingViewport: RenderViewportBase {
         "child \(index)"
     }
 }
+
+// MARK: - SliverContainerRenderObjectHost Conformance
+
+/// Lets `MultiChildRenderObjectElement` manage a viewport's sliver children
+/// (the widget layer's `_FullViewport` / `_ShrinkWrapViewport`).
+extension RenderViewportBase: SliverContainerRenderObjectHost {}

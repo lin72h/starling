@@ -429,10 +429,13 @@ struct RenderViewportBaseTests {
         #expect(viewport.clipBehavior == .none)
     }
 
-    @Test("isRepaintBoundary returns true")
+    // Dart's viewport is a repaint boundary; this port paints it inline
+    // because interior boundary layers are not implemented — a boundary
+    // child would not be painted at all (see PaintingContext._compositeChild).
+    @Test("isRepaintBoundary is false (no interior boundary layers)")
     func testIsRepaintBoundary() {
         let viewport = createVerticalViewport()
-        #expect(viewport.isRepaintBoundary == true)
+        #expect(viewport.isRepaintBoundary == false)
     }
 
     @Test("computeMinIntrinsicWidth returns 0")
@@ -829,10 +832,12 @@ struct RenderShrinkWrappingViewportTests {
         #expect(viewport.labelForChild(5) == "child 5")
     }
 
-    @Test("isRepaintBoundary is true")
+    // Same deviation as RenderViewport: inline painting until interior
+    // repaint-boundary layers exist.
+    @Test("isRepaintBoundary is false (no interior boundary layers)")
     func testIsRepaintBoundary() {
         let viewport = createShrinkWrappingViewport()
-        #expect(viewport.isRepaintBoundary == true)
+        #expect(viewport.isRepaintBoundary == false)
     }
 
     @Test("performLayout with no children sizes to min")

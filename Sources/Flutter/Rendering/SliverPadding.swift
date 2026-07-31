@@ -553,3 +553,7 @@ open class RenderSliverPadding: RenderSliverEdgeInsetsPadding {
         )
     }
 }
+
+// MARK: - SingleChildSliverHost Conformance
+
+extension RenderSliverEdgeInsetsPadding: SingleChildSliverHost {}

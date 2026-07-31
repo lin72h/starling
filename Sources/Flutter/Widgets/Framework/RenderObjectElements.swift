@@ -35,6 +35,22 @@ public protocol ContainerRenderObjectHost: AnyObject {
     func move(_ child: RenderBox, after: RenderBox?)
 }
 
+/// Sliver flavour of `SingleChildRenderObjectHost`
+/// (RenderObjectWithChildMixin&lt;RenderSliver&gt; pattern): sliver wrappers such as
+/// `RenderProxySliver` and `RenderSliverEdgeInsetsPadding`, whose child is a
+/// `RenderSliver` rather than a `RenderBox`.
+public protocol SingleChildSliverHost: AnyObject {
+    var child: RenderSliver? { get set }
+}
+
+/// Sliver flavour of `ContainerRenderObjectHost`: render objects whose child
+/// list holds `RenderSliver`s — the viewports (`RenderViewportBase`), whose
+/// children are the slivers a scroll view composes.
+public protocol SliverContainerRenderObjectHost: AnyObject {
+    func insert(_ child: RenderSliver, after: RenderSliver?)
+    func remove(_ child: RenderSliver)
+}
+
 // MARK: - RenderObjectElement
 
 /// An `Element` that uses a `RenderObjectWidget` as its configuration.
@@ -383,6 +399,10 @@ open class SingleChildRenderObjectElement: RenderObjectElement {
     ///
     /// **Dart Source:** `packages/flutter/lib/src/widgets/framework.dart:7337`
     open override func insertRenderObjectChild(_ child: RenderObject, _ slot: Any?) {
+        if let ro = renderObject as? SingleChildSliverHost {
+            ro.child = (child as! RenderSliver)
+            return
+        }
         let ro = renderObject as! SingleChildRenderObjectHost
         ro.child = child as? RenderBox
     }
@@ -403,6 +423,11 @@ open class SingleChildRenderObjectElement: RenderObjectElement {
     ///
     /// **Dart Source:** `packages/flutter/lib/src/widgets/framework.dart:7349`
     open override func removeRenderObjectChild(_ child: RenderObject, _ slot: Any?) {
+        if let ro = renderObject as? SingleChildSliverHost {
+            assert(ro.child === child as? RenderSliver)
+            ro.child = nil
+            return
+        }
         let ro = renderObject as! SingleChildRenderObjectHost
         assert(ro.child === child as? RenderBox)
         ro.child = nil
@@ -443,8 +468,13 @@ open class MultiChildRenderObjectElement: RenderObjectElement {
     ///
     /// **Dart Source:** `packages/flutter/lib/src/widgets/framework.dart:7372`
     open override func insertRenderObjectChild(_ child: RenderObject, _ slot: Any?) {
-        let ro = renderObject as! ContainerRenderObjectHost
         let indexedSlot = slot as? IndexedSlot<Element?>
+        if let ro = renderObject as? SliverContainerRenderObjectHost {
+            let after = indexedSlot?.value?.findRenderObject() as? RenderSliver
+            ro.insert(child as! RenderSliver, after: after)
+            return
+        }
+        let ro = renderObject as! ContainerRenderObjectHost
         let after = indexedSlot?.value?.findRenderObject() as? RenderBox
         ro.insert(child as! RenderBox, after: after)
     }
@@ -458,8 +488,18 @@ open class MultiChildRenderObjectElement: RenderObjectElement {
     open override func moveRenderObjectChild(
         _ child: RenderObject, _ oldSlot: Any?, _ newSlot: Any?
     ) {
-        let ro = renderObject as! ContainerRenderObjectHost
         let indexedSlot = newSlot as? IndexedSlot<Element?>
+        if let ro = renderObject as? SliverContainerRenderObjectHost {
+            // Viewports carry no dedicated move; remove + insert reorders the
+            // child list (at the cost of a detach/attach cycle, which is fine
+            // for the between-frames reordering this is called for).
+            let after = indexedSlot?.value?.findRenderObject() as? RenderSliver
+            let sliver = child as! RenderSliver
+            ro.remove(sliver)
+            ro.insert(sliver, after: after)
+            return
+        }
+        let ro = renderObject as! ContainerRenderObjectHost
         let after = indexedSlot?.value?.findRenderObject() as? RenderBox
         ro.move(child as! RenderBox, after: after)
     }
@@ -471,6 +511,10 @@ open class MultiChildRenderObjectElement: RenderObjectElement {
     ///
     /// **Dart Source:** `packages/flutter/lib/src/widgets/framework.dart:7386`
     open override func removeRenderObjectChild(_ child: RenderObject, _ slot: Any?) {
+        if let ro = renderObject as? SliverContainerRenderObjectHost {
+            ro.remove(child as! RenderSliver)
+            return
+        }
         let ro = renderObject as! ContainerRenderObjectHost
         ro.remove(child as! RenderBox)
     }

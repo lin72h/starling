@@ -1028,3 +1028,7 @@ open class RenderSliverSemanticsAnnotations: RenderProxySliver {
     /// The full implementation reads `SemanticsProperties` and configures
     /// container, explicitChildNodes, excludeSemantics, blockUserActions, etc.
 }
+
+// MARK: - SingleChildSliverHost Conformance
+
+extension RenderProxySliver: SingleChildSliverHost {}

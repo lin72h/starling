@@ -236,11 +236,12 @@ public class ScrollableState: State<StatefulWidget>, TickerProvider {
         _lastDragOffset = currentOffset
         _lastDragTime = now
 
-        // Apply the delta to scroll position
-        // Delta is positive when moving down, but scroll offset increases when
-        // content moves up. So we negate for the default axis direction.
+        // Pass the raw drag delta (positive = pointer moved toward the end of
+        // the axis): applyUserOffset itself does the drag-to-scroll negation
+        // (`setPixels(pixels - delta)`, as in Dart's DragScrollActivity).
+        // Negating here too made every forward scroll clamp at offset 0.
         let isReversed = scrollable.axisDirection == .up || scrollable.axisDirection == .left
-        let scrollDelta = isReversed ? delta : -delta
+        let scrollDelta = isReversed ? -delta : delta
         position.applyUserOffset(scrollDelta)
     }
 
