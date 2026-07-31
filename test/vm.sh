@@ -243,7 +243,9 @@ step "power menu: Shut Down from the UI actually powers the machine off"
 #
 # Coordinates are physical pixels at the harness's fixed 1280x800, measured
 # 2026-07-31 (icon 1222,32; "Shut Down…" row 967,336; confirm button
-# 1114,248 — the confirm prompt is one line, unlike Log Out's two). A layout
+# 1114,248). All three confirm prompts are single-line by an invariant
+# documented on PowerAction.prompt, so every confirm panel shares this
+# geometry — a prompt that wraps moves the buttons and breaks it. A layout
 # change that moves them makes the clicks land elsewhere, the guest stays up,
 # and this step fails loudly — the coordinates cannot rot in silence.
 click() { (cd "$VM" && python3 qmp-abs-click.py "$1" "$2" 1280 800 >/dev/null); }

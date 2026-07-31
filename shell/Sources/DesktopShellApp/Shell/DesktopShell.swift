@@ -85,11 +85,21 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
         }
 
+        /// One line each, and that is load-bearing: the confirm panel is 220
+        /// logical px wide (_statusPopupGeometry), and a prompt that wraps
+        /// makes THAT action's panel taller, so its Cancel/confirm buttons sit
+        /// lower than the other two actions' — the destructive button moves
+        /// between near-identical dialogs, which is exactly where a stray
+        /// click costs the most. Log Out's prompt used to be "Close all apps
+        /// and end the session?", which wrapped and put its buttons ~33px
+        /// below Shut Down's. The release gate clicks Shut Down's confirm at
+        /// fixed coordinates, so a wrap there fails the gate; the other two
+        /// are only as good as this comment.
         var prompt: String {
             switch self {
             case .shutDown: return "Shut down the computer?"
             case .restart:  return "Restart the computer?"
-            case .logOut:   return "Close all apps and end the session?"
+            case .logOut:   return "Close all apps and log out?"
             }
         }
 
