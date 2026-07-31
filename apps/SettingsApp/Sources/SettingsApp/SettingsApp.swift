@@ -572,33 +572,15 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                 ])
                             ),
                         ]),
-                        SizedBox(height: 20),
-                        _sectionHeader("Accent Color"),
-                        SizedBox(height: 12),
-                        Row(
-                            spacing: 8,
-                            children: [
-                                _colorSwatch(Color(0xFF007AFF)), // Blue
-                                _colorSwatch(Color(0xFFAF52DE)), // Purple
-                                _colorSwatch(Color(0xFFFF2D55)), // Pink
-                                _colorSwatch(Color(0xFFFF3B30)), // Red
-                                _colorSwatch(Color(0xFFFF9500)), // Orange
-                                _colorSwatch(Color(0xFF34C759)), // Green
-                                _colorSwatch(Color(0xFF8E8E93)), // Graphite
-                            ]
-                        ),
+                        // No accent picker here. The desktop's accent is fixed
+                        // per theme (ShellTheme.accent), and the swatches that
+                        // used to sit here were decoration — no gesture
+                        // handler, nothing behind them — so clicking one did
+                        // nothing. A control that looks settable and isn't is
+                        // worse than its absence; bring it back with the
+                        // Settings→shell plumbing that would make it real.
                     ]
                 )
-            )
-        )
-    }
-
-    private func _colorSwatch(_ color: Color) -> Widget {
-        return SizedBox(
-            width: 28, height: 28,
-            child: ClipRRect(
-                borderRadius: BorderRadius.all(Radius(circular: 14)),
-                child: ColoredBox(color: color, child: SizedBox(expand: ()))
             )
         )
     }

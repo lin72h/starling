@@ -67,8 +67,45 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var contextMenuPosition: Offset?
 
     // Status bar popup state (nil = no popup open)
-    enum StatusBarPopup { case wifi, battery, clock }
+    enum StatusBarPopup { case wifi, battery, clock, power }
     var activeStatusBarPopup: StatusBarPopup? = nil
+
+    /// What the power menu is asking the user to confirm, or nil while it is
+    /// still showing the list. Ending a session is not undoable, so every item
+    /// takes two clicks — the panel swaps its list for a confirm prompt rather
+    /// than opening a second surface.
+    enum PowerAction {
+        case shutDown, restart, logOut
+
+        var title: String {
+            switch self {
+            case .shutDown: return "Shut Down"
+            case .restart:  return "Restart"
+            case .logOut:   return "Log Out"
+            }
+        }
+
+        var prompt: String {
+            switch self {
+            case .shutDown: return "Shut down the computer?"
+            case .restart:  return "Restart the computer?"
+            case .logOut:   return "Close all apps and end the session?"
+            }
+        }
+
+        /// systemd handles the privilege question: on a real session logind
+        /// authorises the caller through polkit, and the shell running as root
+        /// (dev mode) is allowed outright. Log Out terminates the session
+        /// rather than killing the shell, so the display manager takes over.
+        var command: (String, [String]) {
+            switch self {
+            case .shutDown: return ("/usr/bin/systemctl", ["poweroff"])
+            case .restart:  return ("/usr/bin/systemctl", ["reboot"])
+            case .logOut:   return ("/usr/bin/loginctl", ["terminate-session", "self"])
+            }
+        }
+    }
+    var _powerConfirm: PowerAction? = nil
 
     // Full-screen app launcher (Launchpad) open state; toggled by the dock's
     // grid icon. See AppLauncher. _launcherQuery is the live search string
@@ -2735,6 +2772,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 setState {
                     activeStatusBarPopup = isActive ? nil : popup
                     contextMenuPosition = nil
+                    // Every open starts on the list. Reset here rather than at
+                    // each of the eight places that close a popup — one of
+                    // those would eventually be missed, and the failure mode is
+                    // a menu that opens straight onto "Shut down the computer?".
+                    _powerConfirm = nil
                 }
             },
             behavior: .opaque,
@@ -2805,6 +2847,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         children: [
                             _statusBarItem(icon: CupertinoIcons.wifi, popup: .wifi),
                             _statusBarItem(icon: CupertinoIcons.battery_100, popup: .battery),
+                            // Rightmost, macOS-style. Until this existed there
+                            // was no way to shut the desktop down from the UI
+                            // at all — you had to find a terminal and sudo.
+                            _statusBarItem(icon: CupertinoIcons.power, popup: .power),
                         ]
                     ),
                 ]
@@ -2822,18 +2868,112 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             return _buildBatteryPopup()
         case .clock:
             return _buildClockPopup()
+        case .power:
+            return _buildPowerPopup()
         }
+    }
+
+    /// Shut Down / Restart / Log Out, each behind a confirm step.
+    private func _buildPowerPopup() -> Widget {
+        if let pending = _powerConfirm {
+            return _statusPopupPanel(popup: .power, children: [
+                _popupSectionHeader(pending.title),
+                Text(pending.prompt,
+                     style: TextStyle(color: shellTheme.fgSecondary, fontSize: 12)),
+                SizedBox(height: 12),
+                Row(
+                    mainAxisAlignment: .spaceBetween,
+                    children: [
+                        _powerButton("Cancel", destructive: false) { [self] in
+                            setState { _powerConfirm = nil }
+                        },
+                        _powerButton(pending.title, destructive: true) { [self] in
+                            // Close the menu first: the session may go away
+                            // mid-frame, and a panel left open looks like a hang.
+                            setState {
+                                activeStatusBarPopup = nil
+                                _powerConfirm = nil
+                            }
+                            _runPowerAction(pending)
+                        },
+                    ]
+                ),
+            ])
+        }
+
+        return _statusPopupPanel(popup: .power, children: [
+            _popupSectionHeader("Power"),
+            _powerMenuRow(.logOut, icon: CupertinoIcons.square_arrow_right),
+            _powerMenuRow(.restart, icon: CupertinoIcons.arrow_clockwise),
+            _powerMenuRow(.shutDown, icon: CupertinoIcons.power),
+        ])
+    }
+
+    private func _powerMenuRow(_ action: PowerAction, icon: IconData) -> Widget {
+        return GestureDetector(
+            onTap: { [self] in setState { _powerConfirm = action } },
+            behavior: .opaque,
+            child: Padding(
+                padding: EdgeInsets(left: 0, top: 7, right: 0, bottom: 7),
+                child: Row(children: [
+                    MacosIcon(icon: icon, color: shellTheme.fgPrimary, size: 15),
+                    SizedBox(width: 10),
+                    Text("\(action.title)\u{2026}",
+                         style: TextStyle(color: shellTheme.fgPrimary, fontSize: 13)),
+                ])
+            )
+        )
+    }
+
+    private func _powerButton(_ label: String, destructive: Bool,
+                              _ onTap: @escaping () -> Void) -> Widget {
+        return GestureDetector(
+            onTap: onTap,
+            behavior: .opaque,
+            child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: destructive ? shellTheme.accent : shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(6)
+                ),
+                child: Padding(
+                    padding: EdgeInsets(left: 14, top: 6, right: 14, bottom: 6),
+                    child: Text(label, style: TextStyle(
+                        color: destructive ? Color(0xFFFFFFFF) : shellTheme.fgPrimary,
+                        fontSize: 12, fontWeight: .w600))
+                )
+            )
+        )
+    }
+
+    /// Hands the request to systemd and lets it decide. Deliberately no
+    /// fallback to `shutdown`/`halt`: if logind refuses, the honest outcome is
+    /// nothing happening rather than a second path with different semantics.
+    private func _runPowerAction(_ action: PowerAction) {
+        #if os(Linux)
+        let (path, args) = action.command
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        do {
+            try process.run()
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[shell] power action \(action.title) failed: \(error)\n".utf8))
+        }
+        #endif
     }
 
     /// Fixed width and screen-left of each status popup — used both to
     /// position the panel and to hand the liquid-glass shader its rect.
     /// Anchors: status bar is padded 16 each side; each right-side icon item
-    /// is 27px wide (6+15+6) with a 2px gap, so battery's right edge sits at
-    /// 16 and wifi's at 45. The clock popup is left-anchored.
+    /// is 27px wide (6+15+6) with a 2px gap, so right edges run 16, 45, 74 from
+    /// the right — power, battery, wifi, in status-bar order. The clock popup
+    /// is left-anchored.
     private func _statusPopupGeometry(_ popup: StatusBarPopup) -> (width: Double, left: Double) {
         switch popup {
-        case .wifi:    return (280, screenWidth - 45 - 280)
-        case .battery: return (260, screenWidth - 16 - 260)
+        case .wifi:    return (280, screenWidth - 74 - 280)
+        case .battery: return (260, screenWidth - 45 - 260)
+        case .power:   return (220, screenWidth - 16 - 220)
         case .clock:   return (260, 16)
         }
     }
