@@ -4,6 +4,7 @@
 import Flutter
 import Foundation
 import Observation
+import StarlingNet
 
 /// Set by _SettingsAppState so the themed root can sync the Dark Mode
 /// switch when the shell pushes an appearance change.
@@ -11,9 +12,24 @@ nonisolated(unsafe) var settingsBlocShared: SettingsBloc?
 
 // MARK: - Settings State
 
+/// `SettingsApp --pane=<name>` opens on that pane — the deep link the
+/// shell's "Network Settings…" popup row uses (--pane=network). An unknown
+/// or absent pane falls through to General.
+func initialPaneIndex() -> Int {
+    let panes = ["general": 0, "network": 1, "displays": 2,
+                 "appearance": 3, "about": 4]
+    for arg in CommandLine.arguments.dropFirst() {
+        if arg.hasPrefix("--pane="),
+           let idx = panes[String(arg.dropFirst("--pane=".count)).lowercased()] {
+            return idx
+        }
+    }
+    return 0
+}
+
 struct SettingsState {
     // Navigation
-    var selectedIndex: Int = 0
+    var selectedIndex: Int = initialPaneIndex()
 
     // System Info
     var osVersion: String = ""
@@ -26,6 +42,9 @@ struct SettingsState {
     var connectionInfo: WifiConnectionInfo? = nil
     var savedConnections: [String] = []
     var networkStatus: String? = nil
+    /// Every managed wired interface — this pane is the detailed view, so it
+    /// lists them all where the shell's popup shows only the primary one.
+    var wiredLinks: [WiredStatus] = []
 
     // Display
     var dpiValue: Double = SystemInfo.currentDPI()
@@ -59,6 +78,7 @@ enum SettingsEvent {
     // Network
     case toggleWifi(Bool)
     case scanNetworks
+    case setWiredConnected(device: String, connected: Bool)
     case connectToNetwork(ssid: String, password: String?)
     case disconnect(connectionName: String)
     case forgetNetwork(connectionName: String)
@@ -98,6 +118,8 @@ final class SettingsBloc: @unchecked Sendable {
             _toggleWifi(enabled)
         case .scanNetworks:
             _scanNetworks()
+        case .setWiredConnected(let device, let connected):
+            _setWiredConnected(device: device, connected: connected)
         case .connectToNetwork(let ssid, let password):
             _connectToNetwork(ssid: ssid, password: password)
         case .disconnect(let name):
@@ -141,6 +163,7 @@ final class SettingsBloc: @unchecked Sendable {
             let networks = wifiOn ? WifiManager.listNetworks() : [WifiNetwork]()
             let connInfo = wifiOn ? WifiManager.activeConnectionInfo() : nil
             let saved = wifiOn ? WifiManager.savedConnections() : [String]()
+            let wired = EthernetManager.statuses()
             #endif
             await MainActor.run { [self] in
                 state.osVersion = os
@@ -151,7 +174,23 @@ final class SettingsBloc: @unchecked Sendable {
                 state.wifiNetworks = networks
                 state.connectionInfo = connInfo
                 state.savedConnections = saved
+                state.wiredLinks = wired
                 #endif
+            }
+        }
+    }
+
+    private func _setWiredConnected(device: String, connected: Bool) {
+        state.networkStatus = connected
+            ? "Connecting \(device)..." : "Disconnecting \(device)..."
+        Task.detached {
+            let error = connected
+                ? EthernetManager.connect(device: device)
+                : EthernetManager.disconnect(device: device)
+            let wired = EthernetManager.statuses()
+            await MainActor.run { [self] in
+                state.networkStatus = error
+                state.wiredLinks = wired
             }
         }
     }
@@ -163,7 +202,7 @@ final class SettingsBloc: @unchecked Sendable {
             state.connectionInfo = nil
         }
         Task.detached {
-            WifiManager.setWifiEnabled(enabled)
+            _ = WifiManager.setWifiEnabled(enabled)
             if enabled {
                 let networks = WifiManager.listNetworks()
                 let info = WifiManager.activeConnectionInfo()
@@ -180,23 +219,31 @@ final class SettingsBloc: @unchecked Sendable {
         Task.detached {
             let networks = WifiManager.scanAndListNetworks()
             let info = WifiManager.activeConnectionInfo()
+            let wired = EthernetManager.statuses()
             await MainActor.run { [self] in
                 state.wifiNetworks = networks
                 state.connectionInfo = info
+                state.wiredLinks = wired
                 state.networkStatus = nil
             }
         }
     }
 
     private func _connectToNetwork(ssid: String, password: String?) {
+        // The scan result's SECURITY string picks the key management for a
+        // new profile (WPA3-only APs need SAE).
+        let security = state.wifiNetworks.first { $0.ssid == ssid }?.security ?? ""
         state.networkStatus = "Connecting to \(ssid)..."
         Task.detached {
-            let error = WifiManager.connect(ssid: ssid, password: password)
+            let error = WifiManager.connect(ssid: ssid, password: password,
+                                            security: security)
             let networks = WifiManager.listNetworks()
             let info = WifiManager.activeConnectionInfo()
             let saved = WifiManager.savedConnections()
             await MainActor.run { [self] in
-                state.networkStatus = error.map { "Failed: \($0)" }
+                state.networkStatus = error.map {
+                    WifiManager.friendlyConnectError($0)
+                }
                 state.wifiNetworks = networks
                 state.connectionInfo = info
                 state.savedConnections = saved
@@ -210,8 +257,12 @@ final class SettingsBloc: @unchecked Sendable {
         Task.detached {
             let _ = WifiManager.disconnect(connectionName: connectionName)
             let networks = WifiManager.listNetworks()
+            let info = WifiManager.activeConnectionInfo()
+            let saved = WifiManager.savedConnections()
             await MainActor.run { [self] in
                 state.wifiNetworks = networks
+                state.connectionInfo = info
+                state.savedConnections = saved
                 state.networkStatus = nil
             }
         }
@@ -243,9 +294,15 @@ final class SettingsBloc: @unchecked Sendable {
         state.networkStatus = "Forgetting \"\(connectionName)\"..."
         Task.detached {
             let _ = WifiManager.forget(connectionName: connectionName)
+            // Forgetting the active network disconnects it — refresh
+            // everything the pane shows, not just the saved list.
             let saved = WifiManager.savedConnections()
+            let networks = WifiManager.listNetworks()
+            let info = WifiManager.activeConnectionInfo()
             await MainActor.run { [self] in
                 state.savedConnections = saved
+                state.wifiNetworks = networks
+                state.connectionInfo = info
                 state.networkStatus = "Forgot \"\(connectionName)\""
             }
         }

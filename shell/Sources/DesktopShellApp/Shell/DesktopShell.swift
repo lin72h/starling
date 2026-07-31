@@ -6,6 +6,7 @@ import FlutterSwiftBridge
 import Foundation
 import CupertinoIcons
 import StarlingRegistry
+import StarlingNet
 #if os(Linux)
 import FlutterDRMBridge  // fl_drm_view_capture_active (X11 GetImage present pump)
 #endif
@@ -128,6 +129,24 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // keyboard is live — see AppLauncher.searchBar.
     var _launcherCaretOn: Bool = true
     var _launcherCaretToken: Int = 0
+
+    // WiFi: real state behind the status-bar icon and popup. The service
+    // owns all nmcli traffic; these vars are only the popup's UI state.
+    let networkService = NetworkService()
+    /// Non-nil while the popup is showing the password prompt for this SSID.
+    var _wifiPasswordSSID: String? = nil
+    /// The prompt target's SECURITY string (picks WPA2 vs WPA3 key-mgmt).
+    var _wifiPasswordSecurity: String = ""
+    var _wifiPassword: String = ""
+    // Password caret blink — same alpha-fade mechanism as the Launchpad
+    // search caret (see _restartLauncherCaret and the trap it documents).
+    var _wifiCaretOn: Bool = true
+    var _wifiCaretToken: Int = 0
+    /// SSID currently being joined (shows the spinner row), nil when idle.
+    var _wifiConnecting: String? = nil
+    /// Last join failure, shown in the popup until the next attempt or open.
+    var _wifiError: String? = nil
+    var _wifiRefreshTimer: DispatchSourceTimer?
 
     // Texture IDs for process-based apps (for cleanup on window close)
     var processTextureIds: [String: Int64] = [:]
@@ -563,6 +582,22 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
         timer.resume()
         _frameTickTimer = timer
+
+        // WiFi state: monitor-driven while idle, plus a 5s re-read while the
+        // popup is on screen so signal strengths and scan results stay live
+        // (same tick-only-while-watched shape as the agent status timer).
+        networkService.onChange = { [weak self] in
+            self?.setState {}
+        }
+        networkService.start()
+        let wifiTimer = DispatchSource.makeTimerSource(queue: .main)
+        wifiTimer.schedule(deadline: .now() + .seconds(5), repeating: .seconds(5))
+        wifiTimer.setEventHandler { [weak self] in
+            guard let self, self.activeStatusBarPopup == .wifi else { return }
+            self.networkService.refreshNow()
+        }
+        wifiTimer.resume()
+        _wifiRefreshTimer = wifiTimer
         #endif
     }
 
@@ -1247,6 +1282,53 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     }
                 }
                 return true  // swallow everything while the launcher is open
+            }
+
+            // The WiFi password prompt owns the keyboard while visible — the
+            // one status popup that reads keys. Without this branch every
+            // keystroke would fall through to the focused window while the
+            // user watches a password field with a blinking caret.
+            if self.activeStatusBarPopup == .wifi, let ssid = self._wifiPasswordSSID {
+                if keyData.type == .down || keyData.type == .repeat {
+                    switch keyData.physical {
+                    case 0x29:  // Escape — back to the network list
+                        self.setState {
+                            self._wifiPasswordSSID = nil
+                            self._wifiPassword = ""
+                        }
+                    case 0x2A:  // Backspace
+                        self.setState {
+                            if !self._wifiPassword.isEmpty { self._wifiPassword.removeLast() }
+                        }
+                        self._restartWifiCaret()
+                    case 0x28, 0x58:  // Enter / keypad Enter — join
+                        self._wifiJoin(ssid: ssid,
+                                       security: self._wifiPasswordSecurity,
+                                       password: self._wifiPassword)
+                    default:
+                        if let ch = keyData.character,
+                           let s = ch.unicodeScalars.first,
+                           s.value >= 0x20, s.value != 0x7F {
+                            self.setState { self._wifiPassword += ch }
+                            self._restartWifiCaret()
+                        }
+                    }
+                }
+                return true
+            }
+
+            // Escape closes an open status popup, like every other menu on
+            // the desktop. Only Escape is taken — a status popup is not modal
+            // otherwise, so everything else still reaches the focused window.
+            if self.activeStatusBarPopup != nil, keyData.type == .down,
+               phys == 0x29 {
+                self.setState {
+                    self.activeStatusBarPopup = nil
+                    self._powerConfirm = nil
+                    self._wifiPasswordSSID = nil
+                    self._wifiPassword = ""
+                }
+                return true
             }
 
             // Mission Control owns the keyboard while open: Esc / Ctrl+Up
@@ -2798,6 +2880,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     // those would eventually be missed, and the failure mode is
                     // a menu that opens straight onto "Shut down the computer?".
                     _powerConfirm = nil
+                    // Same reasoning for the WiFi panel: never open onto a
+                    // stale password prompt or last week's join error.
+                    _wifiPasswordSSID = nil
+                    _wifiPassword = ""
+                    _wifiError = nil
+                }
+                if activeStatusBarPopup == .wifi {
+                    // Fresh scan on open; cached results render immediately.
+                    networkService.refreshWithScan()
                 }
             },
             behavior: .opaque,
@@ -2866,7 +2957,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         crossAxisAlignment: .center,
                         spacing: 2,
                         children: [
-                            _statusBarItem(icon: CupertinoIcons.wifi, popup: .wifi),
+                            _statusBarItem(icon: _networkStatusIcon(), popup: .wifi),
                             _statusBarItem(icon: CupertinoIcons.battery_100, popup: .battery),
                             // Rightmost, macOS-style. Until this existed there
                             // was no way to shut the desktop down from the UI
@@ -2999,6 +3090,37 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
     }
 
+    /// Screen position of a status-bar icon's center, derived from the same
+    /// numbers that place its popup — tooling that clicks one asks for this
+    /// rather than reproducing the arithmetic (the dock learned that lesson
+    /// first; see `dockSlots`). Each right-side item is 27px wide.
+    /// Internal, not private: the broker reports it.
+    func statusItemCenter(_ popup: StatusBarPopup) -> (x: Double, y: Double) {
+        let geo = _statusPopupGeometry(popup)
+        // Panels are right-aligned to their icon, so the panel's right edge
+        // is the icon's right edge — except the clock, which is left-anchored.
+        let x = popup == .clock
+            ? geo.left + 40
+            : geo.left + geo.width - 13.5
+        return (x, DesktopTheme.kStatusBarHeight / 2)
+    }
+
+    /// Where a status popup's *content column* sits: the panel inset by its
+    /// 16px padding. Rows only take taps inside this band — the padding
+    /// belongs to the panel — so tooling that clicks a row aims at
+    /// `contentCenterX`, never at the icon's x (which is past the right
+    /// edge of the content and hits nothing).
+    /// Internal, not private: the broker reports it.
+    func statusPopupContent(_ popup: StatusBarPopup)
+        -> (left: Double, width: Double, top: Double, centerX: Double) {
+        let geo = _statusPopupGeometry(popup)
+        let pad: Double = 16
+        let left = geo.left + pad
+        let width = geo.width - pad * 2
+        return (left, width, DesktopTheme.kStatusBarHeight + 1 + pad,
+                left + width / 2)
+    }
+
     /// Records a popup panel's laid-out height (fires from MeasureSize during
     /// layout — mutate state on the main queue, never synchronously).
     private func _recordStatusPopupHeight(_ popup: StatusBarPopup, _ size: Size) {
@@ -3077,15 +3199,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     }
 
     /// Section header text (e.g. "Wi-Fi", "Battery")
+    /// Fixed at kNetSectionHeaderH so the blocks below it sit at a computable
+    /// offset (see the network popup metrics).
     private func _popupSectionHeader(_ title: String) -> Widget {
-        return Padding(
-            padding: EdgeInsets(bottom: 10),
-            child: Text(
-                title,
-                style: TextStyle(
-                    color: shellTheme.fgPrimary,
-                    fontSize: 15,
-                    fontWeight: .w600
+        return SizedBox(
+            height: Self.kNetSectionHeaderH,
+            child: Padding(
+                padding: EdgeInsets(bottom: 10),
+                child: Text(
+                    title,
+                    style: TextStyle(
+                        color: shellTheme.fgPrimary,
+                        fontSize: 15,
+                        fontWeight: .w600
+                    )
                 )
             )
         )
@@ -3144,23 +3271,431 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         )
     }
 
-    private func _buildWifiPopup() -> Widget {
-        return _statusPopupPanel(popup: .wifi, children: [
-            _popupSectionHeader("Wi-Fi"),
-            _popupInfoRow(icon: CupertinoIcons.wifi, label: "Network", value: "Connected"),
-            _popupInfoRow(icon: CupertinoIcons.antenna_radiowaves_left_right, label: "Signal", value: "Strong"),
-            _popupDivider(),
-            _popupSectionHeader("Known Networks"),
-            _popupInfoRow(icon: CupertinoIcons.wifi, label: "Home-5G", value: "Connected"),
-            _popupInfoRow(icon: CupertinoIcons.wifi, label: "Office-WiFi", value: "Saved"),
-            _popupDivider(),
-            _popupActionRow(label: "Network Settings...") { [self] in
-                setState {
-                    activeStatusBarPopup = nil
-                    _launchOrFocusApp("settings")
+    // MARK: - WiFi popup (real state via NetworkService)
+
+    /// The status-bar glyph for the whole network, not just the radio: a
+    /// machine on ethernet is online, and showing it a struck-through WiFi
+    /// icon (because the radio is off) would be a lie about connectivity.
+    /// Wired wins whenever it is carrying the connection.
+    private func _networkStatusIcon() -> IconData {
+        let snap = networkService.snapshot
+        if snap.wired?.connected == true { return CupertinoIcons.globe }
+        if !snap.available || !snap.wifiEnabled { return CupertinoIcons.wifi_slash }
+        if snap.active == nil { return CupertinoIcons.wifi_exclamationmark }
+        return CupertinoIcons.wifi
+    }
+
+    // MARK: Network popup metrics
+    //
+    // The panel's blocks are given these heights explicitly (SizedBox), so
+    // they are the layout rather than a description of it. That makes every
+    // row's position computable, which is the whole point: tooling that
+    // clicks a network row asks the shell where it is (`wifi_state.rows`)
+    // instead of carrying its own copy of the arithmetic. The dock learned
+    // this the hard way — a mirrored layout in the test harness was wrong on
+    // every machine but the one it was written on.
+    static let kNetSectionHeaderH: Double = 28   // title + its bottom padding
+    static let kNetDetailRowH: Double = 21       // one line of secondary text
+    static let kNetDividerH: Double = 17         // rule + 8 above + 8 below
+    static let kNetToggleRowH: Double = 30       // switch + bottom padding
+    static let kNetNetworkRowH: Double = 27      // one scanned-network row
+
+    /// Screen Y of each listed network's row center, filled in during build.
+    /// Read by the broker; never used for layout.
+    var _wifiRowCenters: [(ssid: String, y: Double)] = []
+
+    /// Caret blink for the popup's password field — the Launchpad caret's
+    /// token + asyncAfter loop with its own token, guarded on the prompt
+    /// still being on screen (see _restartLauncherCaret for why not Timer).
+    func _restartWifiCaret() {
+        _wifiCaretToken &+= 1
+        let token = _wifiCaretToken
+        _wifiCaretOn = true
+
+        func schedule() {
+            let next: () -> Void = { [weak self] in
+                guard let self, self._wifiCaretToken == token,
+                      self.activeStatusBarPopup == .wifi,
+                      self._wifiPasswordSSID != nil
+                else { return }
+                self.setState { self._wifiCaretOn.toggle() }
+                schedule()
+            }
+            // Main-queue-only state; @Sendable coercion is the codebase idiom.
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + .milliseconds(530),
+                execute: unsafeBitCast(next, to: (@Sendable () -> Void).self))
+        }
+        schedule()
+    }
+
+    /// Start a join and reflect the outcome. `password` is nil for open and
+    /// saved networks; the password prompt always passes one (possibly bad).
+    func _wifiJoin(ssid: String, security: String, password: String?) {
+        // WPA passwords are 8-63 characters. Catching a short one here costs
+        // a message; letting NetworkManager discover it costs the user the
+        // full 30-second activation timeout.
+        if let pw = password, pw.count < 8 {
+            setState { _wifiError = "Password must be at least 8 characters." }
+            return
+        }
+        setState {
+            _wifiConnecting = ssid
+            _wifiError = nil
+            _wifiPasswordSSID = nil
+            _wifiPassword = ""
+        }
+        networkService.connect(ssid: ssid, security: security,
+                               password: password) { [weak self] err in
+            guard let self else { return }
+            self.setState {
+                self._wifiConnecting = nil
+                self._wifiError = err
+            }
+        }
+    }
+
+    /// macOS-style switch, sized for the popup header row.
+    private func _wifiToggle(on: Bool) -> Widget {
+        return GestureDetector(
+            onTap: { [self] in networkService.setWifiEnabled(!on) },
+            behavior: .opaque,
+            child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: on ? shellTheme.accent : shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(10)
+                ),
+                child: SizedBox(
+                    width: 36, height: 20,
+                    child: Align(
+                        alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+                        child: Padding(
+                            padding: EdgeInsets(horizontal: 2),
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    color: Color(0xFFFFFFFF),
+                                    borderRadius: BorderRadius.circular(8)
+                                ),
+                                child: SizedBox(width: 16, height: 16)
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    /// Four ascending bars lit by signal strength — drawn rects, not the
+    /// ▂▄▆█ block glyphs: the shell's font has no block elements, so the
+    /// text spelling renders as tofu boxes.
+    private func _wifiSignalBars(_ signal: Int) -> Widget {
+        var bars: [Widget] = []
+        let heights: [Double] = [4, 6, 8, 10]
+        let thresholds = [1, 30, 55, 80]
+        for i in 0..<4 {
+            if i > 0 { bars.append(SizedBox(width: 2)) }
+            bars.append(DecoratedBox(
+                decoration: BoxDecoration(
+                    color: signal >= thresholds[i]
+                        ? shellTheme.fgSecondary : shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(1)
+                ),
+                child: SizedBox(width: 3, height: heights[i])
+            ))
+        }
+        return Row(mainAxisSize: .min, crossAxisAlignment: .end, children: bars)
+    }
+
+    /// Screen Y of the first pixel inside a status popup's content column.
+    func _statusPopupContentTop() -> Double {
+        return statusPopupContent(.wifi).top
+    }
+
+    private func _wifiNetworkRow(_ net: WifiNetwork, known: Bool) -> Widget {
+        var trailing: [Widget] = []
+        if _wifiConnecting == net.ssid {
+            trailing = [Text("Connecting\u{2026}",
+                             style: TextStyle(color: shellTheme.fgTertiary, fontSize: 11))]
+        } else {
+            if !net.isOpen {
+                trailing.append(MacosIcon(icon: CupertinoIcons.lock_fill,
+                                          color: shellTheme.fgTertiary, size: 11))
+                trailing.append(SizedBox(width: 5))
+            }
+            trailing.append(_wifiSignalBars(net.signal))
+        }
+
+        return GestureDetector(
+            onTap: { [self] in
+                guard _wifiConnecting == nil else { return }
+                if net.isOpen || known {
+                    _wifiJoin(ssid: net.ssid, security: net.security, password: nil)
+                } else {
+                    setState {
+                        _wifiPasswordSSID = net.ssid
+                        _wifiPasswordSecurity = net.security
+                        _wifiPassword = ""
+                        _wifiError = nil
+                    }
+                    _restartWifiCaret()
                 }
             },
-        ])
+            behavior: .opaque,
+            // Fixed height, so the row a user clicks is exactly the row the
+            // shell told tooling about (kNetNetworkRowH — see the metrics).
+            child: SizedBox(height: Self.kNetNetworkRowH, child: Padding(
+                padding: EdgeInsets(top: 5, bottom: 5),
+                child: Row(children: [
+                    MacosIcon(icon: CupertinoIcons.wifi,
+                              color: shellTheme.fgTertiary, size: 14),
+                    SizedBox(width: 8),
+                    Expanded(child: Text(
+                        net.ssid,
+                        style: TextStyle(color: shellTheme.fgPrimary, fontSize: 13),
+                        overflow: .ellipsis,
+                        maxLines: 1
+                    )),
+                    SizedBox(width: 8),
+                ] + trailing)
+            ))
+        )
+    }
+
+    /// The panel content while asking for a password — swaps the whole panel
+    /// like the power confirm does, so the popup never grows a second layer.
+    private func _buildWifiPasswordPrompt(ssid: String) -> Widget {
+        let caret = Text("|", style: TextStyle(
+            // Blink by alpha, never by swapping the glyph — a caret that
+            // appears and disappears from the layout makes the text shift.
+            color: _wifiCaretOn ? shellTheme.fgPrimary : Color(0x00000000),
+            fontSize: 13
+        ))
+        var fieldChildren: [Widget]
+        if _wifiPassword.isEmpty {
+            fieldChildren = [caret, Text("Password", style: TextStyle(
+                color: shellTheme.fgTertiary, fontSize: 13))]
+        } else {
+            fieldChildren = [
+                Text(String(repeating: "\u{2022}", count: _wifiPassword.count),
+                     style: TextStyle(color: shellTheme.fgPrimary, fontSize: 13),
+                     overflow: .ellipsis, maxLines: 1),
+                caret,
+            ]
+        }
+
+        var children: [Widget] = [
+            _popupSectionHeader("Join \(ssid)"),
+            Text("Enter the network password.",
+                 style: TextStyle(color: shellTheme.fgSecondary, fontSize: 12)),
+            SizedBox(height: 10),
+            SizedBox(width: Double.infinity, child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(6)
+                ),
+                child: Padding(
+                    padding: EdgeInsets(left: 10, top: 6, right: 10, bottom: 6),
+                    child: Row(children: fieldChildren)
+                )
+            )),
+        ]
+        if let err = _wifiError {
+            children.append(SizedBox(height: 8))
+            children.append(Text(err, style: TextStyle(
+                color: Color(0xFFFF6B6B), fontSize: 11)))
+        }
+        children.append(SizedBox(height: 12))
+        children.append(Row(
+            mainAxisAlignment: .spaceBetween,
+            children: [
+                _powerButton("Cancel", destructive: false) { [self] in
+                    setState { _wifiPasswordSSID = nil; _wifiPassword = "" }
+                },
+                _powerButton("Join", destructive: true) { [self] in
+                    _wifiJoin(ssid: ssid, security: _wifiPasswordSecurity,
+                              password: _wifiPassword)
+                },
+            ]
+        ))
+        return _statusPopupPanel(popup: .wifi, children: children)
+    }
+
+    /// The wired block: one row for the link, plus its address and a
+    /// connect/disconnect action once there is a cable to act on.
+    /// Height is exactly 2 * kNetDetailRowH + kNetDividerH — see the metrics.
+    private func _wiredSection(_ wired: WiredStatus) -> [Widget] {
+        var rows: [Widget] = [
+            SizedBox(height: Self.kNetDetailRowH, child: Padding(
+                padding: EdgeInsets(top: 2, bottom: 2),
+                child: Row(children: [
+                    MacosIcon(icon: CupertinoIcons.globe,
+                              color: wired.connected ? shellTheme.accent
+                                                     : shellTheme.fgTertiary,
+                              size: 14),
+                    SizedBox(width: 8),
+                    Expanded(child: Text(
+                        "Wired",
+                        style: TextStyle(
+                            color: shellTheme.fgPrimary, fontSize: 13,
+                            fontWeight: wired.connected ? .w600 : .w400),
+                        overflow: .ellipsis, maxLines: 1
+                    )),
+                ])
+            )),
+            SizedBox(height: Self.kNetDetailRowH, child: Padding(
+                padding: EdgeInsets(left: 22, top: 0, right: 0, bottom: 2),
+                child: Row(children: [
+                    Expanded(child: Text(
+                        wired.connected ? wired.ipAddress : wired.summary,
+                        style: TextStyle(color: shellTheme.fgTertiary, fontSize: 11),
+                        overflow: .ellipsis, maxLines: 1
+                    )),
+                    // Nothing to offer without a cable — a Connect button
+                    // that can only fail is worse than no button.
+                    wired.carrier
+                        ? GestureDetector(
+                            onTap: { [self] in
+                                networkService.setWiredConnected(
+                                    !wired.connected, device: wired.device)
+                            },
+                            behavior: .opaque,
+                            child: Text(wired.connected ? "Disconnect" : "Connect",
+                                        style: TextStyle(color: shellTheme.accent,
+                                                         fontSize: 11))
+                          )
+                        : SizedBox(width: 0),
+                ])
+            )),
+        ]
+        rows.append(_popupDivider())
+        return rows
+    }
+
+    private func _buildWifiPopup() -> Widget {
+        let snap = networkService.snapshot
+
+        guard snap.available else {
+            // No radio. Still a network panel if there is a wire.
+            var children: [Widget] = [_popupSectionHeader("Network")]
+            if let wired = snap.wired {
+                children += _wiredSection(wired)
+            }
+            children.append(Text(
+                "Wi-Fi is not available on this system.",
+                style: TextStyle(color: shellTheme.fgSecondary, fontSize: 12)))
+            children.append(_popupDivider())
+            children.append(_popupActionRow(label: "Network Settings...") { [self] in
+                setState {
+                    activeStatusBarPopup = nil
+                    _launchOrFocusApp("settings", extraArgs: ["--pane=network"])
+                }
+            })
+            return _statusPopupPanel(popup: .wifi, children: children)
+        }
+
+        if let ssid = _wifiPasswordSSID {
+            return _buildWifiPasswordPrompt(ssid: ssid)
+        }
+
+        // `y` tracks the top of the next block, in screen coordinates, using
+        // the very heights the blocks are built with — so the row positions
+        // reported to tooling cannot drift from what is drawn.
+        var y = _statusPopupContentTop()
+        var children: [Widget] = [_popupSectionHeader("Network")]
+        y += Self.kNetSectionHeaderH
+        if let wired = snap.wired {
+            children += _wiredSection(wired)
+            y += Self.kNetDetailRowH * 2 + Self.kNetDividerH
+        }
+        children.append(
+            SizedBox(height: Self.kNetToggleRowH, child: Padding(
+                padding: EdgeInsets(bottom: 10),
+                child: Row(
+                    mainAxisAlignment: .spaceBetween,
+                    crossAxisAlignment: .center,
+                    children: [
+                        Text("Wi-Fi", style: TextStyle(
+                            color: shellTheme.fgPrimary,
+                            fontSize: 13, fontWeight: .w600)),
+                        _wifiToggle(on: snap.wifiEnabled),
+                    ]
+                )
+            ))
+        )
+        y += Self.kNetToggleRowH
+
+        _wifiRowCenters = []
+        if !snap.wifiEnabled {
+            children.append(Text("Wi-Fi is off.", style: TextStyle(
+                color: shellTheme.fgTertiary, fontSize: 12)))
+        } else {
+            if let active = snap.active {
+                children.append(SizedBox(height: Self.kNetDetailRowH, child: Padding(
+                    padding: EdgeInsets(top: 2, bottom: 2),
+                    child: Row(children: [
+                        MacosIcon(icon: CupertinoIcons.checkmark,
+                                  color: shellTheme.accent, size: 12),
+                        SizedBox(width: 8),
+                        Expanded(child: Text(
+                            active.ssid,
+                            style: TextStyle(color: shellTheme.fgPrimary,
+                                             fontSize: 13, fontWeight: .w600),
+                            overflow: .ellipsis, maxLines: 1
+                        )),
+                        SizedBox(width: 8),
+                        _wifiSignalBars(snap.networks.first { $0.inUse }?.signal ?? 0),
+                    ])
+                )))
+                children.append(SizedBox(height: Self.kNetDetailRowH, child: Padding(
+                    padding: EdgeInsets(left: 20, top: 0, right: 0, bottom: 2),
+                    child: Row(children: [
+                        Text(active.ipAddress,
+                             style: TextStyle(color: shellTheme.fgTertiary, fontSize: 11)),
+                        Expanded(child: SizedBox(width: 0)),
+                        GestureDetector(
+                            onTap: { [self] in
+                                networkService.disconnect(connectionName: active.ssid)
+                            },
+                            behavior: .opaque,
+                            child: Text("Disconnect", style: TextStyle(
+                                color: shellTheme.accent, fontSize: 11))
+                        ),
+                    ])
+                )))
+                y += Self.kNetDetailRowH * 2
+            }
+
+            let others = snap.networks.filter { !$0.inUse }
+            if !others.isEmpty {
+                children.append(_popupDivider())
+                y += Self.kNetDividerH
+                for net in others.prefix(8) {
+                    children.append(_wifiNetworkRow(
+                        net, known: snap.savedNames.contains(net.ssid)))
+                    _wifiRowCenters.append(
+                        (ssid: net.ssid, y: y + Self.kNetNetworkRowH / 2))
+                    y += Self.kNetNetworkRowH
+                }
+            } else if snap.active == nil {
+                children.append(Text("No networks found.", style: TextStyle(
+                    color: shellTheme.fgTertiary, fontSize: 12)))
+            }
+        }
+
+        if let err = _wifiError {
+            children.append(SizedBox(height: 6))
+            children.append(Text(err, style: TextStyle(
+                color: Color(0xFFFF6B6B), fontSize: 11)))
+        }
+
+        children.append(_popupDivider())
+        children.append(_popupActionRow(label: "Network Settings...") { [self] in
+            setState {
+                activeStatusBarPopup = nil
+                _launchOrFocusApp("settings", extraArgs: ["--pane=network"])
+            }
+        })
+        return _statusPopupPanel(popup: .wifi, children: children)
     }
 
     private func _buildBatteryPopup() -> Widget {
@@ -4709,7 +5244,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     }
     #endif
 
-    private func _launchOrFocusApp(_ appId: String) {
+    /// `extraArgs` reach a first-party app's argv on a fresh launch (e.g.
+    /// Settings' `--pane=network` deep link). If the app is already running
+    /// it is only focused — there is no runtime pane-switch channel.
+    private func _launchOrFocusApp(_ appId: String, extraArgs: [String] = []) {
         // Ignore if this app is already being launched
         if _pendingAppLaunches.contains(appId) { return }
 
@@ -4893,6 +5431,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     executableName: execName,
                     contentWidth: contentW,
                     contentHeight: contentH,
+                    extraArgs: extraArgs,
                     extraEnv: childEnv,
                     onReady: { [self] (texId: Int64) in
                         launchTexId = texId

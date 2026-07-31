@@ -553,6 +553,128 @@ def check_launcher_search() -> None:
     wait_for(lambda: not ask("launcher_state")["open"], "Launchpad to close")
 
 
+def _nmcli(*args: str) -> str:
+    return subprocess.run(["nmcli", *args], capture_output=True,
+                          text=True).stdout.strip()
+
+
+def _net_sim_up() -> bool:
+    sim = REPO / "test/net-sim.sh"
+    if not sim.exists():
+        return False
+    return subprocess.run([str(sim), "status"], capture_output=True).returncode == 0
+
+
+@check("network: the shell reports the wired link NetworkManager sees")
+def check_wired_link() -> None:
+    """The wired half of the popup is read-only state, so the failure it
+    guards against is the quiet one: a device the shell never notices, or a
+    link it calls connected while NetworkManager disagrees. Both look like a
+    perfectly normal panel.
+
+    Asserted against `nmcli` rather than the shell's own snapshot, and skipped
+    (not failed) on a machine with no wired NIC at all.
+    """
+    state = ask("wifi_state")
+    wired = state.get("wired") or {}
+
+    managed = [
+        line.split(":")[0]
+        for line in _nmcli("-t", "-f", "DEVICE,TYPE,STATE",
+                           "device", "status").splitlines()
+        if len(line.split(":")) >= 3
+        and line.split(":")[1] == "ethernet"
+        and line.split(":")[2] != "unmanaged"
+    ]
+    if not managed:
+        raise Skip("no managed wired device on this machine")
+
+    assert wired, f"NetworkManager has wired devices {managed}, the shell reports none"
+    assert wired["device"] in managed, \
+        f"the shell reports wired device {wired['device']!r}, not among {managed}"
+    log(f"the shell reports {wired['device']}")
+
+    # The shell must agree with NetworkManager about whether it is up, and
+    # carry an address whenever it says so.
+    dev_state = next(
+        (line.split(":")[2] for line in _nmcli("-t", "-f", "DEVICE,TYPE,STATE",
+                                               "device", "status").splitlines()
+         if line.split(":")[0] == wired["device"]), "")
+    assert wired["connected"] == (dev_state == "connected"), \
+        f"shell says connected={wired['connected']}, nmcli says {dev_state!r}"
+    if wired["connected"]:
+        assert wired["ip"], f"{wired['device']} reported connected with no address"
+        log(f"connected, {wired['ip']}")
+    else:
+        log(f"not connected ({dev_state})")
+
+
+@check("wifi: joining a simulated network from the status-bar popup")
+def check_wifi_popup_connect() -> None:
+    """The popup is the only network UI in the shell itself, and everything it
+    can do routes through nmcli — so a wrong device, a stale snapshot or an
+    unregistered callback all look the same on screen: a list that never
+    changes. This drives the real path (uinput click → shell → nmcli) and
+    then asks NetworkManager directly, because the shell agreeing with itself
+    proves nothing.
+
+    Needs the simulated radios: `sudo test/net-sim.sh up`. The OPEN network is
+    the one joined — a password would test the shell's text input rather than
+    its network path, and that has its own coverage.
+    """
+    if not _net_sim_up():
+        raise Skip("network lab is down (sudo test/net-sim.sh up)")
+
+    state = ask("wifi_state")
+    if not state["available"]:
+        raise Skip("no managed wifi device")
+    assert state["enabled"], "wifi radio is off"
+
+    # Start from not-joined, so "connected" can only come from this run.
+    _nmcli("connection", "delete", "Starling-Guest")
+
+    # The icon toggles, so a panel someone left open must be closed first —
+    # otherwise this "opens" it shut and every row click lands on the desktop.
+    if state["popup_open"]:
+        drive("key esc")
+        wait_for(lambda: not ask("wifi_state")["popup_open"],
+                 "a previously-open wifi popup to close")
+    drive(f"click {state['icon']['x']:.0f} {state['icon']['y']:.0f}")
+    try:
+        wait_for(lambda: ask("wifi_state")["popup_open"], "the wifi popup to open")
+        wait_for(lambda: "Starling-Guest" in ask("wifi_state")["networks"],
+                 "the simulated network to appear in the scan")
+        log("the popup lists the simulated network")
+
+        # Both coordinates come from the shell: `content.center_x` for the
+        # band rows take taps in, and `rows` for where this particular row
+        # ended up. Nothing here reproduces the popup's layout, so adding a
+        # section to the panel (the wired block did exactly that) cannot
+        # silently send the click to the wrong network.
+        listed = ask("wifi_state")
+        row_y = next((r["y"] for r in listed["rows"]
+                      if r["ssid"] == "Starling-Guest"), None)
+        assert row_y is not None, \
+            f"the shell lists no row for Starling-Guest: {listed['rows']}"
+        drive(f"click {listed['content']['center_x']:.0f} {row_y:.0f}")
+
+        wait_for(lambda: ask("wifi_state")["active"] == "Starling-Guest",
+                 f"the shell to report the network as joined (clicked y={row_y:.0f})",
+                 timeout=45)
+        log("the shell reports the network joined")
+
+        # The assertion that matters: NetworkManager agrees.
+        assert "Starling-Guest" in _nmcli("-t", "-f", "NAME", "connection",
+                                          "show", "--active"), \
+            "the shell says joined but NetworkManager has no such connection"
+        assert ask("wifi_state")["ip"], "joined with no address"
+        log(f"NetworkManager confirms the join ({ask('wifi_state')['ip']})")
+    finally:
+        _nmcli("connection", "down", "Starling-Guest")
+        _nmcli("connection", "delete", "Starling-Guest")
+        drive("key esc")
+
+
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
 

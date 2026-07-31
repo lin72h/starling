@@ -6,6 +6,7 @@ import FlutterSwiftBridge
 import CupertinoIcons
 import Foundation
 import Observation
+import StarlingNet
 
 // MARK: - SettingsApp
 
@@ -282,6 +283,44 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         let s = bloc.state
         var children: [Widget] = []
 
+        // Wired first: on a desktop it is usually the connection that matters,
+        // and it needs no interaction to be useful.
+        if !s.wiredLinks.isEmpty {
+            children.append(_sectionHeader("Wired"))
+            children.append(SizedBox(height: 12))
+            var rows: [Widget] = []
+            for (i, link) in s.wiredLinks.enumerated() {
+                let dev = link.device
+                let isUp = link.connected
+                if i > 0 { rows.append(_divider()) }
+                rows.append(
+                    _settingsRowWithTrailingIcon(
+                        CupertinoIcons.globe,
+                        link.device,
+                        link.summary,
+                        // Without a cable there is nothing a button could do
+                        // but fail, so don't offer one.
+                        link.carrier ? PushButton(
+                            child: Text(isUp ? "Disconnect" : "Connect"),
+                            controlSize: .small,
+                            onPressed: { [self] in
+                                bloc.add(.setWiredConnected(device: dev,
+                                                            connected: !isUp))
+                            }
+                        ) : nil
+                    )
+                )
+                if link.connected {
+                    rows.append(_detailRow("IP Address", link.ipAddress))
+                    rows.append(_detailRow("Gateway", link.gateway))
+                    rows.append(_detailRow("DNS", link.dns.joined(separator: ", ")))
+                    rows.append(_detailRow("MAC", link.mac))
+                }
+            }
+            children.append(_macosGroupBox(rows))
+            children.append(SizedBox(height: 20))
+        }
+
         // Wi-Fi toggle
         children.append(_sectionHeader("Wi-Fi"))
         children.append(SizedBox(height: 12))
@@ -289,7 +328,11 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             _macosGroupBox([
                 _settingsRowWithTrailing(
                     "Wi-Fi",
-                    s.wifiEnabled ? "Connected" : "Off",
+                    // "Connected to X" / "On" / "Off" — radio-on is not
+                    // "Connected"; that is what connectionInfo answers.
+                    s.wifiEnabled
+                        ? (s.connectionInfo.map { "Connected to \($0.ssid)" } ?? "On")
+                        : "Off",
                     MacosSwitch(
                         value: s.wifiEnabled,
                         onChanged: { [self] (val: Bool) in
@@ -301,9 +344,13 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         )
 
         guard s.wifiEnabled else {
+            // Scrolls like the main path: with the wired details above it,
+            // this branch is no longer guaranteed to be short.
             return Padding(
                 padding: EdgeInsets(all: 24),
-                child: Column(crossAxisAlignment: .start, children: children)
+                child: SingleChildScrollView(
+                    child: Column(crossAxisAlignment: .start, children: children)
+                )
             )
         }
 
@@ -314,8 +361,13 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             children.append(SizedBox(height: 12))
             children.append(
                 _macosGroupBox([
-                    _settingsRowWithTrailing(
-                        "\u{2705} \(info.ssid)",
+                    // No emoji in labels — Noto Sans has no glyph for ✅ (or
+                    // the block-element bars), and the fallback renders a
+                    // tofu box. Icons come from CupertinoIcons, which the
+                    // app registers at startup.
+                    _settingsRowWithTrailingIcon(
+                        CupertinoIcons.checkmark_circle_fill,
+                        info.ssid,
                         "\(info.security.isEmpty ? "Open" : info.security)  \u{2022}  Signal: \(info.signal)%",
                         PushButton(
                             child: Text("Disconnect"),
@@ -329,6 +381,8 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                     _detailRow("IP Address", info.ipAddress),
                     _detailRow("Gateway", info.gateway),
                     _detailRow("DNS", info.dns.joined(separator: ", ")),
+                    _detailRow("Interface", info.device.isEmpty
+                        ? "" : "\(info.device)  \u{2022}  \(info.mac)"),
                 ])
             )
         }
@@ -349,10 +403,12 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                 Expanded(child: SizedBox(shrink: ())),
                 GestureDetector(
                     onTap: { [self] in bloc.add(.scanNetworks) },
-                    child: Text(
-                        "\u{21BB} Scan",
-                        style: TextStyle(color: pal.accent, fontSize: 12)
-                    )
+                    child: Row(mainAxisSize: .min, children: [
+                        MacosIcon(icon: CupertinoIcons.arrow_clockwise,
+                                  color: pal.accent, size: 12),
+                        SizedBox(width: 4),
+                        Text("Scan", style: TextStyle(color: pal.accent, fontSize: 12)),
+                    ])
                 ),
             ])
         )
@@ -370,14 +426,16 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             for (i, network) in s.wifiNetworks.enumerated() {
                 let ssid = network.ssid
                 let isOpen = network.isOpen
+                let isSaved = s.savedConnections.contains(ssid)
                 if i > 0 { rows.append(_divider()) }
                 rows.append(
-                    _settingsRowWithTrailing(
-                        "\(network.signalBars)  \(network.ssid)",
-                        network.securityLabel + (network.inUse ? "  \u{2022}  Connected" : ""),
+                    _wifiListRow(
+                        network,
                         network.inUse ? nil : GestureDetector(
                             onTap: { [self] in
-                                if isOpen {
+                                if isOpen || isSaved {
+                                    // Open, or saved with a stored password —
+                                    // no dialog to answer.
                                     bloc.add(.connectToNetwork(ssid: ssid, password: nil))
                                 } else {
                                     _showConnectDialog(context, ssid: ssid)
@@ -418,6 +476,46 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             child: SingleChildScrollView(
                 child: Column(crossAxisAlignment: .start, children: children)
             )
+        )
+    }
+
+    /// Four ascending bars lit by signal strength — drawn rects, not the
+    /// ▂▄▆█ block glyphs: Noto Sans ships no block elements, so the text
+    /// spelling renders as tofu (same fix as the shell popup's bars).
+    private func _signalBars(_ signal: Int) -> Widget {
+        var bars: [Widget] = []
+        let heights: [Double] = [4, 6, 8, 10]
+        let thresholds = [1, 30, 55, 80]
+        for i in 0..<4 {
+            if i > 0 { bars.append(SizedBox(width: 2)) }
+            bars.append(DecoratedBox(
+                decoration: BoxDecoration(
+                    color: signal >= thresholds[i] ? pal.textSecondary : pal.fieldFill,
+                    borderRadius: BorderRadius.all(Radius(circular: 1))
+                ),
+                child: SizedBox(width: 3, height: heights[i])
+            ))
+        }
+        return Row(mainAxisSize: .min, crossAxisAlignment: .end, children: bars)
+    }
+
+    /// An available-network row: signal bars + SSID + security subtitle.
+    private func _wifiListRow(_ network: WifiNetwork, _ trailing: Widget?) -> Widget {
+        return Padding(
+            padding: EdgeInsets(horizontal: 16, vertical: 8),
+            child: Row(children: [
+                _signalBars(network.signal),
+                SizedBox(width: 10),
+                Expanded(
+                    child: Column(crossAxisAlignment: .start, children: [
+                        Text(network.ssid, style: TextStyle(color: pal.textPrimary, fontSize: 13)),
+                        SizedBox(height: 2),
+                        Text(network.securityLabel + (network.inUse ? "  \u{2022}  Connected" : ""),
+                             style: TextStyle(color: pal.textSecondary, fontSize: 11)),
+                    ])
+                ),
+                trailing ?? SizedBox(shrink: ()),
+            ])
         )
     }
 
@@ -710,6 +808,27 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         )
     }
 
+    /// A settings row led by an icon (label, subtitle, trailing widget).
+    private func _settingsRowWithTrailingIcon(
+        _ icon: IconData, _ label: String, _ subtitle: String, _ trailing: Widget?
+    ) -> Widget {
+        return Padding(
+            padding: EdgeInsets(horizontal: 16, vertical: 8),
+            child: Row(children: [
+                MacosIcon(icon: icon, color: pal.accent, size: 15),
+                SizedBox(width: 8),
+                Expanded(
+                    child: Column(crossAxisAlignment: .start, children: [
+                        Text(label, style: TextStyle(color: pal.textPrimary, fontSize: 13)),
+                        SizedBox(height: 2),
+                        Text(subtitle, style: TextStyle(color: pal.textSecondary, fontSize: 11)),
+                    ])
+                ),
+                trailing ?? SizedBox(shrink: ()),
+            ])
+        )
+    }
+
     /// A detail key-value row (used in network info).
     private func _detailRow(_ label: String, _ value: String) -> Widget {
         return Padding(
@@ -760,12 +879,79 @@ class _WifiPasswordDialog: StatefulWidget {
 class _WifiPasswordDialogState: State<StatefulWidget> {
     var password: String = ""
 
+    /// The framework has no editable text field widget, so the dialog types
+    /// the way TextEditorApp does: a FocusNode receives raw KeyData and this
+    /// state keeps the string, while a controller-driven MacosTextField
+    /// (display-only by design) renders the masked dots.
+    private let focus = FocusNode(debugLabel: "WifiPasswordDialog")
+    private let masked = TextEditingController()
+    /// The build context of the last frame — Enter/Escape need one for
+    /// Navigator.pop and arrive outside any build.
+    private weak var _elementContext: Element?
+
+    override func initState() {
+        super.initState()
+        focus.onKeyData = { [weak self] keyData in
+            return self?._handleKey(keyData) ?? false
+        }
+        focus.requestFocus()
+    }
+
+    override func dispose() {
+        focus.dispose()
+        masked.dispose()
+        super.dispose()
+    }
+
+    private func _handleKey(_ keyData: KeyData) -> Bool {
+        guard keyData.type == .down || keyData.type == .repeat else { return false }
+        // Child apps receive X11 keysyms in `logical` (the DRM embedder's
+        // convention — see TextEditorApp's Keysym table). The shell's own
+        // widgets switch on HID `physical`; do not copy that code here.
+        switch keyData.logical {
+        case 0xFF1B:  // Escape — cancel
+            if let ctx = _elementContext { Navigator.pop(ctx) }
+            return true
+        case 0xFF08:  // Backspace
+            if !password.isEmpty {
+                password.removeLast()
+                _syncMask()
+            }
+            return true
+        case 0xFF0D, 0xFF8D:  // Enter / keypad Enter — connect
+            if let ctx = _elementContext { _connect(ctx) }
+            return true
+        default:
+            if let ch = keyData.character,
+               let s = ch.unicodeScalars.first,
+               s.value >= 0x20, s.value != 0x7F {
+                password += ch
+                _syncMask()
+                return true
+            }
+            return false
+        }
+    }
+
+    private func _syncMask() {
+        masked.text = String(repeating: "\u{2022}", count: password.count)
+        setState {}
+    }
+
     override func build(_ context: any BuildContext) -> Widget {
         let dialog = widget as! _WifiPasswordDialog
+        _elementContext = context as? Element
         return MacosAlertDialog(
             appIcon: Text("\u{1F512}", style: TextStyle(fontSize: 32)),
             title: Text("Connect to \(dialog.ssid)"),
-            message: Text("Enter the Wi-Fi password to join this network."),
+            message: Column(mainAxisSize: .min, children: [
+                Text("Enter the Wi-Fi password to join this network."),
+                SizedBox(height: 10),
+                MacosTextField(
+                    controller: masked,
+                    placeholder: "Password"
+                ),
+            ]),
             primaryButton: PushButton(
                 child: Text("Connect"),
                 controlSize: .regular,

@@ -169,6 +169,27 @@ cat > "$ROOT/usr/share/polkit-1/actions/org.starling.app-install.policy" <<'POLI
 </policyconfig>
 POLICY
 
+# NetworkManager: manage wired devices too.
+#
+# Ubuntu's server/cloud base ships
+# /usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf saying
+# `unmanaged-devices=*,except:type:wifi,…` — NM owns the radio and netplan
+# owns the wire. A desktop needs NM to own both, or its network UI shows no
+# ethernet at all on a machine with a cable in it, which reads as a bug in the
+# desktop rather than a policy of the base system. ubuntu-desktop solves this
+# by overwriting that same file; we ship a higher-numbered one instead so the
+# two packages do not fight over a path.
+#
+# Precedence keeps the user in charge: NM reads /usr/lib before /etc, so
+# anything in /etc/NetworkManager/conf.d still wins over this.
+mkdir -p "$ROOT/usr/lib/NetworkManager/conf.d"
+cat > "$ROOT/usr/lib/NetworkManager/conf.d/90-starling-managed-devices.conf" <<'NMCONF'
+# Installed by starling. A desktop manages its own network devices — wired
+# included. Override in /etc/NetworkManager/conf.d/ if you want otherwise.
+[keyfile]
+unmanaged-devices=none
+NMCONF
+
 # --- session launcher --------------------------------------------------------
 cat > "$ROOT/usr/libexec/starling-session" <<'LAUNCHER'
 #!/usr/bin/env bash
@@ -327,7 +348,7 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Starling <dev@starling.build>
 Depends: $DEPS, libseat1, dbus, pkexec
-Recommends: gdm3 | lightdm | sddm, xwayland, x11-utils, xdg-utils
+Recommends: gdm3 | lightdm | sddm, xwayland, x11-utils, xdg-utils, network-manager
 Conflicts: starling-desktop
 Replaces: starling-desktop
 Provides: starling-desktop

@@ -390,6 +390,43 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // The WiFi picture the status-bar popup is drawing right now, so a
+        // test can assert what the panel shows without reading pixels — and,
+        // by comparing it against `nmcli`, that the panel is showing the
+        // system's actual state rather than its own stale copy.
+        if op == "wifi_state" {
+            let snap = shell.networkService.snapshot
+            let icon = shell.statusItemCenter(.wifi)
+            let content = shell.statusPopupContent(.wifi)
+            conn.send(["id": id, "ok": true,
+                       "icon": ["x": icon.x, "y": icon.y],
+                       "content": ["left": content.left, "width": content.width,
+                                   "top": content.top, "center_x": content.centerX],
+                       // Where each listed network's row actually is, so a
+                       // caller clicks what the shell drew instead of
+                       // reproducing its layout (see statusPopupContent).
+                       "rows": shell._wifiRowCenters.map {
+                           ["ssid": $0.ssid, "y": $0.y] as [String: Any]
+                       },
+                       "wired": snap.wired.map {
+                           ["device": $0.device, "connected": $0.connected,
+                            "carrier": $0.carrier, "ip": $0.ipAddress,
+                            "connection": $0.connectionName,
+                            "speed": $0.speed, "mac": $0.mac] as [String: Any]
+                       } ?? [:],
+                       "available": snap.available,
+                       "enabled": snap.wifiEnabled,
+                       "active": snap.active?.ssid ?? "",
+                       "ip": snap.active?.ipAddress ?? "",
+                       "networks": snap.networks.map { $0.ssid },
+                       "saved": Array(snap.savedNames),
+                       "popup_open": shell.activeStatusBarPopup == .wifi,
+                       "password_prompt": shell._wifiPasswordSSID ?? "",
+                       "connecting": shell._wifiConnecting ?? "",
+                       "error": shell._wifiError ?? ""])
+            return
+        }
+
         // The screen as the shell sees it. Tooling that synthesises absolute
         // pointer events needs the PHYSICAL size to set up its device and the
         // DPI to convert; guessing either puts every click somewhere else.

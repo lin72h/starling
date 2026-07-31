@@ -82,6 +82,7 @@ let shellDeps: [Target.Dependency] = [
     "PortalService",
     "ImeBridge",
     .product(name: "StarlingRegistry", package: "StarlingRegistry"),
+    .product(name: "StarlingNet", package: "StarlingNet"),
 ]
 
 let shellSwiftSettings: [SwiftSetting] = [
@@ -183,6 +184,8 @@ let package = Package(
         .package(name: "FlutterSwift", path: "../sdk"),
         // The app registry, shared with the App Store so the two cannot drift.
         .package(name: "StarlingRegistry", path: "../registry"),
+        // The nmcli layer, shared with Settings so the two cannot drift.
+        .package(name: "StarlingNet", path: "../network"),
     ],
     targets: targets,
     cxxLanguageStandard: .cxx20

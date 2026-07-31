@@ -7,10 +7,46 @@ test/run.sh --sdk            + sdk/ tests (see "Known gaps")
 sudo test/run.sh --functional   + live-desktop checks       ~15s, needs a GPU
 sudo test/functional.sh      the live-desktop checks on their own
 test/vm.sh                   T3 release gate: .deb on a clean VM, GDM login
+sudo test/net-sim.sh up      simulated network, for the network checks
 ```
 
 Run the default tier on every change. It needs no compositor, no GPU, no
 network, and no build.
+
+## Simulated network
+
+`test/net-sim.sh up` builds a network lab, wireless and wired, so the network
+UI can be driven end to end without touching the machine's real connection.
+`down` removes every trace. Needs `hostapd` and `dnsmasq-base`; without them
+it exits 3 and the network checks skip rather than fail.
+
+- **Wireless** — `mac80211_hwsim` gives three virtual radios. Two run hostapd
+  (**Starling-Lab**, WPA2, password `starling123`; **Starling-Guest**, open);
+  the third is left to NetworkManager as the client. Scans, associations,
+  leases and wrong-password failures are all real.
+- **Wired** — a veth pair, one end managed by NetworkManager as an ordinary
+  ethernet device (`starling-lan`), the other playing the switch with its own
+  DHCP. This exists so connect/disconnect can be exercised on *something other
+  than the developer's real NIC*: disconnecting that one takes their network
+  with it, and the UI offers no way to tell the two apart.
+
+The functional tier's wifi check joins the **open** network, so it asserts the
+network path rather than the shell's text input; the wired check is read-only
+and compares the shell against `nmcli`.
+
+Two caveats when testing by hand:
+
+- `up` installs a polkit rule for the invoking user, because a shell launched
+  over SSH is not seat-active and polkit would otherwise deny every connect. A
+  real session needs no such rule — **remove it before concluding anything
+  about the shipping path**, or the dev box will tell you a privileged
+  operation works when it only worked for you.
+- Ubuntu's server/cloud base lets NetworkManager manage only WiFi, leaving the
+  wire to netplan, so wired devices appear as `unmanaged` and the desktop
+  correctly shows none. The .deb ships
+  `/usr/lib/NetworkManager/conf.d/90-starling-managed-devices.conf` to fix
+  that; on a dev tree run from source, there is no such file, and the wired
+  check skips on a machine whose ethernet NM does not manage.
 
 ## Why these checks
 
