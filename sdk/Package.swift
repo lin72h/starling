@@ -17,17 +17,58 @@ import Foundation
 // place. Using #filePath makes the path independent of the build invocation's cwd.
 let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 
+// Overridable by environment, because where the engine was built or unpacked is
+// not a property of the package. The default is the layout this repo has always
+// used, so an in-tree build still takes no configuration.
+// Context.environment, not ProcessInfo: it is the API SwiftPM sanctions for
+// manifests and the one it tracks for cache invalidation, so changing the
+// variable actually re-evaluates the manifest. swift-corelibs-foundation reads
+// CURL_LIBRARY_PATH and friends the same way.
+func env(_ key: String, default fallback: String) -> String {
+    guard let v = Context.environment[key], !v.isEmpty else { return fallback }
+    return v
+}
+
+// No toolchain include path here any more: <swift/bridging>, the only toolchain
+// header the bridge headers needed, is vendored by tools/sync-vendored-headers.sh
+// and resolves through the C++ target's own include/ directory. That removed an
+// absolute -I from every Swift target in the package.
+
+// Where the engine binaries are, in precedence order:
+//
+//   1. $FLUTTER_SWIFT_ENGINE_OUT      — explicit override, wins always
+//   2. <package>/engine/lib           — a distribution bundle (tools/make-bundle.sh);
+//                                       this is what an external consumer gets
+//   3. ../engine/src/out/host_debug   — the sibling checkout, i.e. developing in
+//                                       starling-desktop
+//
+// Probing for (2) is what lets one tarball carry the framework and the engine
+// together: a consumer unpacks it, depends on it by path, and needs no engine
+// checkout and no configuration. Note this keeps -L/-rpath as .unsafeFlags, which
+// is legal for a path dependency and is the reason the bundle is distributed as a
+// directory to point at rather than a versioned SwiftPM dependency.
+func firstExistingDir(_ candidates: [String]) -> String? {
+    candidates.first { FileManager.default.fileExists(atPath: $0) }
+}
+
 #if os(Linux)
-let swiftToolchainInclude = NSHomeDirectory() + "/.local/share/swiftly/toolchains/6.2.4/usr/include"
-let engineOutDir = packageDir + "/../engine/src/out/host_debug"
 // On Linux the Swift bridge is merged into libflutter_engine.so.
 let engineLinkName = "flutter_engine"
+let bundledEngineDir = packageDir + "/engine/lib"
+let engineOutDir = env("FLUTTER_SWIFT_ENGINE_OUT",
+    default: firstExistingDir([
+        bundledEngineDir + "/libflutter_engine.so",
+    ]) != nil ? bundledEngineDir : packageDir + "/../engine/src/out/host_debug")
 #else
-let swiftToolchainInclude = NSHomeDirectory() + "/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/include"
-let engineOutDir = packageDir + "/../engine/src/out/ci/host_debug_unopt_arm64"
 // On macOS the Swift bridge is a separate libswift_bridge.dylib that sits
 // alongside FlutterMacOS.framework (the engine itself) in engineOutDir.
 let engineLinkName = "swift_bridge"
+let bundledEngineDir = packageDir + "/engine/lib"
+let engineOutDir = env("FLUTTER_SWIFT_ENGINE_OUT",
+    default: firstExistingDir([
+        bundledEngineDir + "/libswift_bridge.dylib",
+    ]) != nil ? bundledEngineDir
+              : packageDir + "/../engine/src/out/ci/host_debug_unopt_arm64")
 #endif
 
 // The 6.2.4 toolchain is an ubuntu24.04 build, and Ubuntu 26.04 — the base
@@ -36,23 +77,51 @@ let engineLinkName = "swift_bridge"
 // module, so Foundation's C shim dies with "cmath: redefinition of 'acos'".
 // Predefining libstdc++'s <math.h> include guard stops the textual pull;
 // force-including glibc's math.h keeps the C declarations every TU expects.
-// Identical semantics on older glibc, so it is applied uniformly rather than
-// version-gated. Remove once the toolchain ships a native 26.04 build.
+// Identical semantics on older glibc, so it used to be applied uniformly rather
+// than version-gated. Remove once the toolchain ships a native 26.04 build.
 // Full write-up: docs/BUILDING.md.
+//
+// Applying it uniformly turned out to cost more than it looked. These are the
+// last .unsafeFlags on every Swift target, and .unsafeFlags anywhere in a package
+// makes the *whole* package unusable as a versioned dependency (SwiftPM rejects
+// it before compiling). So they are now added only where the clash exists, which
+// leaves macOS and pre-26.04 Linux consumers with a publishable package and makes
+// this self-healing once the toolchain is fixed.
+//
+// libstdc++ 15 is the discriminator: 24.04 ships 13/14, 26.04 ships 15. That is a
+// heuristic for a known-bad pairing, not a feature test — a compile probe would be
+// exact but manifests are evaluated constantly and must stay cheap. Override with
+// FLUTTER_SWIFT_GLIBC_MATH_COMPAT=1 or =0 when it guesses wrong.
+func needsGlibcMathCompat() -> Bool {
+    if let forced = ProcessInfo.processInfo.environment["FLUTTER_SWIFT_GLIBC_MATH_COMPAT"],
+       !forced.isEmpty {
+        return forced != "0"
+    }
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: "/usr/include/math.h") else { return false }
+    let newest = ((try? fm.contentsOfDirectory(atPath: "/usr/include/c++")) ?? [])
+        .compactMap { Int($0) }.max() ?? 0
+    return newest >= 15
+}
+
 #if os(Linux)
-let glibcMathCompat = ["-Xcc", "-D_GLIBCXX_MATH_H", "-Xcc", "-include", "-Xcc", "/usr/include/math.h"]
+let glibcMathCompat = needsGlibcMathCompat()
+    ? ["-Xcc", "-D_GLIBCXX_MATH_H", "-Xcc", "-include", "-Xcc", "/usr/include/math.h"]
+    : []
 #else
 let glibcMathCompat: [String] = []
 #endif
 
-// What every Swift target hands the clang importer: the toolchain's own C
-// headers plus the compat flags above.
-let toolchainSwiftCFlags: [String] = ["-Xcc", "-I\(swiftToolchainInclude)"] + glibcMathCompat
+// C++ interop plus, only where it is actually needed, the glibc compat flags.
+// Built as a list so that when the compat flags are empty no .unsafeFlags setting
+// is emitted at all — an empty one would still taint the package.
+let cxxInteropSettings: [SwiftSetting] = glibcMathCompat.isEmpty
+    ? [.interoperabilityMode(.Cxx)]
+    : [.interoperabilityMode(.Cxx), .unsafeFlags(glibcMathCompat)]
 
-// Bridge headers come from the engine checkout, reached through the `engine`
-// symlink at the repo root (see bootstrap.sh). Absolute so the flag stays
-// correct when this package is built as a consumer's dependency.
-let cxxBridgeInclude = packageDir + "/../engine/src/flutter/lib/ui/swift/include"
+// Bridge headers are vendored under Sources/FlutterSwiftBridgeCxx/include/engine
+// (tools/sync-vendored-headers.sh), so compiling needs no engine checkout — the
+// engine is a link-time dependency only.
 
 // --- Products ----------------------------------------------------------------
 
@@ -115,10 +184,7 @@ var targets: [Target] = [
     .target(
         name: "FlutterSwiftBridge",
         dependencies: ["FlutterSwiftBridgeCxx"],
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ],
+        swiftSettings: cxxInteropSettings,
         linkerSettings: [
             .unsafeFlags([
                 "-L\(engineOutDir)", "-l\(engineLinkName)",
@@ -128,21 +194,25 @@ var targets: [Target] = [
     ),
     // C++ bridge module with modulemap pointing to engine headers
     .target(
-        name: "FlutterSwiftBridgeCxx",
-        cxxSettings: [
-            .unsafeFlags(["-isystem", swiftToolchainInclude]),
-            .unsafeFlags(["-I", cxxBridgeInclude]),
-        ]
+        name: "FlutterSwiftBridgeCxx"
     ),
     // Flutter Framework target (Swift port of Flutter framework)
     .target(
         name: "Flutter",
         dependencies: flutterDeps,
         path: "Sources/Flutter",
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-            .unsafeFlags(["-strict-concurrency=minimal"]),
+        // Language mode 5 restores the minimal concurrency checking this target
+        // predates (tools-version 6.0 defaults every target to mode 6). It replaces
+        // .unsafeFlags(["-strict-concurrency=minimal"]) and is a *safe* setting.
+        //
+        // Mode 5 is not a pure concurrency knob, though: it also turns bare regex
+        // literals back off, and Foundation/Print.swift uses one
+        // (`/^ *(?:[-+*] |[0-9]+[.):] )?/`), which fails to parse as
+        // "unary operator cannot be separated from its operand". Re-enabling the
+        // upcoming feature is itself safe, so the pair costs nothing.
+        swiftSettings: cxxInteropSettings + [
+            .swiftLanguageMode(.v5),
+            .enableUpcomingFeature("BareSlashRegexLiterals"),
         ]
     ),
     // SwiftRuntime target -- Swift delegate that receives Shell->Framework calls
@@ -150,10 +220,7 @@ var targets: [Target] = [
         name: "SwiftRuntime",
         dependencies: ["FlutterSwiftBridge"],
         path: "Sources/SwiftRuntime",
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ]
+        swiftSettings: cxxInteropSettings
     ),
     // CupertinoIcons -- Apple SF Symbols-style icon set (1,322 icons + TTF font)
     .target(
@@ -163,19 +230,13 @@ var targets: [Target] = [
         resources: [
             .copy("Resources/CupertinoIcons.ttf"),
         ],
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ]
+        swiftSettings: cxxInteropSettings
     ),
     // Test targets
     .testTarget(
         name: "FlutterSwiftBridgeTests",
         dependencies: ["FlutterSwiftBridge"],
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ],
+        swiftSettings: cxxInteropSettings,
         linkerSettings: [
             .unsafeFlags([
                 "-L\(engineOutDir)", "-l\(engineLinkName)",
@@ -187,10 +248,7 @@ var targets: [Target] = [
         name: "FlutterTests",
         dependencies: ["Flutter"],
         path: "Tests/FlutterTests",
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ],
+        swiftSettings: cxxInteropSettings,
         linkerSettings: [
             .unsafeFlags([
                 "-L\(engineOutDir)", "-l\(engineLinkName)",
@@ -202,10 +260,7 @@ var targets: [Target] = [
         name: "SwiftRuntimeTests",
         dependencies: ["SwiftRuntime", "FlutterSwiftBridge"],
         path: "Tests/SwiftRuntimeTests",
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ],
+        swiftSettings: cxxInteropSettings,
         linkerSettings: [
             .unsafeFlags([
                 "-L\(engineOutDir)", "-l\(engineLinkName)",
@@ -259,22 +314,21 @@ targets += [
         dependencies: ["Flutter", "SwiftRuntime", "FlutterSwiftBridge",
                        "FlutterEmbedderBridge", "GLFWBridge"],
         path: "Sources/FlutterRunner",
-        swiftSettings: [
-            .interoperabilityMode(.Cxx),
-            .unsafeFlags(toolchainSwiftCFlags),
-        ],
+        swiftSettings: cxxInteropSettings,
         linkerSettings: [
             .linkedLibrary("glfw"),
         ]
     ),
-    // Clang module wrapping GBM + SCM_RIGHTS + EGL DMA-BUF import helpers
+    // Clang module wrapping GBM + SCM_RIGHTS + EGL DMA-BUF import helpers.
+    // No cSettings: this target used to carry -I/usr/include/libdrm, but it
+    // includes only <gbm.h>, EGL, GLES2 and libc — nothing here reaches a libdrm
+    // header, directly or transitively. The flag was dead weight.
     .target(
         name: "DmaBufBridge",
-        cSettings: [
-            .unsafeFlags(["-I/usr/include/libdrm"]),
-        ],
         linkerSettings: [
-            .unsafeFlags(["-lgbm", "-lEGL", "-lGLESv2"]),
+            .linkedLibrary("gbm"),
+            .linkedLibrary("EGL"),
+            .linkedLibrary("GLESv2"),
         ]
     ),
 ]
