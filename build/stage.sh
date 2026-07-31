@@ -120,10 +120,17 @@ for a in $APPS; do
     for r in "$REPO/apps/$a/.build/$TRIPLE/$CONFIG/"*.resources; do
         [ -d "$r" ] && cp -r "$r" "$LIB/apps/"
     done
-    # Some apps (AppStoreApp) link their own libFlutterShared.so build product;
-    # $ORIGIN is the apps/ dir, so it must sit alongside them.
-    fs="$REPO/apps/$a/.build/$TRIPLE/$CONFIG/libFlutterShared.so"
-    [ -f "$fs" ] && install -m644 "$fs" "$LIB/apps/"
+    # NOTE: the app's own libFlutterShared.so build product is deliberately
+    # NOT staged. Every package compiles its own copy of the framework, so
+    # each app has one — and installing them here meant the LAST app in this
+    # loop supplied the framework every child app loaded ($ORIGIN is the
+    # shared apps/ dir). Nine apps silently ran whichever build happened to
+    # be staged last, and a framework fix rebuilt into the shell (or into the
+    # app under test) changed nothing on screen: the instrumented build was
+    # never the loaded one, which cost a debugging session a full round of
+    # wrong conclusions. Apps get the SHELL's build via the symlink loop
+    # below, the same way they already get libflutter_engine.so — one
+    # framework per staged tree, from one source.
     # Vendored per-app libraries (ImageViewerApp's PDFium).
     for dep in "$REPO/apps/$a/.deps/"*/lib/*.so; do
         [ -f "$dep" ] && install -m644 "$dep" "$LIB/apps/"
