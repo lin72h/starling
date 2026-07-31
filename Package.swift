@@ -58,6 +58,24 @@ func dirContaining(_ candidates: [(dir: String, marker: String)]) -> String? {
     candidates.first { FileManager.default.fileExists(atPath: $0.dir + "/" + $0.marker) }?.dir
 }
 
+// Canonicalise before this reaches a -L or an -rpath. The candidates above are
+// built with "..", and this package is often reached through a symlink (the
+// desktop points its repo-root `sdk` at a checkout of this repo). Clang
+// normalises -L paths *lexically*: it rewrites `<repo>/sdk/../starling-engine`
+// to `<repo>/starling-engine`, which is a different directory whenever `sdk` is
+// a symlink pointing outside `<repo>` — and it is. The kernel resolves the
+// original correctly, ld resolves it correctly, and `ls` shows the library
+// sitting there, so the failure reads as an impossible
+// "cannot find -lflutter_engine" against a -L you can see is right.
+//
+// resolvingSymlinksInPath(), not .standardized: standardized does the same
+// lexical collapse clang does and reproduces the bug exactly.
+func canonical(_ path: String) -> String {
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: path) else { return url.path }
+    return url.resolvingSymlinksInPath().path
+}
+
 #if os(Linux)
 // On Linux the Swift bridge is merged into libflutter_engine.so.
 let engineLinkName = "flutter_engine"
@@ -79,9 +97,9 @@ let engineCandidates = [
 ]
 #endif
 
-let engineOutDir = env("FLUTTER_SWIFT_ENGINE_OUT",
+let engineOutDir = canonical(env("FLUTTER_SWIFT_ENGINE_OUT",
     default: dirContaining(engineCandidates.map { ($0, engineMarker) })
-             ?? engineCandidates[0])
+             ?? engineCandidates[0]))
 
 // The 6.2.4 toolchain is an ubuntu24.04 build, and Ubuntu 26.04 — the base
 // platform — pairs glibc 2.43 with libstdc++ 15. That combination makes the
