@@ -171,7 +171,7 @@ final class FlowDelegateTests: XCTestCase {
         let renderFlow = RenderFlow(delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
         // Calling paint invokes delegate.paintChildren
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
         XCTAssertTrue(delegate.paintChildrenCalled)
     }
@@ -794,7 +794,7 @@ final class RenderFlowPaintTests: XCTestCase {
         let renderFlow = RenderFlow(delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
         XCTAssertTrue(delegate.paintChildrenCalled)
     }
@@ -806,7 +806,7 @@ final class RenderFlowPaintTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData
@@ -829,7 +829,7 @@ final class RenderFlowPaintTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData
@@ -853,7 +853,7 @@ final class RenderFlowPaintTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData
@@ -873,7 +873,7 @@ final class RenderFlowPaintTests: XCTestCase {
         childParentData._transform = Matrix4.identity()
 
         // Paint (TestFlowDelegate doesn't paint any children)
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         // After paint, transforms should be cleared since delegate doesn't paint the child
@@ -895,7 +895,7 @@ final class RenderFlowPaintTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData
@@ -910,7 +910,7 @@ final class RenderFlowPaintTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         XCTAssertNotNil(delegate.lastPaintingContext)
@@ -930,7 +930,7 @@ final class RenderFlowHitTestTests: XCTestCase {
         let renderFlow = RenderFlow(delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let result = BoxHitTestResult()
@@ -946,7 +946,7 @@ final class RenderFlowHitTestTests: XCTestCase {
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
         // TestFlowDelegate doesn't actually paint children
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let result = BoxHitTestResult()
@@ -973,7 +973,7 @@ final class RenderFlowApplyPaintTransformTests: XCTestCase {
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
         // Paint to set transforms
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         // The child was painted with identity transform, verify it is stored
@@ -990,7 +990,7 @@ final class RenderFlowApplyPaintTransformTests: XCTestCase {
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
         // Paint without painting the child (TestFlowDelegate doesn't paint children)
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         // No child transform was set
@@ -1016,7 +1016,7 @@ final class RenderFlowApplyPaintTransformTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         // Verify the transform was stored
@@ -1170,7 +1170,7 @@ final class FlowPaintingContextDefaultExtensionsTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // This invokes paintChild(0, transform:, opacity:) via the delegate
         renderFlow.paint(context, .zero)
 
@@ -1193,7 +1193,7 @@ final class FlowPaintingContextDefaultExtensionsTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData
@@ -1218,7 +1218,7 @@ final class FlowPaintingContextDefaultExtensionsTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData
@@ -1241,7 +1241,7 @@ final class FlowPaintingContextDefaultExtensionsTests: XCTestCase {
         let renderFlow = RenderFlow(children: [child], delegate: delegate)
         renderFlow.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderFlow.paint(context, .zero)
 
         let childParentData = child.parentData as! FlowParentData

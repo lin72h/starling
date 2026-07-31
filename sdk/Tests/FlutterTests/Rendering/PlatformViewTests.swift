@@ -580,7 +580,7 @@ final class PlatformViewRenderBoxPaintTests: XCTestCase {
             gestureRecognizers: []
         )
         renderBox.layout(BoxConstraints.tight(Size(100, 100)))
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash; creates a PlatformViewLayer internally.
         renderBox.paint(context, .zero)
     }
@@ -707,7 +707,7 @@ final class RenderAndroidViewPaintTests: XCTestCase {
         let renderBox = RenderAndroidView(viewController: controller)
         renderBox.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // textureId is nil, so paint should return early.
         renderBox.paint(context, .zero)
         // No crash means success.
@@ -980,7 +980,7 @@ final class RenderDarwinPlatformViewTests: XCTestCase {
         )
         renderBox.layout(BoxConstraints.tight(Size(100, 100)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         renderBox.paint(context, .zero)
         // No crash means success.
     }

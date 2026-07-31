@@ -1226,7 +1226,7 @@ final class RenderIndexedStackPaintTests: XCTestCase {
         )
         stack.layout(BoxConstraints.tight(Size(200, 200)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash; simply returns early
         stack.paintStack(context, .zero)
     }
@@ -1243,7 +1243,7 @@ final class RenderIndexedStackPaintTests: XCTestCase {
         )
         stack.layout(BoxConstraints.tight(Size(200, 200)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should paint only child1
         stack.paintStack(context, .zero)
     }
@@ -1260,7 +1260,7 @@ final class RenderIndexedStackPaintTests: XCTestCase {
         )
         stack.layout(BoxConstraints.tight(Size(200, 200)))
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should paint only child0
         stack.paintStack(context, .zero)
     }
