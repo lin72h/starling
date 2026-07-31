@@ -85,6 +85,9 @@ if [ "$PLATFORM" = linux ]; then
     # The DRM embedder is what FlutterDRMBridge binds; optional for consumers
     # that only use the framework, so do not fail without it.
     [ -f "$E/libflutter_linux_drm.so" ] && install -m644 "$E/libflutter_linux_drm.so" "$DEST/engine/lib/"
+    # The GTK embedder is what FlutterGTK binds (desktop-session host); same
+    # deal — optional.
+    [ -f "$E/libflutter_linux_gtk.so" ] && install -m644 "$E/libflutter_linux_gtk.so" "$DEST/engine/lib/"
 else
     cp -R "$E/FlutterMacOS.framework" "$DEST/engine/lib/"
     install -m644 "$E/libswift_bridge.dylib" "$DEST/engine/lib/"

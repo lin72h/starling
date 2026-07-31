@@ -167,6 +167,13 @@ products += [
     .library(name: "FlutterEmbedderBridge", targets: ["FlutterEmbedderBridge"]),
     .library(name: "FlutterDRMBridge", targets: ["FlutterDRMBridge"]),
     .library(name: "DmaBufBridge", targets: ["DmaBufBridge"]),
+    // Desktop-session host: the engine's own GTK embedder (FlView/FlEngine in
+    // Swift mode) instead of the Starling shell — window management, input,
+    // IME and a11y come from the same code path real Flutter Linux apps use.
+    // Separate product so shell/DRM consumers don't inherit GTK linkage.
+    .library(name: "FlutterGTK", targets: ["FlutterGTK"]),
+    // The demo, runnable on a stock desktop: swift run -c release FlutterDemoApp
+    .executable(name: "FlutterDemoApp", targets: ["FlutterDemoApp"]),
     // One shared dylib carrying the whole framework stack (plus the C shim
     // modules apps import directly). Apps that link this single product get
     // binaries with only their own code — the packaged desktop ships one
@@ -331,6 +338,56 @@ targets += [
             .linkedLibrary("gbm"),
             .linkedLibrary("EGL"),
             .linkedLibrary("GLESv2"),
+        ]
+    ),
+    // System GTK 3 via pkg-config — supplies GTK/GLib include paths and libs
+    // to dependents without hardcoding multiarch paths.
+    .systemLibrary(
+        name: "CGtk3",
+        path: "Sources/CGtk3",
+        pkgConfig: "gtk+-3.0",
+        providers: [.apt(["libgtk-3-dev"])]
+    ),
+    // C glue around the engine's GTK embedder: FlView in a GtkWindow with the
+    // engine in Swift mode. The vendored flutter_linux headers stay inside
+    // this target — GTK types never reach the C++-interop importer.
+    .target(
+        name: "FlutterGTKBridge",
+        dependencies: ["CGtk3"],
+        linkerSettings: [
+            .unsafeFlags([
+                "-L\(engineOutDir)", "-lflutter_linux_gtk",
+                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
+            ]),
+        ]
+    ),
+    // The desktop-session host: the real Flutter Linux embedder, Swift-driven.
+    .target(
+        name: "FlutterGTK",
+        dependencies: [
+            "Flutter",
+            "FlutterSwiftBridge",
+            .target(name: "SwiftRuntime"),
+            .target(name: "FlutterGTKBridge"),
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
+    ),
+    // The demo app (rotating boxes + frame-time graph) as a runnable proof
+    // that the standalone framework can present on a normal desktop.
+    .executableTarget(
+        name: "FlutterDemoApp",
+        dependencies: [
+            "Flutter",
+            "FlutterGTK",
+            "FlutterSwiftBridge",
+            .target(name: "SwiftRuntime"),
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: [
+            .unsafeFlags([
+                "-L\(engineOutDir)", "-l\(engineLinkName)",
+                "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
+            ]),
         ]
     ),
 ]

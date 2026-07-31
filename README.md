@@ -22,6 +22,8 @@ thin platform bindings needed to host an engine — nothing desktop-specific.
 | `FlutterEmbedderBridge` | clang module over the engine's `embedder.h` |
 | `FlutterDRMBridge` | clang module over the DRM/KMS embedder (`fl_drm_view.h`) |
 | `DmaBufBridge` | GBM + `SCM_RIGHTS` + EGL dma-buf import helpers |
+| `FlutterGTK` | desktop-session host: the engine's GTK embedder (`FlView` in a `GtkWindow`) running in Swift mode, with `FlutterGTKBridge` (C glue + vendored `flutter_linux` headers) and `CGtk3` (system GTK 3 via pkg-config) underneath |
+| `FlutterDemoApp` | runnable demo — see *The demo app* below |
 | `FlutterMacOSBridge` | macOS embedder bindings (unverified — see *Status*) |
 
 `FlutterShared` is a dynamic product bundling the whole stack into one
@@ -73,6 +75,42 @@ Foundation's C shim in *your* compilation context and hits the clash there. This
 is easy to miss, because a machine with a locally patched
 `/usr/include/c++/15/math.h` never sees it — that artifact produced one wrong
 conclusion here already.
+
+## The demo app
+
+```bash
+swift run -c release FlutterDemoApp
+```
+
+opens the framework's demo — rotating boxes plus a frame-time graph — in a
+window on an ordinary desktop session (GNOME Wayland, KDE, X11). The host is
+`FlutterGTK`: the engine's **own GTK embedder** (`FlView` inside a
+`GtkWindow`), started in Swift mode via `fl_engine_set_swift_runtime`, so
+window management, pointer/keyboard/touch input, IME and accessibility come
+from the exact code path a real Flutter Linux app uses — the Swift framework
+replaces only the Dart isolate. Clicking drops a marker square at the pointer,
+a one-glance check that input reaches the framework's gesture layer; the tap
+is also logged to stdout for scripted verification.
+
+Requirements beyond the engine: `libgtk-3-dev` to build (found via
+pkg-config), GTK 3 at runtime, and `libflutter_linux_gtk.so` next to
+`libflutter_engine.so` — this fork builds it with the embedder linked
+*dynamically* against `libflutter_engine.so` (upstream compiles a private
+copy in, which would put two engines in a Swift app's process; see
+`shell/platform/linux/BUILD.gn` in the engine).
+
+Engine data resolves the standard Flutter bundle way:
+`<executable dir>/data/{icudtl.dat,flutter_assets}`. Running from a build
+tree, the demo links that up on first run from the sibling engine checkout
+(override with `$FLUTTER_SWIFT_ENGINE_OUT`). To run on a machine without a
+toolchain, ship the binary with `data/`, both engine libraries and the Swift
+runtime libraries, and set `LD_LIBRARY_PATH` (or link with a matching rpath).
+
+Known gaps, both harmless to the demo: the framework port does not yet answer
+`System.requestAppExit` (the host closes the window directly instead of
+letting the framework veto), and its `flutter/keyevent` channel replies are
+not the JSON the GTK keyboard handler expects, so focus changes log a
+`Unable to retrieve framework response` warning.
 
 ## Consuming it
 

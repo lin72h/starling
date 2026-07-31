@@ -102,6 +102,26 @@ for entry in "${SINGLES[@]}"; do
     one "$SRC/$rel" "$dest/$(basename "$rel")"
 done
 
+# The GTK embedder's public header set (fl_view.h, fl_engine.h, …), vendored
+# whole. NOT under include/: only the bridge's own C glue includes them (with
+# FLUTTER_LINUX_COMPILATION defined, the same way the embedder compiles
+# itself), so they stay out of the Swift-visible module — GTK types never
+# reach the C++-interop importer. The set is closed over quoted relative
+# includes plus system GTK/GLib headers.
+GTK_SRC="flutter/shell/platform/linux/public/flutter_linux"
+GTK_DEST="Sources/FlutterGTKBridge/flutter_linux"
+for f in "$SRC/$GTK_SRC"/*.h; do
+    one "$f" "$GTK_DEST/$(basename "$f")"
+done
+for stale in $(cd "$GTK_DEST" 2>/dev/null && ls -1 *.h 2>/dev/null || true); do
+    [ -f "$SRC/$GTK_SRC/$stale" ] && continue
+    if [ "$CHECK" = 1 ]; then
+        echo "stale: flutter_linux/$stale is vendored but gone from the engine"; drift=1
+    else
+        rm -f "$GTK_DEST/$stale"; echo "removed stale flutter_linux/$stale"
+    fi
+done
+
 # --- TOOLCHAIN --------------------------------------------------------------
 #
 # <swift/bridging> is the only toolchain header the bridge headers need, and it

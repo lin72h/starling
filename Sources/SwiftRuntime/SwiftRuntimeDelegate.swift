@@ -93,6 +93,11 @@ public class SwiftRuntimeDelegate: @unchecked Sendable {
   ///
   /// - Parameter packet: The pointer data packet containing pointer events.
   public func dispatchPointerDataPacket(_ packet: PointerDataPacket) {
+    if ProcessInfo.processInfo.environment["FLUTTER_SWIFT_DEBUG_POINTER"] != nil,
+       let first = packet.data.first {
+      FileHandle.standardError.write(Data(
+        "[SwiftRuntimeDelegate] pointer packet n=\(packet.data.count) change=\(first.change) x=\(first.physicalX) y=\(first.physicalY) view=\(first.viewId) handler=\(platformDispatcher.onPointerDataPacket != nil)\n".utf8))
+    }
     platformDispatcher.onPointerDataPacket?(packet)
   }
 
