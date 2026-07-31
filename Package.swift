@@ -253,6 +253,10 @@ products += [
     .library(name: "FlutterGTK", targets: ["FlutterGTK"]),
     // The demo, runnable on a stock desktop: swift run -c release FlutterDemoApp
     .executable(name: "FlutterDemoApp", targets: ["FlutterDemoApp"]),
+    // Ports of famous Flutter sample apps, hosted the same way as the demo.
+    .executable(name: "CounterApp", targets: ["CounterApp"]),
+    .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
+    .executable(name: "TodosApp", targets: ["TodosApp"]),
     // One shared dylib carrying the whole framework stack (plus the C shim
     // modules apps import directly). Apps that link this single product get
     // binaries with only their own code — the packaged desktop ships one
@@ -455,6 +459,61 @@ targets += [
             "FlutterGTK",
             "FlutterSwiftBridge",
             .target(name: "SwiftRuntime"),
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
+    ),
+]
+
+// The ported example apps, appended separately: one more entry in the array
+// literal above tips the manifest type-checker over its time budget.
+targets += [
+    // Shared plumbing for the ported example apps: the engine-data bootstrap,
+    // the GTK run sequence, and the Material-look chrome the classic samples
+    // are styled with.
+    .target(
+        name: "ExampleHost",
+        dependencies: [
+            "Flutter",
+            "FlutterGTK",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+            .target(name: "SwiftRuntime"),
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
+    ),
+    // The classic `flutter create` counter, ported from Dart.
+    .executableTarget(
+        name: "CounterApp",
+        dependencies: [
+            "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
+    ),
+    // The "Write your first Flutter app" codelab (startup_namer), ported.
+    .executableTarget(
+        name: "StartupNamerApp",
+        dependencies: [
+            "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
+    ),
+    // The todo-list classic, on the framework's FluentUI widget set.
+    .executableTarget(
+        name: "TodosApp",
+        dependencies: [
+            "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
         ],
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
