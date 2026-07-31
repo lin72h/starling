@@ -40,10 +40,18 @@ CXX_SRC="flutter/lib/ui/swift/include"
 CHECK=0
 if [ "${1:-}" = "--check" ]; then CHECK=1; shift; fi
 
-ENGINE="${1:-${ENGINE_ROOT:-$SDK/../engine}}"
+# Where the engine checkout is. Explicit argument or $ENGINE_ROOT wins; otherwise
+# try the two layouts that exist in practice — an `engine` symlink beside this
+# package, and a sibling clone of starling-engine.
+ENGINE="${1:-${ENGINE_ROOT:-}}"
+if [ -z "$ENGINE" ]; then
+    for candidate in "$SDK/../engine" "$SDK/../starling-engine/engine"; do
+        if [ -d "$candidate/src/$CXX_SRC" ]; then ENGINE="$candidate"; break; fi
+    done
+fi
 SRC="$ENGINE/src"
-if [ ! -d "$SRC/$CXX_SRC" ]; then
-    echo "error: no engine bridge headers at $SRC/$CXX_SRC" >&2
+if [ -z "$ENGINE" ] || [ ! -d "$SRC/$CXX_SRC" ]; then
+    echo "error: no engine bridge headers at ${SRC:-<unset>}/$CXX_SRC" >&2
     echo "       pass the engine root as an argument, or set ENGINE_ROOT" >&2
     exit 1
 fi

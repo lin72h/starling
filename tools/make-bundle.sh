@@ -22,7 +22,16 @@
 set -euo pipefail
 
 SDK="$(cd "$(dirname "$0")/.." && pwd)"
-REPO="$(cd "$SDK/.." && pwd)"
+
+# This package is standalone, so the engine checkout is not at a fixed offset any
+# more. Same candidates as tools/sync-vendored-headers.sh: an `engine` symlink
+# beside the package, or a sibling clone of starling-engine.
+ENGINE_ROOT="${ENGINE_ROOT:-}"
+if [ -z "$ENGINE_ROOT" ]; then
+    for candidate in "$SDK/../engine" "$SDK/../starling-engine/engine"; do
+        if [ -d "$candidate/src" ]; then ENGINE_ROOT="$candidate"; break; fi
+    done
+fi
 
 CONFIG=release
 case "${1:-}" in
@@ -42,7 +51,7 @@ DEST="$OUT/$NAME"
 
 # The engine build to take binaries from. host_debug is what the desktop links
 # against day to day; host_release is what a consumer should ship.
-E="${FLUTTER_SWIFT_ENGINE_OUT:-$REPO/engine/src/out/host_$CONFIG}"
+E="${FLUTTER_SWIFT_ENGINE_OUT:-$ENGINE_ROOT/src/out/host_$CONFIG}"
 if [ ! -f "$E/libflutter_engine.so" ] && [ ! -f "$E/libswift_bridge.dylib" ]; then
     echo "error: no engine binaries in $E" >&2
     echo "       build the engine first (see docs/BUILDING.md), or set" >&2
@@ -62,14 +71,13 @@ rm -rf "$DEST"
 mkdir -p "$DEST/engine/lib" "$DEST/engine/share"
 
 # --- framework source -------------------------------------------------------
-# Sources/, Tests/ and tools/ go as-is; .deps carries the vendored GLFW that
-# GLFWBridge.h reaches by relative path. .build is deliberately excluded — a
+# Sources/, Tests/ and tools/ go as-is. .build is deliberately excluded — a
 # consumer's toolchain differs from ours.
+# README.md is not copied: the bundle gets its own, written below.
 for item in Package.swift Sources Tests tools LICENSE; do
     [ -e "$SDK/$item" ] || { echo "error: missing $item" >&2; exit 1; }
     cp -r "$SDK/$item" "$DEST/"
 done
-[ -d "$SDK/.deps" ] && cp -r "$SDK/.deps" "$DEST/"
 
 # --- engine binaries --------------------------------------------------------
 if [ "$PLATFORM" = linux ]; then
@@ -86,7 +94,21 @@ fi
 # icudtl.dat and flutter_assets are needed at *run* time, not link time, but a
 # consumer with neither cannot start an engine, so they travel with the bundle.
 [ -f "$E/icudtl.dat" ] && install -m644 "$E/icudtl.dat" "$DEST/engine/share/"
-[ -d "$REPO/build/flutter_assets" ] && cp -r "$REPO/build/flutter_assets" "$DEST/engine/share/"
+
+# flutter_assets: the vendored copy in Resources/ normally, overridable, with the
+# desktop's copy as a fallback for anyone building from a starling checkout.
+ASSETS="${FLUTTER_SWIFT_ASSETS:-}"
+if [ -z "$ASSETS" ]; then
+    for candidate in "$SDK/Resources/flutter_assets" "$SDK/../starling/build/flutter_assets"; do
+        if [ -d "$candidate" ]; then ASSETS="$candidate"; break; fi
+    done
+fi
+if [ -n "$ASSETS" ]; then
+    cp -r "$ASSETS" "$DEST/engine/share/"
+else
+    echo "warning: no flutter_assets found; the bundle cannot start an engine" >&2
+    echo "         set FLUTTER_SWIFT_ASSETS to an asset bundle" >&2
+fi
 
 cat > "$DEST/README.md" <<EOF
 # FlutterSwift — $PLATFORM/$ARCH bundle ($CONFIG engine)
@@ -96,24 +118,39 @@ No engine checkout or toolchain configuration needed.
 
 ## Use it
 
-Two lines in your \`Package.swift\`, and nothing else:
-
 \`\`\`swift
 dependencies: [.package(path: "/opt/$NAME")],
 targets: [
     .executableTarget(
         name: "App",
-        dependencies: [.product(name: "Flutter", package: "$NAME")],
-        // Required. The framework is C++-interop; this is not inherited from the
-        // dependency, and without it you get:
-        //   module 'FlutterSwiftBridgeCxx' requires feature 'cplusplus'
-        swiftSettings: [.interoperabilityMode(.Cxx)]
+        dependencies: [
+            .product(name: "Flutter", package: "$NAME"),
+            // The dart:ui types — Offset, Size, Rect, Paint, Canvas. Separate
+            // from Flutter, which does not re-export them.
+            .product(name: "FlutterSwiftBridge", package: "$NAME"),
+        ],
+        swiftSettings: [
+            // Required. The framework is C++-interop; this is not inherited from
+            // the dependency, and without it you get:
+            //   module 'FlutterSwiftBridgeCxx' requires feature 'cplusplus'
+            .interoperabilityMode(.Cxx),
+            // Required on Ubuntu 26.04 (glibc 2.43 + libstdc++ 15), and harmless
+            // elsewhere. SwiftPM does not propagate swiftSettings from a
+            // dependency, so this package applying it internally does nothing for
+            // you: your own C++-interop targets pull Foundation's C shim in their
+            // own context and hit "cmath: redefinition of 'acos'" without it.
+            // Drop it once swift.org ships a native 26.04 toolchain.
+            .unsafeFlags(["-Xcc", "-D_GLIBCXX_MATH_H",
+                          "-Xcc", "-include", "-Xcc", "/usr/include/math.h"]),
+        ]
     ),
 ]
 \`\`\`
 
 \`\`\`swift
 import Flutter
+import FlutterSwiftBridge
+
 print(Offset(3, 4).distance)   // 5.0
 \`\`\`
 

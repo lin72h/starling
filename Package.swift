@@ -39,37 +39,49 @@ func env(_ key: String, default fallback: String) -> String {
 //   1. $FLUTTER_SWIFT_ENGINE_OUT      — explicit override, wins always
 //   2. <package>/engine/lib           — a distribution bundle (tools/make-bundle.sh);
 //                                       this is what an external consumer gets
-//   3. ../engine/src/out/host_debug   — the sibling checkout, i.e. developing in
-//                                       starling-desktop
+//   3. a sibling engine checkout      — developing on the engine and the framework
+//                                       together, either through an `engine`
+//                                       symlink beside this package or a sibling
+//                                       clone of starling-engine
 //
 // Probing for (2) is what lets one tarball carry the framework and the engine
 // together: a consumer unpacks it, depends on it by path, and needs no engine
 // checkout and no configuration. Note this keeps -L/-rpath as .unsafeFlags, which
 // is legal for a path dependency and is the reason the bundle is distributed as a
 // directory to point at rather than a versioned SwiftPM dependency.
-func firstExistingDir(_ candidates: [String]) -> String? {
-    candidates.first { FileManager.default.fileExists(atPath: $0) }
+//
+// The candidate is identified by a *file* that must exist in it, not by the
+// directory: an engine out/ directory is created by `gn gen` long before anything
+// is built, so testing the directory alone happily selects an empty one and the
+// link fails with an unresolved -lflutter_engine instead of falling through.
+func dirContaining(_ candidates: [(dir: String, marker: String)]) -> String? {
+    candidates.first { FileManager.default.fileExists(atPath: $0.dir + "/" + $0.marker) }?.dir
 }
 
 #if os(Linux)
 // On Linux the Swift bridge is merged into libflutter_engine.so.
 let engineLinkName = "flutter_engine"
-let bundledEngineDir = packageDir + "/engine/lib"
-let engineOutDir = env("FLUTTER_SWIFT_ENGINE_OUT",
-    default: firstExistingDir([
-        bundledEngineDir + "/libflutter_engine.so",
-    ]) != nil ? bundledEngineDir : packageDir + "/../engine/src/out/host_debug")
+let engineMarker = "libflutter_engine.so"
+let engineCandidates = [
+    packageDir + "/engine/lib",
+    packageDir + "/../engine/src/out/host_debug",
+    packageDir + "/../starling-engine/engine/src/out/host_debug",
+]
 #else
 // On macOS the Swift bridge is a separate libswift_bridge.dylib that sits
 // alongside FlutterMacOS.framework (the engine itself) in engineOutDir.
 let engineLinkName = "swift_bridge"
-let bundledEngineDir = packageDir + "/engine/lib"
-let engineOutDir = env("FLUTTER_SWIFT_ENGINE_OUT",
-    default: firstExistingDir([
-        bundledEngineDir + "/libswift_bridge.dylib",
-    ]) != nil ? bundledEngineDir
-              : packageDir + "/../engine/src/out/ci/host_debug_unopt_arm64")
+let engineMarker = "libswift_bridge.dylib"
+let engineCandidates = [
+    packageDir + "/engine/lib",
+    packageDir + "/../engine/src/out/ci/host_debug_unopt_arm64",
+    packageDir + "/../starling-engine/engine/src/out/ci/host_debug_unopt_arm64",
+]
 #endif
+
+let engineOutDir = env("FLUTTER_SWIFT_ENGINE_OUT",
+    default: dirContaining(engineCandidates.map { ($0, engineMarker) })
+             ?? engineCandidates[0])
 
 // The 6.2.4 toolchain is an ubuntu24.04 build, and Ubuntu 26.04 — the base
 // platform — pairs glibc 2.43 with libstdc++ 15. That combination makes the
@@ -136,13 +148,7 @@ var products: [Product] = [
 products += [
     .library(name: "FlutterEmbedderBridge", targets: ["FlutterEmbedderBridge"]),
     .library(name: "FlutterDRMBridge", targets: ["FlutterDRMBridge"]),
-    .library(name: "GLFWBridge", targets: ["GLFWBridge"]),
     .library(name: "DmaBufBridge", targets: ["DmaBufBridge"]),
-    // The windowed host: a Swift Flutter app in an ordinary desktop window,
-    // X11 or Wayland. Deliberately NOT part of FlutterShared — the desktop's
-    // own apps composite through the shell and must not drag libglfw into
-    // the shipped dylib.
-    .library(name: "FlutterRunner", targets: ["FlutterRunner"]),
     // One shared dylib carrying the whole framework stack (plus the C shim
     // modules apps import directly). Apps that link this single product get
     // binaries with only their own code — the packaged desktop ships one
@@ -288,36 +294,14 @@ targets += [
 // --- Linux-only targets ------------------------------------------------------
 
 #if os(Linux)
-let glfwInclude = ".deps/include"
-let glfwLib = ".deps/lib"
-
 targets += [
     // Clang module exposing Flutter embedder API to Swift
     .target(
         name: "FlutterEmbedderBridge"
     ),
-    // Clang module exposing GLFW3 to Swift
-    .target(
-        name: "GLFWBridge"
-    ),
     // Clang module exposing DRM shell public API (fl_drm_view.h) to Swift
     .target(
         name: "FlutterDRMBridge"
-    ),
-    // The windowed host — GLFW window + EGL surface + the embedder API, so an
-    // app can call runAppWindowed() instead of carrying its own ~600-line
-    // host. `.linkedLibrary` rather than an -L/-lglfw unsafeFlag on purpose:
-    // a product with unsafe flags cannot be depended on by version, which
-    // this one has to be if the SDK is ever consumed from outside this tree.
-    .target(
-        name: "FlutterRunner",
-        dependencies: ["Flutter", "SwiftRuntime", "FlutterSwiftBridge",
-                       "FlutterEmbedderBridge", "GLFWBridge"],
-        path: "Sources/FlutterRunner",
-        swiftSettings: cxxInteropSettings,
-        linkerSettings: [
-            .linkedLibrary("glfw"),
-        ]
     ),
     // Clang module wrapping GBM + SCM_RIGHTS + EGL DMA-BUF import helpers.
     // No cSettings: this target used to carry -I/usr/include/libdrm, but it
