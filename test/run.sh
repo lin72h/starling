@@ -144,15 +144,13 @@ if [ "$BUILD" = 1 ]; then
         [ -f "$REPO/$pkg/Package.swift" ] || continue
         name=$(basename "$pkg")
         out=$(cd "$REPO/$pkg" && as_user "$SWIFT" build -c release 2>&1)
+        # Every package builds on Linux, including the macOS-only ones: they
+        # select a placeholder target off macOS (see apps/DSATool/Package.swift)
+        # rather than failing to compile. So a build error here is a real one —
+        # this used to swallow anything mentioning `no such module 'AppKit'`,
+        # which would also have hidden a genuine AppKit leak into a Linux path.
         if [ $? -eq 0 ]; then
             echo "  ok    $name"
-        elif echo "$out" | grep -q "no such module 'AppKit'"; then
-            # A macOS-only package (DSATool) on Linux. Let the compiler say so
-            # rather than pattern-matching the sources: `import AppKit` inside
-            # an `#if os(macOS)` is normal here — the shell, BlueScreenApp and
-            # FlutterDemoApp all have one — and a source grep skips those too,
-            # which quietly stops testing the shell.
-            echo "  skip  $name (macOS-only on this platform)"
         else
             echo "  FAIL  $name"
             echo "$out" | grep -E "error:" | head -3 | sed 's/^/        /'
