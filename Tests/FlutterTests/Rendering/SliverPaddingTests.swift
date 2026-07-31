@@ -758,7 +758,7 @@ final class RenderSliverEdgeInsetsPaddingPaintTests: XCTestCase {
         )
         sliver.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         sliver.paint(context, .zero)
         // Should not crash
     }
@@ -782,7 +782,7 @@ final class RenderSliverEdgeInsetsPaddingPaintTests: XCTestCase {
         )
         sliver.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         sliver.paint(context, Offset(5.0, 5.0))
         // Should not crash; PaintingContext.paintChild is a stub
     }
@@ -807,7 +807,7 @@ final class RenderSliverEdgeInsetsPaddingPaintTests: XCTestCase {
         )
         sliver.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash; child is not visible so paintChild won't be called
         sliver.paint(context, .zero)
     }

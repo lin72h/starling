@@ -118,7 +118,7 @@ private class OverflowTestPaintingContext: PaintingContext {
 
     init(canvas: OverflowTestCanvas) {
         self.testCanvas = canvas
-        super.init()
+        super.init(ContainerLayer(), Rect.zero)
     }
 
     override var canvas: any Canvas {

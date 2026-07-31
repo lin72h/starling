@@ -1234,7 +1234,7 @@ final class RenderSliverMainAxisGroupPaintTests: XCTestCase {
         let constraints = makeSliverConstraints()
         group.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash
         group.paint(context, .zero)
     }
@@ -1254,7 +1254,7 @@ final class RenderSliverMainAxisGroupPaintTests: XCTestCase {
         )
         group.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash - paints in reverse order (last to first)
         group.paint(context, .zero)
     }
@@ -1270,7 +1270,7 @@ final class RenderSliverMainAxisGroupPaintTests: XCTestCase {
         let constraints = makeSliverConstraints()
         group.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash and should skip invisible child
         group.paint(context, .zero)
     }
@@ -1286,7 +1286,7 @@ final class RenderSliverCrossAxisGroupPaintTests: XCTestCase {
         let constraints = makeSliverConstraints()
         group.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         group.paint(context, .zero)
     }
 
@@ -1301,7 +1301,7 @@ final class RenderSliverCrossAxisGroupPaintTests: XCTestCase {
         let constraints = makeSliverConstraints(crossAxisExtent: 400.0)
         group.layout(constraints)
 
-        let context = PaintingContext()
+        let context = PaintingContext(ContainerLayer(), Rect.zero)
         // Should not crash - paints in forward order (first to last)
         group.paint(context, .zero)
     }
