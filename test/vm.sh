@@ -43,7 +43,7 @@ step() { echo; echo "══ $* ════════════════�
 
 [ -d "$VM" ] || fail "no VM harness at $VM (set STARLING_VM)"
 for f in launch-vm-2604.sh launch-vm-2604-nogl.sh ssh-vm.sh scp-vm.sh disk2604.qcow2 \
-         g1-install.sh g2-setup-login.sh g3-check.sh; do
+         g1-install.sh g2-setup-login.sh g3-check.sh qmp-abs-click.py; do
     [ -e "$VM/$f" ] || fail "$VM/$f is missing — harness incomplete"
 done
 
@@ -198,7 +198,13 @@ for _ in $(seq 1 40); do
 done
 pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null \
     && fail "the VM did not power off for the no-3D pass"
-(cd "$VM" && setsid bash launch-vm-2604-nogl.sh >/dev/null 2>&1 &)
+# The tablet (an absolute pointing device) is for the power-menu check at the
+# end of this tier: QEMU can only click a given pixel through `input-send-event`
+# on an absolute device — relative PS/2 deltas never move Starling's pointer at
+# all (verified against the shell's own [Input] log: every injected click landed
+# on the untouched screen centre). The in-guest functional checks drive their
+# own uinput device and are indifferent to the extra tablet.
+(cd "$VM" && STARLING_VM_TABLET=1 setsid bash launch-vm-2604-nogl.sh >/dev/null 2>&1 &)
 
 echo -n "waiting for the graphical boot"
 for _ in $(seq 1 60); do
@@ -224,7 +230,41 @@ ssh_vm 'sudo rm -f /usr/share/starling/catalog.d/starling*.app'
       (the session came up, so look for apps that start and die: the child
       renderer's device choice is logged to /tmp/starling-session-*.log)"
 
+step "power menu: Shut Down from the UI actually powers the machine off"
+# The teardown IS the test: instead of pkilling QEMU, shut the desktop down
+# the way a user would — power icon (top right), Shut Down…, confirm — and
+# require the guest to reach ACPI poweroff. This covers what no other tier
+# can: the status-bar popup opens and hit-tests, the confirm step works, and
+# logind authorises `systemctl poweroff` for the seat-active session
+# (allow_active — the same class of privilege path as the pkexec check above,
+# and equally invisible from an SSH-launched dev shell). Until 0.2.2 the menu
+# had no coverage at all; it shipped as the only way to shut the desktop down
+# from the UI, sight unseen.
+#
+# Coordinates are physical pixels at the harness's fixed 1280x800, measured
+# 2026-07-31 (icon 1222,32; "Shut Down…" row 967,336; confirm button
+# 1114,248 — the confirm prompt is one line, unlike Log Out's two). A layout
+# change that moves them makes the clicks land elsewhere, the guest stays up,
+# and this step fails loudly — the coordinates cannot rot in silence.
+click() { (cd "$VM" && python3 qmp-abs-click.py "$1" "$2" 1280 800 >/dev/null); }
+click 1222 32;  sleep 2   # power icon -> menu
+click 967  336; sleep 2   # Shut Down… -> confirm panel
+click 1114 248            # confirm Shut Down
+echo -n "waiting for the guest to power itself off"
+for _ in $(seq 1 20); do
+    pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null || break
+    echo -n "."
+    sleep 3
+done
+echo
+pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null \
+    && fail "the guest is still up 60s after Shut Down was confirmed — the
+      power menu did not shut the machine down (misplaced clicks fail the
+      same way; screenshot the guest with gshot.py to tell which)"
+echo "  ok    the desktop shut itself down through its own power menu"
+
 step "result"
 echo "PASS — the packaged desktop installs, logs in through GDM, is"
-echo "       seat-active, authorises its own privileged helper, and passes"
-echo "       the functional checks both on a GPU and with none."
+echo "       seat-active, authorises its own privileged helper, passes"
+echo "       the functional checks both on a GPU and with none, and shuts"
+echo "       itself down through its own power menu."
