@@ -373,6 +373,23 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // What the Launchpad is showing right now: whether it is open, the
+        // live search string, and the app ids surviving that filter.
+        //
+        // Exists to make the search bar assertable. "Typing does nothing" is
+        // the kind of report that cannot be chased by reading code — the key
+        // path looks correct end to end — and a screenshot only says the pill
+        // did not change, not why. With this, a test types and then asks: a
+        // `query` that moved with an unchanged `filtered` is a filtering bug,
+        // and a `query` that never moved is a key-delivery one.
+        if op == "launcher_state" {
+            conn.send(["id": id, "ok": true,
+                       "open": shell._launcherOpen,
+                       "query": shell._launcherQuery,
+                       "filtered": shell._launcherFilteredApps().map { $0.appId }])
+            return
+        }
+
         // The screen as the shell sees it. Tooling that synthesises absolute
         // pointer events needs the PHYSICAL size to set up its device and the
         // DPI to convert; guessing either puts every click somewhere else.

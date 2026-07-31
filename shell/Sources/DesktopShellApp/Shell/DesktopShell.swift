@@ -3332,7 +3332,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     /// The launcher's app entries — installed apps only (no phantom tiles for
     /// uninstalled apps), in catalog order, filtered by the current search query.
-    private func _launcherFilteredApps() -> [LauncherApp] {
+    // Internal, not private: the agent broker reports this so a functional
+    // test can assert what the Launchpad is actually showing.
+    func _launcherFilteredApps() -> [LauncherApp] {
         let all = AppRegistry.shared.installedApps.map { rec in
             LauncherApp(
                 appId: rec.id,

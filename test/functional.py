@@ -507,6 +507,52 @@ def check_agent_reattach() -> None:
         impostor.close()
 
 
+@check("launcher: typing in the Launchpad filters the app grid")
+def check_launcher_search() -> None:
+    """Reported against 0.2.1: "the search bar inside the Launchpad doesn't
+    respond to typing". Nothing in the key path explains it — evdev→HID matches
+    its inverse, the key packet decodes, and the shell's router is installed
+    from initState so it wins over the FocusManager fallback runApp leaves.
+
+    So this asserts the two halves separately, because they fail differently:
+    `query` moving proves keystrokes reached the shell, and `filtered` shrinking
+    proves the grid is driven by them. A query that never moves is a
+    key-delivery bug; a query that moves while filtered stands still is a
+    filtering one. Typing goes through shell-drive's uinput device, so it is the
+    real libinput→engine path a user's keyboard takes, not an injected shortcut.
+    """
+    state = ask("launcher_state")
+    assert not state["open"], "Launchpad already open"
+    total = len(state["filtered"])
+    assert total > 1, f"need >1 installed app to test filtering, have {total}"
+
+    drive("move 300 300", "dock launcher", "click")
+    try:
+        wait_for(lambda: ask("launcher_state")["open"], "Launchpad to open")
+
+        # A query no app can match: filtering to empty is unambiguous, where a
+        # real prefix might coincide with the whole list on a small catalog.
+        drive("type zzq")
+        wait_for(lambda: ask("launcher_state")["query"] == "zzq",
+                 "the typed query to reach the shell")
+        log("keystrokes reached the launcher")
+
+        filtered = ask("launcher_state")["filtered"]
+        assert filtered == [], f"query 'zzq' matched {filtered}"
+        log("the grid filtered to nothing")
+
+        # Backspace edits rather than clearing, and the grid follows back up.
+        drive("key backspace", "key backspace", "key backspace")
+        wait_for(lambda: ask("launcher_state")["query"] == "",
+                 "backspace to clear the query")
+        assert len(ask("launcher_state")["filtered"]) == total, \
+            "clearing the query did not restore the full grid"
+        log("backspace restored the grid")
+    finally:
+        drive("key esc", "key esc")
+    wait_for(lambda: not ask("launcher_state")["open"], "Launchpad to close")
+
+
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
 
