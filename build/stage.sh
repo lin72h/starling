@@ -42,8 +42,33 @@ while [ $# -gt 0 ]; do
 done
 OUT="${OUT:-$REPO/.stage}"
 
-TRIPLE=x86_64-unknown-linux-gnu
 SHELL_BUILD=$REPO/shell/.build
+
+# SwiftPM writes to .build/<target-triple>/<config>, so staging has to know the
+# triple. Derive it — this used to be hardcoded to x86_64-unknown-linux-gnu, so
+# on any other architecture staging looked in a directory that does not exist
+# and died at the first install(1) with "cannot stat .../x86_64-unknown-linux-gnu
+# /release/libFlutterShared.so", which reads as a missing build rather than a
+# wrong guess.
+#
+# The build tree is the authority: it is the thing being read, and consulting it
+# needs no toolchain on PATH — stage.sh runs under sudo in some flows, where
+# swiftly's swiftc is not on root's PATH. swiftc is the fallback, and the host
+# architecture the last resort.
+host_triple() {
+    local p d
+    for p in "$SHELL_BUILD"/*/"$CONFIG"/libFlutterShared.so; do
+        [ -e "$p" ] || continue
+        d=${p#"$SHELL_BUILD"/}
+        printf '%s\n' "${d%%/*}"
+        return 0
+    done
+    d="$(swiftc -print-target-info 2>/dev/null \
+         | sed -n 's/.*"unversionedTriple": *"\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$d" ] && { printf '%s\n' "$d"; return 0; }
+    printf '%s\n' "$(uname -m)-unknown-linux-gnu"
+}
+TRIPLE="${STARLING_TRIPLE:-$(host_triple)}"
 E=$REPO/engine/src/out/host_release
 [ -d "$E" ] || E=$REPO/engine/src/out/host_debug
 E="${STARLING_ENGINE_OUT:-$E}"

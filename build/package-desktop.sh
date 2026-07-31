@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build starling-desktop_<ver>_amd64.deb — the v0 Ubuntu package: shell,
+# Build starling-desktop_<ver>_<arch>.deb — the v0 Ubuntu package: shell,
 # engine, Swift runtime, first-party apps, assets, and the GDM session
 # entry. Everything lands under /usr/lib/starling + /usr/share/starling;
 # the binaries' $ORIGIN RUNPATH plus the launcher's LD_LIBRARY_PATH make
@@ -26,7 +26,14 @@ E=$REPO/engine/src/out/host_release
 SHELL_BUILD=$REPO/shell/.build
 APPS="SettingsApp FileExplorerApp TerminalApp CalculatorApp AppStoreApp"
 
-ROOT="$OUT/${PKG}_${VER}_amd64"
+# The Debian architecture of the machine we are building on. Hardcoding amd64
+# here did not fail on arm64 — it produced starling_<ver>_amd64.deb containing
+# arm64 binaries, which is worse than an error: dpkg would refuse it on a real
+# amd64 machine and the mislabelling only shows up there. Override with
+# STARLING_DEB_ARCH when cross-building.
+DEB_ARCH="${STARLING_DEB_ARCH:-$(dpkg --print-architecture)}"
+
+ROOT="$OUT/${PKG}_${VER}_${DEB_ARCH}"
 LIB=$ROOT/usr/lib/starling
 SHARE=$ROOT/usr/share/starling
 rm -rf "$ROOT"
@@ -252,7 +259,7 @@ Package: $PKG
 Version: $VER
 Section: x11
 Priority: optional
-Architecture: amd64
+Architecture: $DEB_ARCH
 Maintainer: Starling <dev@starling.build>
 Depends: $DEPS, libseat1, dbus, pkexec
 Recommends: gdm3 | lightdm | sddm, xwayland, x11-utils, xdg-utils
@@ -273,4 +280,4 @@ Description: Starling desktop environment
 CONTROL
 
 dpkg-deb --build --root-owner-group "$ROOT"
-ls -lh "$OUT"/${PKG}_${VER}_amd64.deb
+ls -lh "$OUT"/${PKG}_${VER}_${DEB_ARCH}.deb

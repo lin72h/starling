@@ -113,11 +113,22 @@ if [ "$BUILD" = 1 ]; then
     done
 
     step "package"
-    if as_user "$REPO/build/package-desktop.sh" /tmp/starling-test-pkg \
-            >/dev/null 2>&1; then
+    # Packaging needs ~500 MB (a 227 MB stage, the same again as the package
+    # root, then the .deb). /tmp is a tmpfs here and is mounted with usrquota, so
+    # on a box where it is small or the user is near their quota this step fails
+    # with EDQUOT no matter what the code does. Point it somewhere else rather
+    # than lose the release gate to the environment.
+    PKG_OUT="${STARLING_PKG_OUT:-/tmp/starling-test-pkg}"
+    pkg_err=$(as_user "$REPO/build/package-desktop.sh" "$PKG_OUT" 2>&1 >/dev/null) \
+        && pkg_ok=1 || pkg_ok=0
+    if [ "$pkg_ok" = 1 ]; then
         echo "  ok    .deb builds"
     else
         echo "  FAIL  .deb"
+        # Surfaced, not swallowed: this used to redirect stderr to /dev/null, so
+        # a disk-quota failure and a genuine packaging bug looked identical.
+        echo "$pkg_err" | grep -E "error|Error|No such file|quota" | head -3 \
+            | sed 's/^/        /'
         fails=$((fails + 1))
     fi
 fi
