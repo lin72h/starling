@@ -415,8 +415,26 @@ func _setupWidgetBinding(_ app: Widget) {
     // keeps whatever it computed at its last build and lays out for the old
     // size. That surfaces as a RenderFlex overflow the moment a window is
     // tiled or resized smaller.
+    // Marking the ROOT alone cannot do that, though. markNeedsBuild dirties
+    // one element; when the root rebuilds, updateChild compares against the
+    // adapter's stored child widget, finds the identical instance, and
+    // returns without touching it (`child.widget === newWidget` in
+    // ElementCore.updateChild) — so no descendant's build() ever re-runs and
+    // the old flow only ever re-laid-out stale trees. The symptom that
+    // exposed it: shrink the Terminal and the tree lays out at the new size
+    // (the RenderFlex overflow bar lands on the new bottom edge) while the
+    // app's build()-derived row count — and with it the pty size — stays at
+    // the old window's.
+    //
+    // reassemble() is the tree-wide markNeedsBuild (Dart's hot-reload path:
+    // dirty every element, then rebuild in depth order). Upstream would be
+    // selective — metrics arrive through MediaQuery and only registered
+    // dependents rebuild — but without InheritedWidget dependency tracking
+    // there is nothing to be selective WITH, and a metrics change already
+    // re-lays-out every render object, so a full rebuild is the same order
+    // of work, at the rate windows resize, not per frame.
     pd.onMetricsChanged = {
-        rootElement?.markNeedsBuild()
+        rootElement?.reassemble()
         pd.scheduleFrame()
     }
 

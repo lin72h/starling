@@ -1437,22 +1437,36 @@ public class RenderFlex: RenderBox, RenderBoxContainerDefaults, DebugOverflowInd
         )
 
         // Debug: paint overflow indicators.
-        // Simulate a child rect that overflows by the right amount. This child
-        // rect is never used for drawing, just for determining the overflow
-        // location and amount.
-        let overflowChildRect: Rect
-        switch _direction {
-        case .horizontal:
-            overflowChildRect = Rect.fromLTWH(0.0, 0.0, size.width + _overflow, 0.0)
-        case .vertical:
-            overflowChildRect = Rect.fromLTWH(0.0, 0.0, 0.0, size.height + _overflow)
-        }
-        paintOverflowIndicator(
-            context,
-            offset,
-            Offset.zero & size,
-            overflowChildRect
-        )
+        //
+        // Inside assert, as `flex.dart:1323-1372` is — the whole block there is
+        // an `assert(() { ... return true; }())`, so it is compiled out of a
+        // release build. This call used to sit outside one, and the comment
+        // above was the only thing saying "debug". A release desktop therefore
+        // painted the indicator for real: shrink a window until a Row or Column
+        // no longer fits and a solid yellow "BOTTOM OVERFLOWED BY n PIXELS" bar
+        // appears over the app, which is a developer diagnostic and not
+        // something a user should ever be shown. `RenderConstraintsTransformBox`
+        // in ShiftedBox.swift already gated its identical call correctly; the
+        // two ports of the same Dart pattern simply disagreed.
+        assert({
+            // Simulate a child rect that overflows by the right amount. This
+            // child rect is never used for drawing, just for determining the
+            // overflow location and amount.
+            let overflowChildRect: Rect
+            switch _direction {
+            case .horizontal:
+                overflowChildRect = Rect.fromLTWH(0.0, 0.0, size.width + _overflow, 0.0)
+            case .vertical:
+                overflowChildRect = Rect.fromLTWH(0.0, 0.0, 0.0, size.height + _overflow)
+            }
+            paintOverflowIndicator(
+                context,
+                offset,
+                Offset.zero & size,
+                overflowChildRect
+            )
+            return true
+        }())
     }
 
     /// Hit tests children using the default child hit-testing logic.
