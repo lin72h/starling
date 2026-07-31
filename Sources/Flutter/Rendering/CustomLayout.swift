@@ -614,3 +614,25 @@ public class RenderCustomMultiChildLayoutBox: RenderBox, RenderBoxContainerDefau
         return defaultHitTestChildren(result, position: position)
     }
 }
+
+// MARK: - ContainerRenderObjectHost Conformance
+
+extension RenderCustomMultiChildLayoutBox: ContainerRenderObjectHost {
+    /// Reorders a child that is already ours.
+    ///
+    /// Relinks the child in place rather than going through `remove`/`insert`:
+    /// those drop and re-adopt, `dropChild` clears the parent data, and
+    /// `setupParentData` then hands back a blank `MultiChildLayoutParentData` —
+    /// so a reordered child would lose the `LayoutId` id the delegate looks it
+    /// up by and trip the "child without ID" assertion on the next layout.
+    /// Same shape as `RenderStack.move`.
+    ///
+    /// **Dart Source:** object.dart:4448-4460 (ContainerRenderObjectMixin.move)
+    public func move(_ child: RenderBox, after: RenderBox?) {
+        guard let childParentData = child.parentData as? MultiChildLayoutParentData else { return }
+        if childParentData.previousSibling === after { return }
+        _removeFromChildList(child)
+        _insertIntoChildList(child, after: after)
+        markNeedsLayout()
+    }
+}

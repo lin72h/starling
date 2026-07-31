@@ -257,6 +257,10 @@ products += [
     .executable(name: "CounterApp", targets: ["CounterApp"]),
     .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
     .executable(name: "TodosApp", targets: ["TodosApp"]),
+    // The kalender calendar package (day/week/month views), ported as a
+    // library plus its demo app.
+    .library(name: "Kalender", targets: ["Kalender"]),
+    .executable(name: "KalenderApp", targets: ["KalenderApp"]),
     // One shared dylib carrying the whole framework stack (plus the C shim
     // modules apps import directly). Apps that link this single product get
     // binaries with only their own code — the packaged desktop ships one
@@ -511,6 +515,35 @@ targets += [
         name: "TodosApp",
         dependencies: [
             "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
+    ),
+]
+
+// The kalender port, appended separately for the same type-checker-budget
+// reason as the block above.
+targets += [
+    // The kalender calendar package (werner-scholtz/kalender), ported: event
+    // and calendar controllers, view configurations, the event-overlap and
+    // multi-day layout delegates, and the day/week/month views.
+    .target(
+        name: "Kalender",
+        dependencies: [
+            "Flutter",
+            "FlutterSwiftBridge",
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
+    ),
+    // kalender's demo: a week view with a view switcher, ported.
+    .executableTarget(
+        name: "KalenderApp",
+        dependencies: [
+            "Flutter",
+            "Kalender",
             "ExampleHost",
             "FlutterSwiftBridge",
             "CupertinoIcons",
