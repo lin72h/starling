@@ -83,34 +83,37 @@ class _MacosTextFieldState: State<StatefulWidget> {
                   )]
         )
 
-        var rowChildren: [Widget] = []
-
-        if let prefix = field.prefix {
-            rowChildren.append(prefix)
-            rowChildren.append(SizedBox(width: 4))
-        }
-
-        // EditableText/FocusNode not available; placeholder text display
-        let displayText = field.controller?.text ?? field.placeholder ?? ""
-        rowChildren.append(
-            Expanded(
-                child: Text(
-                    displayText,
-                    style: field.style ?? theme.typography.body
-                )
-            )
+        // The macOS focus ring: accent-colored border on the same shape.
+        let focusedDecoration = field.decoration ?? BoxDecoration(
+            color: isDark
+                ? Color(rgbo: 30, 30, 30, 1.0)
+                : MacosColors.white,
+            border: Border.all(color: theme.primaryColor, width: 1.5),
+            borderRadius: BorderRadius.all(Radius(circular: 5))
         )
 
-        if let suffix = field.suffix {
-            rowChildren.append(SizedBox(width: 4))
-            rowChildren.append(suffix)
-        }
+        // Editing (focus, caret, key handling, placeholder logic) comes from
+        // the Fluent text box; only the chrome above is macOS. A FluentTheme
+        // ancestor is required by that widget — MacosApp installs one, and the
+        // fallback keeps the field usable outside it.
+        let fluentData = FluentTheme.maybeOf(context)
+            ?? (isDark ? FluentThemeData.dark() : FluentThemeData.light())
 
-        return DecoratedBox(
-            decoration: bgDecoration,
-            child: Padding(
+        return FluentTheme(
+            data: fluentData,
+            child: FluentTextBox(
+                controller: field.controller,
+                placeholderText: field.placeholder,
+                onChanged: field.onChanged,
+                onSubmitted: field.onSubmitted,
+                maxLines: field.maxLines,
+                enabled: field.enabled,
+                style: field.style ?? theme.typography.body,
                 padding: field.padding,
-                child: Row(children: rowChildren)
+                decoration: bgDecoration,
+                focusedDecoration: focusedDecoration,
+                prefix: field.prefix,
+                suffix: field.suffix
             )
         )
     }
