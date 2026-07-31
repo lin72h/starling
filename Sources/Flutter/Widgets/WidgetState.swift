@@ -125,7 +125,26 @@ public enum WidgetState: Hashable, Sendable, WidgetStatesConstraint {
     }
 
     /// **Dart Source:** `widget_state.dart:240`
-    public var description: String { "\(self)" }
+    ///
+    /// Spelled out case by case rather than as `"\(self)"`. `WidgetState`
+    /// conforms to `CustomStringConvertible` through `WidgetStatesConstraint`,
+    /// so interpolating `self` re-enters this property: infinite recursion,
+    /// and a stack overflow that shows up as SIGSEGV rather than a test
+    /// failure. Dart's `toString` returns the enum's `name`; this is the
+    /// equivalent, and it stays correct if a case is renamed because the
+    /// switch is exhaustive.
+    public var description: String {
+        switch self {
+        case .hovered: return "hovered"
+        case .focused: return "focused"
+        case .pressed: return "pressed"
+        case .dragged: return "dragged"
+        case .selected: return "selected"
+        case .scrolledUnder: return "scrolledUnder"
+        case .disabled: return "disabled"
+        case .error: return "error"
+        }
+    }
 }
 
 // MARK: - WidgetPropertyResolver

@@ -232,7 +232,7 @@ public class TextureBox: RenderBox {
     /// Whether this render object is a repaint boundary.
     ///
     /// **Dart Source:** `texture.dart:86`
-    public override var isRepaintBoundary: Bool { false }
+    public override var isRepaintBoundary: Bool { true }
 
     /// Computes the dry layout size for the given constraints.
     ///
