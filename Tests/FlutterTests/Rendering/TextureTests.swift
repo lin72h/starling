@@ -217,12 +217,25 @@ final class TextureBoxPropertyTests: XCTestCase {
         XCTAssertTrue(box.alwaysNeedsCompositing)
     }
 
-    /// Test that isRepaintBoundary returns true.
+    /// Test that isRepaintBoundary returns false.
+    ///
+    /// DIFFERENCE FROM DART: `texture.dart:86` returns true; this port returns
+    /// false, deliberately. This port has no interior repaint-boundary
+    /// compositing, so a boundary subtree does not render at all — returning
+    /// true stops every texture in the desktop from drawing, the wallpaper and
+    /// the contents of every window included. The full reasoning is on
+    /// `TextureBox.isRepaintBoundary` itself.
+    ///
+    /// This assertion is therefore load-bearing: it is what catches the flip
+    /// back to `true` next time someone reads the `false` as a transcription
+    /// slip against `texture.dart:86` and "corrects" it. That is exactly how
+    /// the regression happened, and a unit test is far cheaper than the VM tier
+    /// that caught it.
     ///
     /// **Dart Source:** `texture.dart:86`
-    func testIsRepaintBoundaryReturnsTrue() {
+    func testIsRepaintBoundaryReturnsFalse() {
         let box = TextureBox(textureId: 1)
-        XCTAssertTrue(box.isRepaintBoundary)
+        XCTAssertFalse(box.isRepaintBoundary)
     }
 }
 

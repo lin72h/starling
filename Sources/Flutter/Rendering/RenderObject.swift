@@ -243,6 +243,33 @@ open class PaintingContext {
     /// Composites a repaint-boundary child into this context's layer tree.
     ///
     /// **Dart Source:** `object.dart:272-290`
+    ///
+    /// KNOWN GAP: interior repaint boundaries are not implemented, and a child
+    /// that declares itself one is not painted in the wrong place — it is not
+    /// painted at all.
+    ///
+    /// Dart gives every boundary its own `OffsetLayer` and carries the parent's
+    /// paint offset on it (`childOffsetLayer.offset = offset`, object.dart:290).
+    /// This port has no `OffsetLayer`, and `RenderObject._layer` is assigned in
+    /// exactly one place: the `RenderView` (`View.swift:391,400`). For every
+    /// other boundary `_layer` is nil, so `repaintCompositedChild` returns at
+    /// its guard without ever calling `child.paint`, and the `if let childLayer`
+    /// below appends nothing. `offset` is ignored here only because, with
+    /// nothing painted, there is nothing left to position.
+    ///
+    /// That is what `TextureBox.isRepaintBoundary` hit: `792f90f` flipped it
+    /// true and every texture in the desktop stopped rendering. Caught on
+    /// unreleased `main`, before any release carried it. It has to stay false.
+    ///
+    /// The same holds for every render object here that already returns true —
+    /// `RenderViewportBase`, `RenderRepaintBoundary`, `RenderFlow`,
+    /// `RenderListWheelViewport`. That has stayed invisible only because nothing
+    /// in the shell or the apps builds one: the only scroll view in use is
+    /// `SingleChildScrollView`, whose `_RenderSingleChildViewport` is not a
+    /// boundary. Reaching for `ListView`, `GridView`, `RepaintBoundary` or
+    /// `Flow` will hit it, and the symptom is a blank subtree with no error.
+    /// Fixing this means giving interior boundaries real layers; until then,
+    /// treat `isRepaintBoundary == true` as unsupported.
     private func _compositeChild(_ child: RenderObject, _ offset: Offset) {
         assert(child.isRepaintBoundary)
         if child.needsPaint {

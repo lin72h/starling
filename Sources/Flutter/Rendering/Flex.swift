@@ -1528,8 +1528,19 @@ public class RenderFlex: RenderBox, RenderBoxContainerDefaults, DebugOverflowInd
 // MARK: - ContainerRenderObjectHost Conformance
 
 extension RenderFlex: ContainerRenderObjectHost {
+    /// Reorders a child that is already ours.
+    ///
+    /// Relinks in place rather than `remove`/`insert`: those drop and re-adopt,
+    /// which clears the parent data (see `RenderObject.dropChild`) and would
+    /// cost a reordered child its `Expanded`/`Flexible` flex and fit — the row
+    /// would silently lay out as if every child were inflexible.
+    ///
+    /// **Dart Source:** `object.dart:4448-4460`
     public func move(_ child: RenderBox, after: RenderBox?) {
-        remove(child)
-        insert(child, after: after)
+        guard let childParentData = child.parentData as? FlexParentData else { return }
+        if childParentData.previousSibling === after { return }
+        _removeFromChildList(child)
+        _insertIntoChildList(child, after: after)
+        markNeedsLayout()
     }
 }

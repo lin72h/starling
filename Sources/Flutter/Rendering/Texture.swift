@@ -232,7 +232,27 @@ public class TextureBox: RenderBox {
     /// Whether this render object is a repaint boundary.
     ///
     /// **Dart Source:** `texture.dart:86`
-    public override var isRepaintBoundary: Bool { true }
+    ///
+    /// DIFFERENCE FROM DART: `texture.dart:86` returns true; this returns
+    /// false.
+    /// REASON: this port has no interior repaint-boundary compositing to hang
+    /// a texture on. Dart's `_compositeChild` puts the child's painting in its
+    /// own `OffsetLayer` and carries the parent's paint offset on that layer
+    /// (`childOffsetLayer.offset = offset`, object.dart:290). There is no
+    /// `OffsetLayer` here, and `RenderObject._layer` is only ever set for the
+    /// `RenderView`, so `repaintCompositedChild` returns at its `_layer` guard
+    /// without calling `paint` and `_compositeChild` appends nothing. A
+    /// boundary subtree does not render at all.
+    ///
+    /// So returning true here means `paint` below never runs, no `TextureLayer`
+    /// is ever added, and every texture in the desktop stops rendering — the
+    /// wallpaper and the contents of every window. `792f90f` flipped it true;
+    /// the T3 VM tier caught it on unreleased `main`, before it reached a
+    /// release (`v0.2.1` is tagged at `1401708`, which predates it — note that
+    /// `package-desktop.sh` hardcodes the version, so a .deb built from `main`
+    /// still calls itself 0.2.1). Flip this back only together with real
+    /// boundary compositing (see `_compositeChild`).
+    public override var isRepaintBoundary: Bool { false }
 
     /// Computes the dry layout size for the given constraints.
     ///
