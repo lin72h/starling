@@ -118,6 +118,13 @@ Framework (`sdk/`):
 - Element **remount is the dominant update path** (no `updateRenderObject`); if
   fresh content never composites, suspect paint marking.
 - `print()` is block-buffered through pipes — debug with raw `write(2, …)`.
+- Widgets have **two spellings**: the ported `children:`/`child:` initializers
+  (canonical, 1:1 with Dart) and the trailing-closure overloads in
+  `Widgets/ResultBuilders.swift`, which add `if`/`for`/`switch` inside the tree.
+  They compile to the identical tree. **Adding a parameter to a ported widget
+  init means adding it to that widget's builder overload too** — otherwise the
+  block form silently cannot express it, with no warning at the call site.
+  `test/lint.py` compares the two and fails on drift.
 
 Build / runtime:
 - **Never forward the engine's env knobs as empty strings.** Several are read

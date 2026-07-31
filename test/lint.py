@@ -310,6 +310,179 @@ def check_wayland_callbacks() -> None:
     print(f"  wayland callbacks: {len(declared)} declared, {len(gaps)} known gap(s)")
 
 
+# ── check: builder overloads track the initializers they wrap ────────────────
+
+def _split_params(text: str) -> list[str]:
+    """Split a Swift parameter list on top-level commas."""
+    out, depth, current = [], 0, ""
+    for ch in text:
+        if ch in "([<{":
+            depth += 1
+        elif ch in ")]>}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(current)
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        out.append(current)
+    return [p.strip() for p in out if p.strip()]
+
+
+def _parse_param(param: str) -> tuple[str, str, str]:
+    """`padding: EdgeInsets = EdgeInsets(...)` -> (name, type, default).
+
+    Types are normalised so that `any P` and a bare `P` compare equal — they
+    denote the same existential, and the ported sources still use the older
+    spelling in places.
+    """
+    name, _, rest = param.partition(":")
+    name = name.strip().split()[-1]           # drop an external label
+    depth, cut = 0, None
+    for i, ch in enumerate(rest):
+        if ch in "([<{":
+            depth += 1
+        elif ch in ")]>}":
+            depth -= 1
+        elif ch == "=" and depth == 0:
+            cut = i
+            break
+    type_str = (rest if cut is None else rest[:cut])
+    default = "" if cut is None else rest[cut + 1:]
+    type_str = re.sub(r"\bany\s+", "", " ".join(type_str.split()))
+    return name, type_str, " ".join(default.split())
+
+
+def _param_map(text: str) -> dict[str, tuple[str, str]]:
+    out = {}
+    for p in _split_params(text):
+        if p.startswith("@"):                  # builder-annotated closure
+            continue
+        name, type_str, default = _parse_param(p)
+        out[name] = (type_str, default)
+    return out
+
+
+def _balanced(src: str, start: int, opener: str = "(", closer: str = ")") -> str:
+    """Return the text inside the delimiters beginning at `start`."""
+    depth, i = 0, start
+    while i < len(src):
+        if src[i] == opener:
+            depth += 1
+        elif src[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return src[start + 1:i]
+        i += 1
+    return ""
+
+
+def check_result_builders() -> None:
+    """Every trailing-closure overload must carry the same parameters as the
+    ported initializer it delegates to.
+
+    `sdk/Sources/Flutter/Widgets/ResultBuilders.swift` restates each widget's
+    parameter list so the block form can accept it. That is a second copy of a
+    fact defined elsewhere, which is the failure mode this whole tier exists
+    for: add `spacing:` to the ported `Row.init` and the builder overload keeps
+    compiling, keeps working, and silently cannot express spacing. Nothing
+    warns — the call site just has no such argument, and the tree it builds is
+    quietly not the one the author asked for.
+    """
+    check = "widget-builders"
+    overlay = REPO / "sdk/Sources/Flutter/Widgets/ResultBuilders.swift"
+    if not overlay.exists():
+        return
+    src = overlay.read_text()
+
+    sources = [p for p in (REPO / "sdk/Sources/Flutter").rglob("*.swift")
+               if p != overlay]
+    corpus = {p: p.read_text() for p in sources}
+
+    def ported_signatures(cls: str, member: str) -> list[dict[str, tuple[str, str]]]:
+        """Parameter maps of every `init` (or named static func) declared on `cls`."""
+        sigs = []
+        for text in corpus.values():
+            m = re.search(r"^(?:public|open)\s+(?:final\s+)?class\s+%s\s*[:{]"
+                          % re.escape(cls), text, re.M)
+            if not m:
+                continue
+            body_start = text.index("{", m.start())
+            body = _balanced(text, body_start, "{", "}")
+            if member == "init":
+                pattern = r"(?:public\s+)?(?:convenience\s+|override\s+)*init\s*\("
+            else:
+                pattern = r"public\s+static\s+func\s+%s\s*\(" % re.escape(member)
+            for hit in re.finditer(pattern, body):
+                paren = body.index("(", hit.end() - 1)
+                sigs.append(_param_map(_balanced(body, paren)))
+        return sigs
+
+    checked = 0
+    for ext in re.finditer(r"^extension\s+(\w+)\s*\{", src, re.M):
+        cls = ext.group(1)
+        block = _balanced(src, src.index("{", ext.start()), "{", "}")
+        members = list(re.finditer(
+            r"public\s+convenience\s+init\s*\(|public\s+static\s+func\s+(\w+)\s*\(",
+            block))
+        for hit in members:
+            member = hit.group(1) or "init"
+            paren = block.index("(", hit.end() - 1)
+            overload = _param_map(_balanced(block, paren))
+            label = f"{cls}.{member}" if member != "init" else f"{cls}.init"
+
+            candidates = ported_signatures(cls, member)
+            if not candidates:
+                fail(check, f"{label}: no ported declaration found to compare "
+                            "against — the overlay may be wrapping a member "
+                            "that has been renamed or removed")
+                continue
+
+            # The ported form differs from the overload by exactly the child
+            # parameter, which the builder closure replaces.
+            best, best_diff = None, None
+            for sig in candidates:
+                stripped = {k: v for k, v in sig.items()
+                            if k not in ("child", "children")}
+                if stripped == overload:
+                    best = sig
+                    break
+                missing = set(stripped) - set(overload)
+                extra = set(overload) - set(stripped)
+                changed = {k for k in set(stripped) & set(overload)
+                           if stripped[k] != overload[k]}
+                score = len(missing) + len(extra) + len(changed)
+                if best_diff is None or score < best_diff[0]:
+                    best_diff = (score, missing, extra, changed, stripped)
+            if best is not None:
+                ok(label)
+                checked += 1
+                continue
+
+            _, missing, extra, changed, stripped = best_diff
+            parts = []
+            if missing:
+                parts.append("missing " + ", ".join(
+                    f"`{k}: {stripped[k][0]}`" for k in sorted(missing)))
+            if extra:
+                parts.append("has no counterpart for " + ", ".join(
+                    f"`{k}`" for k in sorted(extra)))
+            if changed:
+                parts.append("differs on " + ", ".join(
+                    f"`{k}` ({stripped[k][0]}"
+                    f"{' = ' + stripped[k][1] if stripped[k][1] else ''}"
+                    f" vs {overload[k][0]}"
+                    f"{' = ' + overload[k][1] if overload[k][1] else ''})"
+                    for k in sorted(changed)))
+            fail(check, f"{label} has drifted from the initializer it wraps: "
+                        + "; ".join(parts)
+                        + " — the block form silently cannot express it")
+            checked += 1
+
+    print(f"  widget builders: {checked} overload(s) checked")
+
+
 # ── check: the scripts parse ─────────────────────────────────────────────────
 
 def check_script_syntax() -> None:
@@ -346,6 +519,7 @@ def main() -> int:
     print("starling lint")
     check_catalog()
     check_wayland_callbacks()
+    check_result_builders()
     check_script_syntax()
 
     for check, msg in notes:
