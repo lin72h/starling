@@ -179,11 +179,13 @@ class _TaskManagerPageState: State<StatefulWidget> {
             _buildTableHeader(s)
             _divider()
             Expanded {
-                // Eager children, the TodosApp way: the lazy itemBuilder
-                // slivers trip an index assert in RenderSliverMultiBoxAdaptor
-                // when the list refreshes every tick.
+                // Lazy rows: only the visible slice of a few-hundred-row
+                // table is built each tick. itemExtent skips per-row
+                // intrinsic sizing — every row is Columns.rowHeight tall.
                 ListView(
-                    children: s.processes.indices.compactMap { _buildRow(s, $0) }
+                    itemExtent: Columns.rowHeight,
+                    itemCount: s.processes.count,
+                    itemBuilder: { [weak self] _, index in self?._buildRow(s, index) }
                 )
             }
             _divider()
