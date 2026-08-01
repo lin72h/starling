@@ -3,6 +3,7 @@
 
 import Flutter
 import FlutterSwiftBridge
+import CupertinoIcons
 import Foundation
 
 // MARK: - VideoPlayerWidget
@@ -38,6 +39,11 @@ class _VideoPlayerState: State<StatefulWidget> {
     private var showOpenPanel = false
     private var decoder: PipeDecoder? = nil
     private var generation = 0
+    /// Non-nil while the scrubber is being dragged: the position the thumb
+    /// shows, distinct from playback position until the drag commits.
+    private var scrubPosition: Double? = nil
+    /// The scrubber's laid-out width, from MeasureSize — drag x → seconds.
+    private var scrubberW: Double = 0
 
     private static let kVideoExtensions = [
         "mp4", "mkv", "avi", "mov", "webm", "m4v", "mpg", "mpeg", "ts",
@@ -106,14 +112,26 @@ class _VideoPlayerState: State<StatefulWidget> {
         DispatchQueue.global(qos: .utility).async { dec?.stop() }
     }
 
-    private func _startPlayback(from start: Double) {
+    /// Jump to `target`. Playing: restart the stream there. Paused: decode
+    /// exactly one frame there so the scrubber shows where it landed, then
+    /// stop again.
+    private func _seek(to target: Double) {
+        let t = min(max(0, target), max(0, info.duration - 0.5))
+        let wasPlaying = isPlaying
+        _stopRun()
+        setState { position = t }
+        _startPlayback(from: t, pauseOnFirstFrame: !wasPlaying)
+    }
+
+    private func _startPlayback(from start: Double,
+                                pauseOnFirstFrame: Bool = false) {
         guard !currentPath.isEmpty, info.width > 0, hasTexture else { return }
         generation += 1
         let gen = generation
         guard let dec = PipeDecoder(path: currentPath, start: start,
                                     info: info) else { return }
         decoder = dec
-        isPlaying = true
+        isPlaying = !pauseOnFirstFrame
 
         let vw = info.width, vh = info.height
         let fps = info.fps
@@ -129,6 +147,7 @@ class _VideoPlayerState: State<StatefulWidget> {
                 var frame = [UInt8](repeating: 0, count: vw * vh * 4)
                 guard dec.readFrame(into: &frame) else { break }
                 framesRead += 1
+                let thisFrame = framesRead  // by value — deliver runs later
                 let pos = dec.startPosition + Double(framesRead) / fps
                 inFlight.wait()
                 let deliver: () -> Void = { [weak self] in
@@ -141,6 +160,13 @@ class _VideoPlayerState: State<StatefulWidget> {
                     self.setState {
                         self.frameCount += 1
                         self.position = pos
+                    }
+                    // A paused seek wants exactly this one frame on screen;
+                    // stopping bumps the generation, so the reader's later
+                    // hops (and its EOF loop) all evaporate.
+                    if pauseOnFirstFrame && thisFrame == 1 {
+                        self._stopRun()
+                        self.setState { self.position = pos }
                     }
                 }
                 DispatchQueue.main.async(
@@ -207,40 +233,56 @@ class _VideoPlayerState: State<StatefulWidget> {
             )
         }
 
-        // Controls
+        // Controls — the QuickTime shape: dark translucent bar, filled
+        // play/pause glyph, monospace-ish times flanking the scrubber.
         children.append(
             Positioned(
                 left: 0, right: 0, bottom: 0,
-                height: 36,
+                height: 44,
                 child: ColoredBox(
-                    color: Color(rgbo: 0, 0, 0, 0.5),
+                    color: Color(rgbo: 22, 22, 24, 0.72),
                     child: Padding(
-                        padding: EdgeInsets(left: 12, right: 12),
+                        padding: EdgeInsets(left: 14, right: 14),
                         child: Row(
                             crossAxisAlignment: .center,
                             children: [
                                 GestureDetector(
                                     onTap: { [self] in _togglePlay() },
                                     behavior: .opaque,
-                                    child: Text(
-                                        isPlaying ? "  II  " : "  >  ",
-                                        style: TextStyle(color: Color(0xFFFFFFFF), fontSize: 16)
+                                    child: Padding(
+                                        padding: EdgeInsets(left: 2, top: 8, right: 10, bottom: 8),
+                                        child: MacosIcon(
+                                            icon: isPlaying
+                                                ? CupertinoIcons.pause_fill
+                                                : CupertinoIcons.play_fill,
+                                            color: Color(0xFFFFFFFF),
+                                            size: 16
+                                        )
                                     )
                                 ),
-                                SizedBox(width: 8),
                                 Text(
-                                    _formatTime(position) + " / " + _formatTime(info.duration),
-                                    style: TextStyle(color: Color(0xFFCCCCCC), fontSize: 13)
+                                    _formatTime(scrubPosition ?? position),
+                                    style: TextStyle(color: Color(0xFFDDDDDD), fontSize: 12)
                                 ),
-                                Expanded(child: SizedBox(width: 1)),
+                                SizedBox(width: 10),
+                                Expanded(child: _scrubber()),
+                                SizedBox(width: 10),
+                                Text(
+                                    _formatTime(info.duration),
+                                    style: TextStyle(color: Color(0xFFDDDDDD), fontSize: 12)
+                                ),
+                                SizedBox(width: 6),
                                 GestureDetector(
                                     onTap: { [self] in
                                         setState { showOpenPanel = true }
                                     },
                                     behavior: .opaque,
-                                    child: Text(
-                                        "  Open\u{2026}  ",
-                                        style: TextStyle(color: Color(0xFFFFFFFF), fontSize: 13)
+                                    child: Padding(
+                                        padding: EdgeInsets(all: 6),
+                                        child: Text(
+                                            "Open\u{2026}",
+                                            style: TextStyle(color: Color(0xFFFFFFFF), fontSize: 12)
+                                        )
                                     )
                                 ),
                             ]
@@ -278,5 +320,106 @@ class _VideoPlayerState: State<StatefulWidget> {
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", mins, secs)
+    }
+
+    // MARK: - Scrubber
+
+    /// macOS-style scrubber: thin rounded track, filled to the playhead, a
+    /// round thumb. Click jumps; drag shows the target (scrubPosition) and
+    /// seeks on release — one decoder respawn per gesture, not per pixel.
+    /// MacosSlider in the framework is display-only, so this is hand-built
+    /// on the drag callbacks; the width comes from MeasureSize.
+    private func _scrubber() -> Widget {
+        let dur = max(info.duration, 0.001)
+        let fraction = min(max((scrubPosition ?? position) / dur, 0), 1)
+        let thumbD = 12.0
+        let trackH = 4.0
+        let rowH = 44.0
+        let usable = max(scrubberW - thumbD, 1)
+        let thumbX = usable * fraction
+
+        func target(_ x: Double) -> Double {
+            guard scrubberW > thumbD else { return position }
+            return min(max((x - thumbD / 2) / usable, 0), 1) * dur
+        }
+
+        return GestureDetector(
+            onTapUp: { [self] d in
+                guard info.duration > 0 else { return }
+                _seek(to: target(d.localPosition.dx))
+            },
+            onHorizontalDragStart: { [self] d in
+                guard info.duration > 0 else { return }
+                setState { scrubPosition = target(d.localPosition.dx) }
+            },
+            onHorizontalDragUpdate: { [self] d in
+                guard scrubPosition != nil else { return }
+                setState { scrubPosition = target(d.localPosition.dx) }
+            },
+            onHorizontalDragEnd: { [self] _ in
+                guard let t = scrubPosition else { return }
+                setState { scrubPosition = nil }
+                _seek(to: t)
+            },
+            behavior: .opaque,
+            child: MeasureSize(
+                onSize: { [weak self] size in
+                    self?._recordScrubberWidth(size.width)
+                },
+                child: SizedBox(
+                    height: rowH,
+                    child: Stack(children: [
+                        Positioned(
+                            left: 0, top: (rowH - trackH) / 2, right: 0,
+                            height: trackH,
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    color: Color(rgbo: 255, 255, 255, 0.25),
+                                    borderRadius: BorderRadius.circular(trackH / 2)
+                                )
+                            )
+                        ),
+                        Positioned(
+                            left: 0, top: (rowH - trackH) / 2,
+                            width: max(thumbX + thumbD / 2, trackH),
+                            height: trackH,
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    color: Color(rgbo: 255, 255, 255, 0.9),
+                                    borderRadius: BorderRadius.circular(trackH / 2)
+                                )
+                            )
+                        ),
+                        Positioned(
+                            left: thumbX, top: (rowH - thumbD) / 2,
+                            width: thumbD, height: thumbD,
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    color: Color(0xFFFFFFFF),
+                                    borderRadius: BorderRadius.circular(thumbD / 2),
+                                    boxShadow: [BoxShadow(
+                                        color: Color(rgbo: 0, 0, 0, 0.35),
+                                        offset: Offset(0, 1),
+                                        blurRadius: 2
+                                    )]
+                                )
+                            )
+                        ),
+                    ])
+                )
+            )
+        )
+    }
+
+    /// Fires from MeasureSize during layout — bounce to the main queue
+    /// before touching state (the codebase-wide MeasureSize rule).
+    private func _recordScrubberWidth(_ w: Double) {
+        if abs(w - scrubberW) < 0.5 { return }
+        let update: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.setState { self.scrubberW = w }
+        }
+        DispatchQueue.main.async(
+            execute: unsafeBitCast(update, to: (@Sendable () -> Void).self))
     }
 }
