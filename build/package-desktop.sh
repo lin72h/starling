@@ -251,7 +251,8 @@ if [ -L "$XDG" ] || [ ! -d "$XDG" ] || [ ! -O "$XDG" ]; then
 fi
 chmod 700 "$XDG"
 mkdir -p "$XDG/data/dbus-1/services"
-for n in org.freedesktop.secrets org.freedesktop.portal.Desktop; do
+for n in org.freedesktop.secrets org.freedesktop.portal.Desktop \
+         org.freedesktop.Notifications; do
     printf '[D-BUS Service]\nName=%s\nExec=/usr/bin/false\n' "$n" \
         > "$XDG/data/dbus-1/services/$n.service"
 done

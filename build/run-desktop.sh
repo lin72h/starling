@@ -130,7 +130,8 @@ if [ -L "$XDG" ] || [ ! -d "$XDG" ] || [ ! -O "$XDG" ]; then
     exit 1
 fi
 mkdir -p "$XDG/data/dbus-1/services"
-for n in org.freedesktop.secrets org.freedesktop.portal.Desktop; do
+for n in org.freedesktop.secrets org.freedesktop.portal.Desktop \
+         org.freedesktop.Notifications; do
     printf '[D-BUS Service]\nName=%s\nExec=/usr/bin/false\n' "$n" \
         > "$XDG/data/dbus-1/services/$n.service"
 done
@@ -140,10 +141,15 @@ if [ -e "$XDG/bus" ] && { [ ! -S "$XDG/bus" ] || [ ! -O "$XDG/bus" ]; }; then
     rm -f "$XDG/bus"
 fi
 if [ ! -S "$XDG/bus" ]; then
+    # Log inside $XDG, never a fixed /tmp name: a root-owned leftover of a
+    # shared log path made this redirect fail, and the backgrounded daemon
+    # died before exec — silently, leaving the whole session busless (no
+    # portal, no notifications) while everything else worked.
     setsid env XDG_DATA_HOME="$XDG/data" \
         dbus-daemon --session --address="unix:path=$XDG/bus" --nofork \
-        >/tmp/starling-session-bus.log 2>&1 &
+        >"$XDG/bus.log" 2>&1 &
     for _ in $(seq 1 10); do [ -S "$XDG/bus" ] && break; sleep 0.2; done
+    [ -S "$XDG/bus" ] || echo "run-desktop: WARNING — session bus did not start ($XDG/bus.log)" >&2
 fi
 echo "bus:    $XDG/bus"
 

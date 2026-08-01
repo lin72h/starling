@@ -80,6 +80,7 @@ let shellDeps: [Target.Dependency] = [
     "WaylandServerBridge",
     "X11Server",
     "PortalService",
+    "NotificationService",
     "ImeBridge",
     .product(name: "StarlingRegistry", package: "StarlingRegistry"),
     .product(name: "StarlingNet", package: "StarlingNet"),
@@ -144,6 +145,14 @@ targets += [
         linkerSettings: [
             .linkedLibrary(sdbusLib),
         ] + (starlingDeploy.map { [.unsafeFlags(["-L\($0)/lib"])] } ?? [])
+    ),
+    // Notification daemon (org.freedesktop.Notifications) using sd-bus
+    .target(
+        name: "NotificationService",
+        path: "Sources/NotificationService",
+        publicHeadersPath: "include",
+        cSettings: sdbusCSettings,
+        linkerSettings: sdbusLinkerSettings
     ),
     // fcitx5 DBus input-method bridge (IME: preedit, commits, candidates)
     .target(

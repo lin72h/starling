@@ -682,6 +682,51 @@ def check_wifi_popup_connect() -> None:
         drive("key esc")
 
 
+@check("notifications: the daemon draws what the bus is told, and closes honestly")
+def check_notifications() -> None:
+    """Drives org.freedesktop.Notifications over the session's real bus (as
+    the session user — a session bus refuses other uids) and asserts through
+    the broker, never pixels: a post appears as a banner, CloseNotification
+    removes it, and a short-timeout post removes itself. The daemon is the
+    shell's own; a stock one cannot be here, the launchers mask it.
+    """
+    bus = os.path.dirname(broker_path()) + "/bus"
+    if not os.path.exists(bus):
+        raise Skip("no session bus socket beside the broker")
+    user = os.environ.get("SUDO_USER")
+
+    def busctl(*args: str) -> str:
+        cmd = ["busctl", f"--address=unix:path={bus}", "call",
+               "org.freedesktop.Notifications",
+               "/org/freedesktop/Notifications",
+               "org.freedesktop.Notifications"] + list(args)
+        if os.geteuid() == 0 and user:
+            cmd = ["sudo", "-u", user] + cmd
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        assert r.returncode == 0, f"busctl failed: {r.stderr.strip()}"
+        return r.stdout.strip()
+
+    def ids() -> list:
+        return [n["id"] for n in ask("notification_state")["notifications"]]
+
+    info = busctl("GetServerInformation")
+    assert '"Starling"' in info, f"someone else answers the bus name: {info}"
+
+    nid = int(busctl("Notify", "susssasa{sv}i", "functest", "0", "",
+                     "posted", "body", "0", "0", "60000").split()[1])
+    wait_for(lambda: nid in ids(), "the banner to appear")
+    busctl("CloseNotification", "u", str(nid))
+    wait_for(lambda: nid not in ids(), "CloseNotification to remove it")
+
+    quick = int(busctl("Notify", "susssasa{sv}i", "functest", "0", "",
+                       "fleeting", "gone on its own", "0", "0", "1500")
+                .split()[1])
+    wait_for(lambda: quick in ids(), "the short-lived banner to appear")
+    wait_for(lambda: quick not in ids(), "expiry to remove it on its own",
+             timeout=10)
+    log("posted, closed by call, and expired — all through the real bus")
+
+
 @check("battery: the status bar tracks the kernel's battery")
 def check_battery() -> None:
     """Driven with the kernel's own fake-battery driver (test_power), which

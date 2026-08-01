@@ -124,6 +124,7 @@ nonisolated(unsafe) var linuxProcessAppManager: LinuxProcessAppManager? = nil
 nonisolated(unsafe) var waylandIntegration: WaylandIntegration? = nil
 nonisolated(unsafe) var x11Integration: X11Integration? = nil
 nonisolated(unsafe) var portalIntegration: PortalIntegration? = nil
+nonisolated(unsafe) var notificationIntegration: NotificationIntegration? = nil
 
 /// Current shell DPI — updated at runtime by Settings app. Read this instead
 /// of the FLUTTER_DRM_DPI env var for coordinate conversion.
@@ -647,6 +648,14 @@ func runDRM() -> Never {
     // reaches the shell via the _shellState global.
     portal.setChooserLauncher(portalChooserLaunchThunk, userdata: nil)
     portalIntegration = portal
+
+    // The notification daemon, on the same pinned bus for the same reasons.
+    // The launchers mask org.freedesktop.Notifications so a stock daemon
+    // cannot be activation-raced onto this bus, exactly like the portal.
+    let notifications = NotificationIntegration()
+    notifications.start(busAddress: "unix:path=\(LoginUser.runtimeDir)/bus",
+                        targetUid: getuid() == 0 ? UInt32(LoginUser.uid) : 0)
+    notificationIntegration = notifications
 
     // Schedule first frame.
     PlatformDispatcher.instance.scheduleFrame()

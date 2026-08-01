@@ -450,6 +450,19 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // The banners the daemon is showing right now, so the functional
+        // tier can post over the real bus and assert what appeared without
+        // reading pixels.
+        if op == "notification_state" {
+            conn.send(["id": id, "ok": true,
+                       "notifications": shell._notifications.map {
+                           ["id": Int($0.id), "app": $0.appName,
+                            "summary": $0.summary,
+                            "urgency": $0.urgency] as [String: Any]
+                       }])
+            return
+        }
+
         // The screen as the shell sees it. Tooling that synthesises absolute
         // pointer events needs the PHYSICAL size to set up its device and the
         // DPI to convert; guessing either puts every click somewhere else.
