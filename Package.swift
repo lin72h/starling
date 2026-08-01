@@ -251,8 +251,11 @@ products += [
     // IME and a11y come from the same code path real Flutter Linux apps use.
     // Separate product so shell/DRM consumers don't inherit GTK linkage.
     .library(name: "FlutterGTK", targets: ["FlutterGTK"]),
-    // The demo, runnable on a stock desktop: swift run -c release FlutterDemoApp
-    .executable(name: "FlutterDemoApp", targets: ["FlutterDemoApp"]),
+    // The demo, runnable on a stock desktop: swift run -c release FlutterDemo.
+    // Named FlutterDemo, not FlutterDemoApp: the starling desktop ships an app
+    // by that name in the same package graph, and SwiftPM requires target and
+    // product names to be unique across it.
+    .executable(name: "FlutterDemo", targets: ["FlutterDemo"]),
     // Ports of famous Flutter sample apps, hosted the same way as the demo.
     .executable(name: "CounterApp", targets: ["CounterApp"]),
     .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
@@ -457,7 +460,7 @@ targets += [
     // The demo app (rotating boxes + frame-time graph) as a runnable proof
     // that the standalone framework can present on a normal desktop.
     .executableTarget(
-        name: "FlutterDemoApp",
+        name: "FlutterDemo",
         dependencies: [
             "Flutter",
             "FlutterGTK",

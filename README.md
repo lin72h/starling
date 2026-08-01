@@ -92,7 +92,7 @@ conclusion here already.
 ## The demo app
 
 ```bash
-swift run -c release FlutterDemoApp
+swift run -c release FlutterDemo
 ```
 
 opens the framework's demo — rotating boxes plus a frame-time graph — in a
