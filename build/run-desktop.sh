@@ -111,8 +111,10 @@ echo "seat:   $SEAT"
 # empty. Masking it keeps our portal the owner for the life of the session.
 # Owned by the invoking user and 0700 in both modes: /tmp is world-writable,
 # and whoever owns this dir owns every session socket inside it. Root can
-# still reach in, which is all the root-shell dev path needs.
-XDG=/tmp/xdg-starling
+# still reach in, which is all the root-shell dev path needs. The uid suffix
+# matches the packaged session (build/package-desktop.sh): a fixed shared
+# name meant whoever claimed it first locked every other user out.
+XDG=/tmp/xdg-starling-$(id -u)
 if [ "$SEAT" = direct ]; then
     # Root shell: the portal thread drops euid to this user before connecting,
     # so the dir must be owned by them, not by root.

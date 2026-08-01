@@ -126,8 +126,8 @@ sudo apt purge starling         # also remove its config/data
 Removing the package takes the **Starling** entry out of the login menu; your
 other sessions are untouched. `purge` additionally clears
 `/var/lib/starling`. A couple of runtime files may remain in `/tmp`
-(`/tmp/xdg-starling`, `/tmp/starling-session-*.log`); they are cleared on
-reboot.
+(`/tmp/xdg-starling-<uid>`, `/tmp/starling-session-*.log`); they are cleared
+on reboot.
 
 ---
 

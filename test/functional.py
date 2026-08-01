@@ -21,6 +21,7 @@ in a real session (the VM tier). The CLI path those buttons invoke is covered
 here.
 """
 
+import glob
 import json
 import os
 import shutil
@@ -90,8 +91,9 @@ def log(msg: str) -> None:
 # ── broker ───────────────────────────────────────────────────────────────────
 
 def broker_path() -> str:
-    for d in (os.environ.get("XDG_RUNTIME_DIR"), "/tmp/xdg-starling",
-              f"/run/user/{os.environ.get('SUDO_UID', os.getuid())}"):
+    uid = os.environ.get("SUDO_UID", os.getuid())
+    for d in (os.environ.get("XDG_RUNTIME_DIR"), f"/tmp/xdg-starling-{uid}",
+              f"/run/user/{uid}", *sorted(glob.glob("/tmp/xdg-starling-*"))):
         if d and os.path.exists(os.path.join(d, "starling-agent.sock")):
             return os.path.join(d, "starling-agent.sock")
     sys.exit("no starling-agent.sock — is the shell running?")
@@ -201,7 +203,12 @@ def drive(*actions: str) -> None:
 
 
 def app_run(app_id: str) -> subprocess.Popen:
-    return subprocess.Popen([str(APP_RUN), app_id],
+    # The tier runs as root while the session belongs to $SUDO_USER, and the
+    # runtime dir is per-user — app-run's own default would resolve to root's
+    # dir, not the session's. The shell passes STARLING_XDG_DIR to every child
+    # it spawns; do the same, aimed at the session actually under test.
+    env = dict(os.environ, STARLING_XDG_DIR=os.path.dirname(broker_path()))
+    return subprocess.Popen([str(APP_RUN), app_id], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

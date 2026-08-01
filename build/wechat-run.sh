@@ -14,11 +14,11 @@
 #
 # Environment (set by the shell, mirroring app-run.sh):
 #   STARLING_WAYLAND     compositor socket name        (default wayland-0)
-#   STARLING_XDG_DIR     XDG_RUNTIME_DIR of the socket (default /tmp/xdg-starling)
+#   STARLING_XDG_DIR     XDG_RUNTIME_DIR of the socket (default /tmp/xdg-starling-<uid>)
 #   STARLING_APP_SCALE   shell DPI                     (default 2.0)
 set -eu
 
-XDG_DIR="${STARLING_XDG_DIR:-/tmp/xdg-starling}"
+XDG_DIR="${STARLING_XDG_DIR:-/tmp/xdg-starling-$(id -u)}"
 WL_SOCKET="${STARLING_WAYLAND:-wayland-0}"
 XDISPLAY="${STARLING_WECHAT_DISPLAY:-:9}"
 SCALE="${STARLING_APP_SCALE:-2.0}"

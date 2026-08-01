@@ -24,8 +24,9 @@ ATTACH=0
 #
 #  - build/run-desktop.sh expects to be invoked by the user in *both* seat
 #    modes; it escalates internally for the bits that need it (the direct-mode
-#    DRM open). Its $XDG_RUNTIME_DIR guard refuses a /tmp/xdg-starling it does
-#    not own, so running the whole tier under sudo left the dir belonging to the
+#    DRM open). Its $XDG_RUNTIME_DIR guard refuses a runtime dir it does not
+#    own (per-user now: /tmp/xdg-starling-<uid>). Back when the dir was one
+#    shared name, running the whole tier under sudo left it belonging to the
 #    real user while the script was root, and the shell never started at all:
 #    "run-desktop: /tmp/xdg-starling is not a directory owned by root — refusing".
 #    The tier reported only "the shell did not start", one file away from the
@@ -79,7 +80,9 @@ if [ "$ATTACH" = 0 ]; then
         echo "a shell is already running — use --attach, or stop it first" >&2
         exit 2
     fi
-    rm -f /tmp/xdg-starling/wayland-0.lock
+    # The shell runs as $SUDO_USER (as_user below), so its runtime dir —
+    # per-user since the two-user lockout fix — carries that uid.
+    rm -f "/tmp/xdg-starling-$(id -u "${SUDO_USER:-$(id -un)}")/wayland-0.lock"
     # run-desktop.sh re-stages, and it now does so as the invoking user. A
     # previous `sudo build/run-desktop.sh` (or `sudo build/stage.sh`) leaves
     # .stage root-owned, and staging then dies on "Permission denied" from
@@ -111,7 +114,7 @@ if [ "$ATTACH" = 0 ]; then
     if ! pgrep -x DesktopShellApp >/dev/null; then
         # Surface the reason here rather than only naming the log. run-desktop.sh
         # refuses on its own line for several ordinary conditions — GPU still
-        # held, no seat, a /tmp/xdg-starling it does not own — and "the shell did
+        # held, no seat, a runtime dir it does not own — and "the shell did
         # not start" alone sent one debugging session to the wrong file.
         echo "the shell did not start — see ${TMPDIR:-/tmp}/starling-functional.log" >&2
         tail -3 "${TMPDIR:-/tmp}/starling-functional.log" 2>/dev/null | sed 's/^/    /' >&2

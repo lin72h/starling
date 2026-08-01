@@ -225,14 +225,19 @@ export FLUTTER_DRM_DEVICE="${FLUTTER_DRM_DEVICE:-/dev/dri/card0}"
 # then serves only its backend-less interfaces — FileChooser needs an
 # impl.portal.desktop.* backend and none declares Starling, so file dialogs
 # break in every Chromium/Electron/GTK app.
-# $XDG is a fixed name in a world-writable /tmp, so before trusting it we
-# have to prove it is ours: a second local user can create it first, and
+# $XDG is a per-user name: a fixed shared one locked the second user out of
+# the desktop entirely — nothing removes the dir on logout, so whoever
+# session-started first owned it until reboot and every other user's login
+# bounced straight back to GDM. The uid suffix gives each user their own
+# claim. It is still a predictable name in a world-writable /tmp, so before
+# trusting it we have to prove it is ours: anyone can pre-create it, and
 # `mkdir -p` succeeds just the same on someone else's directory. Owning it
 # would mean owning every socket the session puts inside — the Wayland
 # socket, the agent broker, the bus. A symlink there is the same attack with
 # an extra hop, so reject anything that is not a real directory we own, and
-# keep it 0700 so nobody can reach in afterwards.
-XDG=/tmp/xdg-starling
+# keep it 0700 so nobody can reach in afterwards. (Pre-creating someone
+# else's dir is now only a denial of service, never a takeover.)
+XDG=/tmp/xdg-starling-$(id -u)
 mkdir -p "$XDG" 2>/dev/null
 if [ -L "$XDG" ] || [ ! -d "$XDG" ] || [ ! -O "$XDG" ]; then
     echo "starling-session: $XDG is not a directory owned by $(id -un) —" \

@@ -119,14 +119,17 @@ def _screen():
 
 def broker_socket():
     """The shell's broker socket. Under sudo XDG_RUNTIME_DIR is usually the
-    caller's, not the session's, so fall back to the dev session dir and
-    then to the invoking user's runtime dir."""
+    caller's, not the session's, so fall back to the dev session dir
+    (per-user: /tmp/xdg-starling-<uid>), the invoking user's runtime dir,
+    and finally any user's session dir — driving another user's session is
+    how the packaged session gets tested."""
     candidates = []
     if os.environ.get("XDG_RUNTIME_DIR"):
         candidates.append(os.environ["XDG_RUNTIME_DIR"])
-    candidates.append("/tmp/xdg-starling")
     uid = os.environ.get("SUDO_UID") or str(os.getuid())
+    candidates.append(f"/tmp/xdg-starling-{uid}")
     candidates.append(f"/run/user/{uid}")
+    candidates += sorted(glob.glob("/tmp/xdg-starling-*"))
     for d in candidates:
         path = os.path.join(d, "starling-agent.sock")
         if os.path.exists(path):

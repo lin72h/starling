@@ -396,7 +396,7 @@ rm -rf ~/.cache/clang
   the connector filter reject every output, giving
   `[DRM] No connected connector found` on a perfectly good display. Forward
   optional vars only when non-empty (see `build/run-desktop.sh`).
-- **If the shell dies uncleanly** it leaves `/tmp/xdg-starling/wayland-0.lock`
+- **If the shell dies uncleanly** it leaves `/tmp/xdg-starling-<uid>/wayland-0.lock`
   and the next run listens on `wayland-1`; clients must use the socket from the
   current run's `wayland_server: listening on wayland-N` log line.
 - `pkill -f <word>` matches its own `bash -c` line — use `pkill -x`.

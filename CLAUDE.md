@@ -193,8 +193,10 @@ Build / runtime:
   private `XDG_DATA_HOME` servicedir (searched first) — that is what both
   launchers do for `org.freedesktop.secrets` and
   `org.freedesktop.portal.Desktop`. To check who actually answers:
-  `busctl --address=unix:path=/tmp/xdg-starling/bus call org.freedesktop.DBus
-  /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s <name>`.
+  `busctl --address=unix:path=/tmp/xdg-starling-$(id -u)/bus call
+  org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus
+  GetNameOwner s <name>` (the runtime dir is per-user — use the uid of
+  whoever runs the session).
 - **A plain `swift build` can silently give you a stale `sdk/`.** Each package
   compiles its own copy of the framework, and their incremental state does not
   always notice that `sdk/` moved underneath them. Adding a *new file* there is
@@ -247,7 +249,7 @@ Engine / compositor:
 - `EvdevToHID` (engine repo, `fl_drm_input.cc`) and
   `WaylandIntegration.hidToEvdev` (shell) are exact inverses. **Change one,
   change the other**, or letters break for Wayland clients.
-- If the shell dies uncleanly it leaves `/tmp/xdg-starling/wayland-0.lock` and
-  the next run listens on **wayland-1**; clients must use the socket from the
-  current run's `wayland_server: listening on wayland-N` log line.
+- If the shell dies uncleanly it leaves `/tmp/xdg-starling-<uid>/wayland-0.lock`
+  and the next run listens on **wayland-1**; clients must use the socket from
+  the current run's `wayland_server: listening on wayland-N` log line.
 - `pkill -f <word>` matches its own `bash -c` line — use `pkill -x`.

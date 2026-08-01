@@ -26,6 +26,7 @@ fails loudly instead of silently clicking empty space.
 """
 
 import base64
+import glob
 import json
 import zlib
 import os
@@ -39,8 +40,12 @@ import urllib.request
 
 
 def broker_path() -> str:
-    for d in (os.environ.get("XDG_RUNTIME_DIR"), "/run/user/%d" % os.getuid(),
-              "/tmp/xdg-starling"):
+    # Own session first; the glob covers driving a session owned by someone
+    # else (root tooling) — the runtime dir is per-user, /tmp/xdg-starling-<uid>.
+    dirs = [os.environ.get("XDG_RUNTIME_DIR"), "/run/user/%d" % os.getuid(),
+            "/tmp/xdg-starling-%d" % os.getuid()]
+    dirs += sorted(glob.glob("/tmp/xdg-starling-*"))
+    for d in dirs:
         if d and os.path.exists(os.path.join(d, "starling-agent.sock")):
             return os.path.join(d, "starling-agent.sock")
     sys.exit("no starling-agent.sock — is the Starling shell running?")
@@ -226,7 +231,7 @@ def attach_to_page(browser_ws: str, targets_url: str, prefer_url: str = None) ->
 
 def state_path() -> str:
     for d in (os.environ.get("XDG_RUNTIME_DIR"), "/run/user/%d" % os.getuid(),
-              "/tmp/xdg-starling"):
+              "/tmp/xdg-starling-%d" % os.getuid()):
         if d and os.path.isdir(d):
             return os.path.join(d, "starling-agent-client.json")
     return os.path.expanduser("~/.starling-agent-client.json")

@@ -43,7 +43,7 @@ set -eu
 
 RUNTIME="${STARLING_APP_RUNTIME:-/var/lib/starling-apps/runtime}"
 HOMES="${STARLING_APP_HOMES:-/var/lib/starling-apps/homes}"
-XDG_DIR="${STARLING_XDG_DIR:-/tmp/xdg-starling}"
+XDG_DIR="${STARLING_XDG_DIR:-/tmp/xdg-starling-$(id -u)}"
 SOCKET="${STARLING_WAYLAND:-wayland-0}"
 # Follow the shell's actual DPI (the shell exports FLUTTER_DRM_DPI to every
 # child, so store-launched apps inherit it); 2.0 matches the shell default.
