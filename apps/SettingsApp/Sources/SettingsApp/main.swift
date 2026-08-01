@@ -35,6 +35,10 @@ class _ThemedSettingsRootState: State<StatefulWidget> {
         GpuDmaBufRenderer.onLayoutChanged = { tiling in
             settingsBlocShared?.add(.layoutApplied(tiling))
         }
+        // Wallpaper pushes keep the picker's selection ring live.
+        GpuDmaBufRenderer.onWallpaperChanged = { preset in
+            settingsBlocShared?.add(.wallpaperApplied(preset))
+        }
         #endif
     }
 

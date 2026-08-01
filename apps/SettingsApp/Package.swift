@@ -40,6 +40,8 @@ let package = Package(
         .package(name: "FlutterSwift", path: "../../sdk"),
         // The nmcli layer, shared with the shell so the two cannot drift.
         .package(name: "StarlingNet", path: "../../network"),
+        // The sysfs battery layer, shared with the shell's popup.
+        .package(name: "StarlingPower", path: "../../power"),
     ],
     targets: [
         {
@@ -52,6 +54,7 @@ let package = Package(
                     .product(name: "Flutter", package: "FlutterSwift"),
                     .product(name: "CupertinoIcons", package: "FlutterSwift"),
                     .product(name: "StarlingNet", package: "StarlingNet"),
+                    .product(name: "StarlingPower", package: "StarlingPower"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
@@ -74,6 +77,7 @@ let package = Package(
                 dependencies: [
                     .product(name: "FlutterShared", package: "FlutterSwift"),
                     .product(name: "StarlingNet", package: "StarlingNet"),
+                    .product(name: "StarlingPower", package: "StarlingPower"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),

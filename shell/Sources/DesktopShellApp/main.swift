@@ -495,6 +495,11 @@ func runDRM() -> Never {
         _shellState?._setTiling(tiling)
     }
 
+    // Wallpaper preset requests (SettingsApp's wallpaper picker).
+    processManager.onWallpaperChangeRequested = { preset in
+        _shellState?._setWallpaper(preset)
+    }
+
     // Caret reports from child apps drive the IME candidate panel placement.
     processManager.onCaretChanged = { texId, x, y, w, h, visible in
         _shellState?._imeCaretChanged(textureId: texId, x: x, y: y,

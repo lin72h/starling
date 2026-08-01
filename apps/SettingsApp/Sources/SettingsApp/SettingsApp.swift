@@ -130,7 +130,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     self._sidebarItem(index: 3, icon: CupertinoIcons.paintbrush_fill,
                                                       tile: Color(0xFF8A70CE), label: "Appearance", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 4, icon: CupertinoIcons.info_circle_fill,
+                                    self._sidebarItem(index: 4, icon: CupertinoIcons.battery_100,
+                                                      tile: Color(0xFF63A56E), label: "Power", selected: s.selectedIndex),
+                                    SizedBox(height: 2),
+                                    self._sidebarItem(index: 5, icon: CupertinoIcons.info_circle_fill,
                                                       tile: Color(0xFF4FA4B4), label: "About", selected: s.selectedIndex),
                                 ]
                             )
@@ -235,7 +238,8 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 1: return "Network"
         case 2: return "Displays"
         case 3: return "Appearance"
-        case 4: return "About"
+        case 4: return "Power"
+        case 5: return "About"
         default: return "Settings"
         }
     }
@@ -246,7 +250,8 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 1: return _buildNetworkPage(context)
         case 2: return _buildDisplayPage()
         case 3: return _buildAppearancePage()
-        case 4: return _buildAboutPage()
+        case 4: return _buildPowerPage()
+        case 5: return _buildAboutPage()
         default: return SizedBox(shrink: ())
         }
     }
@@ -264,7 +269,7 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                     _sectionHeader("System Information"),
                     SizedBox(height: 12),
                     _macosGroupBox([
-                        _settingsRow("Starling OS", "Version \(SystemInfo.starlingVersion)"),
+                        _settingsRow("Starling OS", "Version \(SystemInfo.starlingVersion())"),
                         _divider(),
                         _settingsRow("OS", s.osVersion),
                         _divider(),
@@ -615,70 +620,147 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     onChanged: { [self] (val: Bool) in bloc.add(.toggleTilingWM(val)) }
                                 )
                             ),
-                            _divider(),
-                            _settingsRowWithTrailing(
-                                "Notifications", "Show desktop notifications",
-                                MacosSwitch(
-                                    value: s.notifications,
-                                    onChanged: { [self] (val: Bool) in bloc.add(.toggleNotifications(val)) }
-                                )
-                            ),
-                            _divider(),
-                            _settingsRowWithTrailing(
-                                "Auto-Update", "Automatically install system updates",
-                                MacosSwitch(
-                                    value: s.autoUpdate,
-                                    onChanged: { [self] (val: Bool) in bloc.add(.toggleAutoUpdate(val)) }
-                                )
-                            ),
                         ]),
                         SizedBox(height: 20),
-                        _sectionHeader("Sound & Brightness"),
+                        _sectionHeader("Wallpaper"),
                         SizedBox(height: 12),
                         _macosGroupBox([
                             Padding(
-                                padding: EdgeInsets(horizontal: 16, vertical: 10),
-                                child: Row(children: [
-                                    SizedBox(
-                                        width: 80,
-                                        child: Text("Brightness", style: TextStyle(color: pal.textPrimary, fontSize: 13))
-                                    ),
-                                    Expanded(
-                                        child: Slider(
-                                            value: s.brightness,
-                                            onChanged: { [self] (val: Double) in bloc.add(.changeBrightness(val)) },
-                                            min: 0, max: 100
-                                        )
-                                    ),
-                                ])
-                            ),
-                            _divider(),
-                            Padding(
-                                padding: EdgeInsets(horizontal: 16, vertical: 10),
-                                child: Row(children: [
-                                    SizedBox(
-                                        width: 80,
-                                        child: Text("Volume", style: TextStyle(color: pal.textPrimary, fontSize: 13))
-                                    ),
-                                    Expanded(
-                                        child: Slider(
-                                            value: s.volume,
-                                            onChanged: { [self] (val: Double) in bloc.add(.changeVolume(val)) },
-                                            min: 0, max: 100
-                                        )
-                                    ),
-                                ])
+                                padding: EdgeInsets(horizontal: 16, vertical: 12),
+                                child: Row(children: _wallpaperSwatches(selected: s.wallpaper))
                             ),
                         ]),
-                        // No accent picker here. The desktop's accent is fixed
-                        // per theme (ShellTheme.accent), and the swatches that
-                        // used to sit here were decoration — no gesture
-                        // handler, nothing behind them — so clicking one did
-                        // nothing. A control that looks settable and isn't is
-                        // worse than its absence; bring it back with the
-                        // Settings→shell plumbing that would make it real.
+                        // No Notifications or Auto-Update toggles, no
+                        // Brightness or Volume sliders, and no accent picker.
+                        // All five sat here once, flipping local state and
+                        // nothing else — a control that looks settable and
+                        // isn't is worse than its absence. Each comes back
+                        // with the backend that makes it real (a notification
+                        // daemon, an updater, a backlight writer, an audio
+                        // layer, the accent plumbing).
                     ]
                 )
+            )
+        )
+    }
+
+    /// One swatch per shell wallpaper preset. The raw values and colors
+    /// mirror WallpaperPreset in the shell — the shell owns the enum; this
+    /// is its presentation here, and an unknown value from a newer shell
+    /// simply shows no selection ring.
+    private func _wallpaperSwatches(selected: Int) -> [Widget] {
+        let presets: [(raw: Int, name: String, color: Color)] = [
+            (0, "Photo", Color(0xFF3A6EA8)),
+            (1, "Slate", Color(0xFF2C3444)),
+            (2, "Dusk",  Color(0xFF342C4E)),
+            (3, "Ocean", Color(0xFF173540)),
+            (4, "Ember", Color(0xFF3C302B)),
+        ]
+        var out: [Widget] = []
+        for p in presets {
+            out.append(GestureDetector(
+                onTap: { [self] in bloc.add(.selectWallpaper(p.raw)) },
+                child: Padding(
+                    padding: EdgeInsets(right: 14),
+                    child: Column(mainAxisSize: .min, children: [
+                        DecoratedBox(
+                            decoration: BoxDecoration(
+                                color: p.color,
+                                border: selected == p.raw
+                                    ? Border.all(color: Color(0xFF4880C8), width: 2)
+                                    : Border.all(color: Color(0x33808080), width: 1),
+                                borderRadius: BorderRadius.circular(6)
+                            ),
+                            child: SizedBox(width: 64, height: 40)
+                        ),
+                        SizedBox(height: 4),
+                        Text(p.name, style: TextStyle(
+                            color: selected == p.raw ? pal.textPrimary : pal.textSecondary,
+                            fontSize: 11)),
+                    ])
+                )
+            ))
+        }
+        return out
+    }
+
+    // MARK: - Power Page
+
+    /// "2 h 05 min" under an hour shortens to "45 min" — the same spelling
+    /// as the shell's battery popup.
+    private func _formatMinutes(_ minutes: Int) -> String {
+        if minutes >= 60 {
+            return "\(minutes / 60) h \(String(format: "%02d", minutes % 60)) min"
+        }
+        return "\(minutes) min"
+    }
+
+    private func _buildPowerPage() -> Widget {
+        let b = bloc.state.battery
+        var children: [Widget] = [
+            _sectionHeader("Battery"),
+            SizedBox(height: 12),
+        ]
+        if b.present {
+            let barColor: Color = b.state == .discharging && b.percent <= 20
+                ? Color(0xFFFF3B30)
+                : (b.state == .charging ? Color(0xFF34C759) : Color(0xFF4880C8))
+            var rows: [Widget] = [
+                _settingsRow("Charge", "\(b.percent)%"),
+                Padding(
+                    padding: EdgeInsets(left: 16, top: 2, right: 16, bottom: 12),
+                    child: SizedBox(
+                        height: 8,
+                        child: DecoratedBox(
+                            decoration: BoxDecoration(
+                                color: Color(0x33808080),
+                                borderRadius: BorderRadius.circular(4)
+                            ),
+                            child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: FractionallySizedBox(
+                                    widthFactor: Double(b.percent) / 100.0,
+                                    child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                            color: barColor,
+                                            borderRadius: BorderRadius.circular(4)
+                                        ),
+                                        child: SizedBox(expand: ())
+                                    )
+                                )
+                            )
+                        )
+                    )
+                ),
+                _divider(),
+                _settingsRow("Status", b.state.label),
+                _divider(),
+                _settingsRow("Power Source", b.acOnline ? "AC Power" : "Battery"),
+            ]
+            // Estimate rows only when the kernel offered a rate — a missing
+            // estimate reads as a missing row, never a made-up time.
+            if b.state == .charging, let m = b.minutesToFull {
+                rows.append(_divider())
+                rows.append(_settingsRow("Time to Full", _formatMinutes(m)))
+            } else if b.state == .discharging, let m = b.minutesToEmpty {
+                rows.append(_divider())
+                rows.append(_settingsRow("Time Remaining", _formatMinutes(m)))
+            }
+            children.append(_macosGroupBox(rows))
+        } else {
+            children.append(_macosGroupBox([
+                _settingsRow("Battery", "None detected"),
+            ]))
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                "This machine reports no system battery — power settings apply to laptops.",
+                style: TextStyle(color: pal.textTertiary, fontSize: 11)
+            ))
+        }
+        return Padding(
+            padding: EdgeInsets(all: 24),
+            child: SingleChildScrollView(
+                child: Column(crossAxisAlignment: .start, children: children)
             )
         )
     }
@@ -718,7 +800,7 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     ),
                                     SizedBox(height: 4),
                                     Text(
-                                        "Version \(SystemInfo.starlingVersion)",
+                                        "Version \(SystemInfo.starlingVersion())",
                                         style: TextStyle(color: pal.textSecondary, fontSize: 13)
                                     ),
                                 ]

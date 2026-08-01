@@ -112,6 +112,17 @@ class LinuxProcessAppManager {
 
     private let pendingLayoutRequests = AtomicBox<[Bool]>([])
 
+    /// Fired on the platform thread when a child (SettingsApp's wallpaper
+    /// picker) asks to switch the desktop wallpaper preset.
+    var onWallpaperChangeRequested: ((Int) -> Void)?
+
+    /// The shell's current wallpaper preset raw value, pushed to children at
+    /// connect so the Settings picker reflects reality (kept in sync by
+    /// _setWallpaper).
+    nonisolated(unsafe) var currentWallpaper: Int = 0
+
+    private let pendingWallpaperRequests = AtomicBox<[Int]>([])
+
     /// Pending caret reports from child processes (textureId, x, y, width,
     /// height in the child's logical content coords, visible).
     private let pendingCaretUpdates =
@@ -182,6 +193,7 @@ class LinuxProcessAppManager {
                 // appearance (further switches arrive via broadcastTheme).
                 sendTheme(textureId: texId, dark: shellTheme.isDark)
                 sendLayout(textureId: texId, tiling: currentLayoutIsTiling)
+                sendWallpaper(textureId: texId, preset: currentWallpaper)
 
                 // Import DMA-BUF as EGLImage → GL texture (zero-copy)
                 textureRegistry.importDmaBuf(
@@ -272,6 +284,13 @@ class LinuxProcessAppManager {
         if !themeChanges.isEmpty {
             if let lastDark = themeChanges.last {
                 onThemeChangeRequested?(lastDark)
+            }
+        }
+
+        let wallpaperRequests = pendingWallpaperRequests.take([])
+        if !wallpaperRequests.isEmpty {
+            if let lastPreset = wallpaperRequests.last {
+                onWallpaperChangeRequested?(lastPreset)
             }
         }
 
@@ -436,6 +455,7 @@ class LinuxProcessAppManager {
         let pendingDpiChanges = self.pendingDpiChanges
         let pendingThemeChanges = self.pendingThemeChanges
         let pendingLayoutRequests = self.pendingLayoutRequests
+        let pendingWallpaperRequests = self.pendingWallpaperRequests
         let pendingCaretUpdates = self.pendingCaretUpdates
         let pendingTerminations = self.pendingTerminations
         let capturedEngine = unsafeBitCast(engine, to: Int.self)
@@ -529,6 +549,9 @@ class LinuxProcessAppManager {
                     } else if event.type == DMABUF_CONTROL_SET_LAYOUT {
                         pendingLayoutRequests.withLock { $0.append(event.x > 0.5) }
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
+                    } else if event.type == DMABUF_CONTROL_SET_WALLPAPER {
+                        pendingWallpaperRequests.withLock { $0.append(Int(event.x)) }
+                        FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CARET {
                         let bits = UInt64(bitPattern: event.buttons)
                         let w = Double(Float(bitPattern: UInt32(truncatingIfNeeded: bits)))
@@ -615,6 +638,23 @@ class LinuxProcessAppManager {
         currentLayoutIsTiling = tiling
         for texId in apps.keys {
             sendLayout(textureId: texId, tiling: tiling)
+        }
+    }
+
+    /// Pushes the wallpaper preset to one child.
+    func sendWallpaper(textureId: Int64, preset: Int) {
+        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        var event = DmaBufInputEvent(x: Double(preset), y: 0, buttons: 0,
+                                     type: Int32(DMABUF_CONTROL_SET_WALLPAPER),
+                                     phase: 0)
+        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+    }
+
+    /// Wallpaper switch: push to every child so Settings pickers stay live.
+    func broadcastWallpaper(preset: Int) {
+        currentWallpaper = preset
+        for texId in apps.keys {
+            sendWallpaper(textureId: texId, preset: preset)
         }
     }
 

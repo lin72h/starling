@@ -502,6 +502,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         #if os(Linux)
         linuxProcessAppManager?.currentLayoutIsTiling = windowManager.tilingEnabled
         #endif
+        // Wallpaper choice persists the same way.
+        if let s = try? String(contentsOfFile: Self._wallpaperFile, encoding: .utf8),
+           let raw = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+           let preset = WallpaperPreset(rawValue: raw) {
+            wallpaperPreset = preset
+        }
+        #if os(Linux)
+        linuxProcessAppManager?.currentWallpaper = wallpaperPreset.rawValue
+        #endif
         windowManager.onWindowsChanged = { [weak self] in
             guard let self else { return }
             self.windowManager.retileAll(
@@ -3832,7 +3841,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         children.append(_popupActionRow(label: "Battery Settings...") { [self] in
             setState {
                 activeStatusBarPopup = nil
-                _launchOrFocusApp("settings")
+                _launchOrFocusApp("settings", extraArgs: ["--pane=power"])
             }
         })
         return _statusPopupPanel(popup: .battery, children: children)
@@ -5198,6 +5207,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         LoginUser.configDir + "/window-layout"
     }
 
+    private static var _wallpaperFile: String {
+        LoginUser.configDir + "/wallpaper"
+    }
+
     /// Switch between the floating window manager (default) and dwm-style
     /// master-stack tiling; persists the choice like the appearance.
     /// Leaving tiling restores every window's remembered floating rect.
@@ -5222,6 +5235,24 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             withIntermediateDirectories: true)
         try? (enabled ? "tiling" : "floating").write(
             toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Switch the desktop wallpaper preset (Settings' picker); persists and
+    /// broadcasts like the appearance. An out-of-range value from a child is
+    /// dropped, not clamped — a picker that sends nonsense is a picker whose
+    /// idea of the presets has drifted, and clamping would hide that.
+    func _setWallpaper(_ raw: Int) {
+        guard let preset = WallpaperPreset(rawValue: raw),
+              preset != wallpaperPreset else { return }
+        setState { wallpaperPreset = preset }
+        #if os(Linux)
+        linuxProcessAppManager?.broadcastWallpaper(preset: raw)
+        #endif
+        let path = Self._wallpaperFile
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try? String(raw).write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     /// Restore the persisted appearance before the first build.

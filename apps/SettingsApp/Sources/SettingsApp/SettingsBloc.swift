@@ -5,6 +5,7 @@ import Flutter
 import Foundation
 import Observation
 import StarlingNet
+import StarlingPower
 
 /// Set by _SettingsAppState so the themed root can sync the Dark Mode
 /// switch when the shell pushes an appearance change.
@@ -17,7 +18,7 @@ nonisolated(unsafe) var settingsBlocShared: SettingsBloc?
 /// or absent pane falls through to General.
 func initialPaneIndex() -> Int {
     let panes = ["general": 0, "network": 1, "displays": 2,
-                 "appearance": 3, "about": 4]
+                 "appearance": 3, "power": 4, "about": 5]
     for arg in CommandLine.arguments.dropFirst() {
         if arg.hasPrefix("--pane="),
            let idx = panes[String(arg.dropFirst("--pane=".count)).lowercased()] {
@@ -56,14 +57,17 @@ struct SettingsState {
     var darkMode: Bool = GpuDmaBufRenderer.lastPushedThemeIsDark ?? true
     /// Window-manager layout — the shell owns it and pushes at connect.
     var tilingWM: Bool = GpuDmaBufRenderer.lastPushedLayoutIsTiling ?? false
+    /// Wallpaper preset raw value — the shell owns it and pushes at connect.
+    var wallpaper: Int = GpuDmaBufRenderer.lastPushedWallpaper ?? 0
     #else
     var darkMode: Bool = true
     var tilingWM: Bool = false
+    var wallpaper: Int = 0
     #endif
-    var notifications: Bool = true
-    var autoUpdate: Bool = false
-    var brightness: Double = 75.0
-    var volume: Double = 50.0
+
+    // Power. Seeded synchronously — a handful of sysfs reads — so the pane
+    // never draws a made-up default; refreshed on a 5s tick while visible.
+    var battery: BatteryStatus = BatteryReader.read()
 }
 
 // MARK: - Settings Events
@@ -93,10 +97,12 @@ enum SettingsEvent {
     case toggleTilingWM(Bool)
     /// Layout pushed by the shell (no echo back).
     case layoutApplied(Bool)
-    case toggleNotifications(Bool)
-    case toggleAutoUpdate(Bool)
-    case changeBrightness(Double)
-    case changeVolume(Double)
+    case selectWallpaper(Int)
+    /// Wallpaper pushed by the shell (no echo back).
+    case wallpaperApplied(Int)
+
+    // Power
+    case refreshBattery
 }
 
 // MARK: - Settings BLoC
@@ -112,8 +118,10 @@ final class SettingsBloc: @unchecked Sendable {
         switch event {
         case .loadInitialData:
             _loadInitialData()
+            if state.selectedIndex == Self.powerPaneIndex { _refreshBattery() }
         case .selectTab(let index):
             state.selectedIndex = index
+            if index == Self.powerPaneIndex { _refreshBattery() }
         case .toggleWifi(let enabled):
             _toggleWifi(enabled)
         case .scanNetworks:
@@ -139,16 +147,18 @@ final class SettingsBloc: @unchecked Sendable {
             _applyLayout(value)
         case .layoutApplied(let value):
             state.tilingWM = value
-        case .toggleNotifications(let value):
-            state.notifications = value
-        case .toggleAutoUpdate(let value):
-            state.autoUpdate = value
-        case .changeBrightness(let value):
-            state.brightness = value
-        case .changeVolume(let value):
-            state.volume = value
+        case .selectWallpaper(let value):
+            state.wallpaper = value
+            _applyWallpaper(value)
+        case .wallpaperApplied(let value):
+            state.wallpaper = value
+        case .refreshBattery:
+            _refreshBattery()
         }
     }
+
+    /// Sidebar index of the Power pane (see initialPaneIndex's table).
+    static let powerPaneIndex = 4
 
     // MARK: - Event Handlers
 
@@ -306,5 +316,45 @@ final class SettingsBloc: @unchecked Sendable {
                 state.networkStatus = "Forgot \"\(connectionName)\""
             }
         }
+    }
+
+    /// Forward the wallpaper pick to the shell, which repaints, persists,
+    /// and pushes the choice back to every child.
+    private func _applyWallpaper(_ preset: Int) {
+        #if os(Linux)
+        GpuDmaBufRenderer.current?.sendWallpaperChange(preset: preset)
+        #endif
+    }
+
+    // MARK: - Battery
+
+    /// Re-read sysfs off the main thread (a misbehaving driver can stall a
+    /// read), then keep a 5s tick alive while the Power pane is the one on
+    /// screen. Leaving the pane lets the pending tick fire once and lapse.
+    private var _batteryTickScheduled = false
+
+    private func _refreshBattery() {
+        Task.detached {
+            let status = BatteryReader.read()
+            await MainActor.run { [self] in
+                state.battery = status
+                _scheduleBatteryTick()
+            }
+        }
+    }
+
+    private func _scheduleBatteryTick() {
+        guard state.selectedIndex == Self.powerPaneIndex,
+              !_batteryTickScheduled else { return }
+        _batteryTickScheduled = true
+        let work: () -> Void = { [weak self] in
+            guard let self else { return }
+            self._batteryTickScheduled = false
+            guard self.state.selectedIndex == Self.powerPaneIndex else { return }
+            self.add(.refreshBattery)
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 5,
+            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
     }
 }

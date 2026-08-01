@@ -15,7 +15,23 @@ import Glibc
 
 struct SystemInfo {
 
-    static let starlingVersion = "0.2.1"
+    /// The installed package's version, stamped into the payload by
+    /// package-desktop.sh. A source checkout has no stamp — that is a dev
+    /// build, and saying so beats carrying a copy of the version here:
+    /// this used to be a hardcoded string, and it shipped reading "0.2.1"
+    /// on a 0.2.2 install.
+    static func starlingVersion() -> String {
+        let dirs = [ProcessInfo.processInfo.environment["STARLING_DATA_DIR"],
+                    "/usr/share/starling"].compactMap { $0 }
+        for dir in dirs {
+            if let v = try? String(contentsOfFile: dir + "/VERSION",
+                                   encoding: .utf8) {
+                let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return "dev build"
+    }
 
     static func osVersion() -> String {
         #if os(Linux)

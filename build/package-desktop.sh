@@ -117,6 +117,11 @@ mkdir -p "$ROOT/var/lib/starling/installed.d"
 cp -r "$OUT/stage/lib"   "$LIB"
 cp -r "$OUT/stage/share" "$SHARE"
 cp -a "$OUT/stage/bin/." "$ROOT/usr/bin/"
+# The version, stamped where Settings reads it. Only the package writes this
+# — a dev tree has no stamp and Settings says "dev build", which is the
+# truth. Settings used to carry its own copy of this string, and it shipped
+# reading 0.2.1 on a 0.2.2 install.
+printf '%s\n' "$VER" > "$SHARE/VERSION"
 
 # --- licensing -----------------------------------------------------------------
 # Debian policy requires /usr/share/doc/<pkg>/copyright, and it is also how the
