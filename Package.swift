@@ -537,13 +537,16 @@ targets += [
 targets += [
     // The kalender calendar package (werner-scholtz/kalender), ported: event
     // and calendar controllers, view configurations, the event-overlap and
-    // multi-day layout delegates, and the day/week/month views.
+    // multi-day layout delegates, and the day/week/month views. It lives in
+    // Examples/ with the app it serves — a ported third-party package, not
+    // part of the SDK — but stays a library product so it can be depended on.
     .target(
         name: "Kalender",
         dependencies: [
             "Flutter",
             "FlutterSwiftBridge",
         ],
+        path: "Examples/Kalender",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
     ),
     // kalender's demo: a week view with a view switcher, ported.
