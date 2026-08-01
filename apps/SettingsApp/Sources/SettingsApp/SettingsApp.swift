@@ -7,6 +7,7 @@ import CupertinoIcons
 import Foundation
 import Observation
 import StarlingNet
+import StarlingTime
 
 // MARK: - SettingsApp
 
@@ -130,13 +131,16 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     self._sidebarItem(index: 3, icon: CupertinoIcons.speaker_2_fill,
                                                       tile: Color(0xFFC9884E), label: "Sound", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 4, icon: CupertinoIcons.paintbrush_fill,
+                                    self._sidebarItem(index: 4, icon: CupertinoIcons.clock_fill,
+                                                      tile: Color(0xFF5CA0A8), label: "Date & Time", selected: s.selectedIndex),
+                                    SizedBox(height: 2),
+                                    self._sidebarItem(index: 5, icon: CupertinoIcons.paintbrush_fill,
                                                       tile: Color(0xFF8A70CE), label: "Appearance", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 5, icon: CupertinoIcons.battery_100,
+                                    self._sidebarItem(index: 6, icon: CupertinoIcons.battery_100,
                                                       tile: Color(0xFF63A56E), label: "Power", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 6, icon: CupertinoIcons.info_circle_fill,
+                                    self._sidebarItem(index: 7, icon: CupertinoIcons.info_circle_fill,
                                                       tile: Color(0xFF4FA4B4), label: "About", selected: s.selectedIndex),
                                 ]
                             )
@@ -241,9 +245,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 1: return "Network"
         case 2: return "Displays"
         case 3: return "Sound"
-        case 4: return "Appearance"
-        case 5: return "Power"
-        case 6: return "About"
+        case 4: return "Date & Time"
+        case 5: return "Appearance"
+        case 6: return "Power"
+        case 7: return "About"
         default: return "Settings"
         }
     }
@@ -254,9 +259,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 1: return _buildNetworkPage(context)
         case 2: return _buildDisplayPage()
         case 3: return _buildSoundPage()
-        case 4: return _buildAppearancePage()
-        case 5: return _buildPowerPage()
-        case 6: return _buildAboutPage()
+        case 4: return _buildDateTimePage()
+        case 5: return _buildAppearancePage()
+        case 6: return _buildPowerPage()
+        case 7: return _buildAboutPage()
         default: return SizedBox(shrink: ())
         }
     }
@@ -687,6 +693,132 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             ))
         }
         return out
+    }
+
+    // MARK: - Date & Time Page
+
+    private func _buildDateTimePage() -> Widget {
+        let s = bloc.state
+        let t = s.time
+        var children: [Widget] = []
+        if !t.available {
+            children.append(_sectionHeader("Date & Time"))
+            children.append(SizedBox(height: 12))
+            children.append(_macosGroupBox([
+                _settingsRow("Clock service", "Not running"),
+            ]))
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                "systemd-timedated is not answering — there is nothing to configure.",
+                style: TextStyle(color: pal.textTertiary, fontSize: 11)
+            ))
+        } else {
+            children.append(_sectionHeader("Date & Time"))
+            children.append(SizedBox(height: 12))
+            var clockRows: [Widget] = [
+                _settingsRow("Current Time", t.localTime),
+            ]
+            if t.canNTP {
+                clockRows.append(_divider())
+                clockRows.append(_settingsRowWithTrailing(
+                    "Set time automatically", "Sync the clock over the network (NTP)",
+                    MacosSwitch(
+                        value: t.ntpEnabled,
+                        onChanged: { [self] (val: Bool) in bloc.add(.toggleNTP(val)) }
+                    )
+                ))
+                clockRows.append(_divider())
+                clockRows.append(_settingsRow(
+                    "Synchronized", t.ntpSynchronized ? "Yes" : "No"))
+            }
+            children.append(_macosGroupBox(clockRows))
+            children.append(SizedBox(height: 20))
+            children.append(_sectionHeader("Time Zone"))
+            children.append(SizedBox(height: 12))
+            children.append(_macosGroupBox(_timezoneRows(s)))
+        }
+        if let error = s.timeError {
+            children.append(SizedBox(height: 8))
+            // polkit's refusal, verbatim: a session that is not seat-active
+            // is not allowed to set the clock, and pretending the toggle
+            // worked would be worse than showing why it didn't.
+            children.append(Text(
+                error,
+                style: TextStyle(color: Color(0xFFE0655A), fontSize: 11)
+            ))
+        }
+        return Padding(
+            padding: EdgeInsets(all: 24),
+            child: SingleChildScrollView(
+                child: Column(crossAxisAlignment: .start, children: children)
+            )
+        )
+    }
+
+    /// The timezone group: the current zone as a tappable row; open, it
+    /// becomes a two-step picker (region, then city) fed from
+    /// `timedatectl list-timezones` — the picker never invents a zone the
+    /// system would refuse.
+    private func _timezoneRows(_ s: SettingsState) -> [Widget] {
+        var rows: [Widget] = [
+            GestureDetector(
+                onTap: { [self] in
+                    bloc.add(.setTzPicker(open: !s.tzPickerOpen, region: nil))
+                },
+                child: _settingsRowWithTrailing(
+                    "Time Zone", s.time.timezone,
+                    MacosIcon(icon: s.tzPickerOpen
+                                  ? CupertinoIcons.chevron_up
+                                  : CupertinoIcons.chevron_down,
+                              color: pal.textSecondary, size: 12)
+                )
+            ),
+        ]
+        guard s.tzPickerOpen else { return rows }
+        if s.timezones.isEmpty {
+            rows.append(_divider())
+            rows.append(_settingsRow("Loading zones…", ""))
+            return rows
+        }
+        if let region = s.tzPickerRegion {
+            rows.append(_divider())
+            rows.append(GestureDetector(
+                onTap: { [self] in bloc.add(.setTzPicker(open: true, region: nil)) },
+                child: _settingsRow("‹ All Regions", region)
+            ))
+            for zone in TimeControl.zones(s.timezones, inRegion: region) {
+                let city = zone.contains("/")
+                    ? String(zone.split(separator: "/", maxSplits: 1)[1])
+                        .replacingOccurrences(of: "_", with: " ")
+                    : zone
+                rows.append(_divider())
+                rows.append(GestureDetector(
+                    onTap: { [self] in bloc.add(.selectTimezone(zone)) },
+                    child: _settingsRowWithTrailing(
+                        city, "",
+                        zone == s.time.timezone
+                            ? MacosIcon(icon: CupertinoIcons.checkmark_circle_fill,
+                                        color: Color(0xFF4880C8), size: 16)
+                            : SizedBox(width: 16, height: 16)
+                    )
+                ))
+            }
+        } else {
+            for region in TimeControl.regions(of: s.timezones) {
+                rows.append(_divider())
+                rows.append(GestureDetector(
+                    onTap: { [self] in
+                        bloc.add(.setTzPicker(open: true, region: region))
+                    },
+                    child: _settingsRowWithTrailing(
+                        region, "",
+                        MacosIcon(icon: CupertinoIcons.chevron_right,
+                                  color: pal.textSecondary, size: 12)
+                    )
+                ))
+            }
+        }
+        return rows
     }
 
     // MARK: - Sound Page

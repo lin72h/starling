@@ -7,6 +7,7 @@ import Observation
 import StarlingAudio
 import StarlingNet
 import StarlingPower
+import StarlingTime
 
 /// Set by _SettingsAppState so the themed root can sync the Dark Mode
 /// switch when the shell pushes an appearance change.
@@ -19,7 +20,7 @@ nonisolated(unsafe) var settingsBlocShared: SettingsBloc?
 /// or absent pane falls through to General.
 func initialPaneIndex() -> Int {
     let panes = ["general": 0, "network": 1, "displays": 2, "sound": 3,
-                 "appearance": 4, "power": 5, "about": 6]
+                 "datetime": 4, "appearance": 5, "power": 6, "about": 7]
     for arg in CommandLine.arguments.dropFirst() {
         if arg.hasPrefix("--pane="),
            let idx = panes[String(arg.dropFirst("--pane=".count)).lowercased()] {
@@ -74,6 +75,18 @@ struct SettingsState {
     // spawns wpctl twice, too heavy for state init on the main thread.
     // _loadInitialData fills it off-main before the pane can be reached.
     var audio = AudioStatus()
+
+    // Date & Time. Same contract as audio: seeded empty, filled off-main.
+    var time = TimeStatus()
+    /// The zone list, loaded once when the picker first opens (485 rows).
+    var timezones: [String] = []
+    var tzPickerOpen = false
+    /// nil = picking a region; set = picking a city within it.
+    var tzPickerRegion: String? = nil
+    /// polkit's refusal (or any tool error) from the last mutation — shown
+    /// under the pane verbatim. A seat-active session never sees one; an
+    /// SSH-launched dev desktop always does, and that difference is real.
+    var timeError: String? = nil
 }
 
 // MARK: - Settings Events
@@ -115,6 +128,12 @@ enum SettingsEvent {
     case changeVolume(Double)
     case toggleMute(Bool)
     case selectSink(Int)
+
+    // Date & Time
+    case refreshTime
+    case toggleNTP(Bool)
+    case setTzPicker(open: Bool, region: String?)
+    case selectTimezone(String)
 }
 
 // MARK: - Settings BLoC
@@ -132,10 +151,12 @@ final class SettingsBloc: @unchecked Sendable {
             _loadInitialData()
             if state.selectedIndex == Self.powerPaneIndex { _refreshBattery() }
             if state.selectedIndex == Self.soundPaneIndex { _refreshAudio() }
+            if state.selectedIndex == Self.dateTimePaneIndex { _refreshTime() }
         case .selectTab(let index):
             state.selectedIndex = index
             if index == Self.powerPaneIndex { _refreshBattery() }
             if index == Self.soundPaneIndex { _refreshAudio() }
+            if index == Self.dateTimePaneIndex { _refreshTime() }
         case .toggleWifi(let enabled):
             _toggleWifi(enabled)
         case .scanNetworks:
@@ -178,12 +199,26 @@ final class SettingsBloc: @unchecked Sendable {
             _applyMute(value)
         case .selectSink(let id):
             _selectSink(id)
+        case .refreshTime:
+            _refreshTime()
+        case .toggleNTP(let value):
+            state.time.ntpEnabled = value
+            _applyNTP(value)
+        case .setTzPicker(let open, let region):
+            state.tzPickerOpen = open
+            state.tzPickerRegion = region
+            if open && state.timezones.isEmpty { _loadTimezones() }
+        case .selectTimezone(let zone):
+            state.tzPickerOpen = false
+            state.tzPickerRegion = nil
+            _applyTimezone(zone)
         }
     }
 
     /// Sidebar indices (see initialPaneIndex's table).
     static let soundPaneIndex = 3
-    static let powerPaneIndex = 5
+    static let dateTimePaneIndex = 4
+    static let powerPaneIndex = 6
 
     // MARK: - Event Handlers
 
@@ -430,6 +465,68 @@ final class SettingsBloc: @unchecked Sendable {
             AudioControl.setDefaultSink(id: id)
             let status = AudioControl.status()
             await MainActor.run { [self] in state.audio = status }
+        }
+    }
+
+    // MARK: - Date & Time
+
+    /// Same shape as the battery and audio: re-read off-main, tick while
+    /// the pane is on screen so the clock line and sync state stay current.
+    private var _timeTickScheduled = false
+
+    private func _refreshTime() {
+        Task.detached {
+            let status = TimeControl.status()
+            await MainActor.run { [self] in
+                state.time = status
+                _scheduleTimeTick()
+            }
+        }
+    }
+
+    private func _scheduleTimeTick() {
+        guard state.selectedIndex == Self.dateTimePaneIndex,
+              !_timeTickScheduled else { return }
+        _timeTickScheduled = true
+        let work: () -> Void = { [weak self] in
+            guard let self else { return }
+            self._timeTickScheduled = false
+            guard self.state.selectedIndex == Self.dateTimePaneIndex else { return }
+            self.add(.refreshTime)
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 5,
+            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+    }
+
+    private func _loadTimezones() {
+        Task.detached {
+            let zones = TimeControl.listTimezones()
+            await MainActor.run { [self] in state.timezones = zones }
+        }
+    }
+
+    private func _applyNTP(_ enabled: Bool) {
+        Task.detached {
+            let error = TimeControl.setNTP(enabled)
+            let status = TimeControl.status()
+            await MainActor.run { [self] in
+                state.timeError = error
+                // The refresh is what reverts the switch on a refusal —
+                // the pane shows what the system did, not what was asked.
+                state.time = status
+            }
+        }
+    }
+
+    private func _applyTimezone(_ zone: String) {
+        Task.detached {
+            let error = TimeControl.setTimezone(zone)
+            let status = TimeControl.status()
+            await MainActor.run { [self] in
+                state.timeError = error
+                state.time = status
+            }
         }
     }
 }

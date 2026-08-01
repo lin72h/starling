@@ -44,6 +44,8 @@ let package = Package(
         .package(name: "StarlingPower", path: "../../power"),
         // The wpctl layer — PipeWire wrapped once.
         .package(name: "StarlingAudio", path: "../../audio"),
+        // The timedatectl layer — systemd-timedated wrapped once.
+        .package(name: "StarlingTime", path: "../../time"),
     ],
     targets: [
         {
@@ -58,6 +60,7 @@ let package = Package(
                     .product(name: "StarlingNet", package: "StarlingNet"),
                     .product(name: "StarlingPower", package: "StarlingPower"),
                     .product(name: "StarlingAudio", package: "StarlingAudio"),
+                    .product(name: "StarlingTime", package: "StarlingTime"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
@@ -82,6 +85,7 @@ let package = Package(
                     .product(name: "StarlingNet", package: "StarlingNet"),
                     .product(name: "StarlingPower", package: "StarlingPower"),
                     .product(name: "StarlingAudio", package: "StarlingAudio"),
+                    .product(name: "StarlingTime", package: "StarlingTime"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),

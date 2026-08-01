@@ -3892,6 +3892,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     )
                 )
             ),
+            _popupDivider(),
+            _popupActionRow(label: "Date & Time Settings...") { [self] in
+                setState {
+                    activeStatusBarPopup = nil
+                    _launchOrFocusApp("settings", extraArgs: ["--pane=datetime"])
+                }
+            },
         ])
     }
 

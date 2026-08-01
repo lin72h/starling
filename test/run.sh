@@ -81,6 +81,11 @@ step "unit tests: audio"
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
 
+step "unit tests: time"
+(cd "$REPO/time" && as_user "$SWIFT" test 2>&1 \
+    | grep -vE "libxml2.so.2: no version information" \
+    | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
+
 # sdk/'s test targets cannot be run with a plain `swift test` on Ubuntu 26.04:
 # the 6.2.4 toolchain is an ubuntu24.04 build, and under C++ interop 26.04's
 # libstdc++ 15 headers make Foundation's _CStdlib.h pull <cmath> textually
