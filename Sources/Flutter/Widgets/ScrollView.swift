@@ -355,6 +355,14 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
     /// Whether layout reported an underflow.
     private var _didUnderflow: Bool = false
 
+    /// The index of the child currently being inflated or updated — Dart's
+    /// `_currentlyUpdatingChildIndex`. `didAdoptChild` stamps it into the
+    /// adopted child's parentData, which must happen *inside* the sliver's
+    /// `insert()` (its child-order verification runs `indexOf` on every
+    /// child, and asserts on a nil index) — stamping after `insert()`
+    /// returns is too late for debug builds.
+    private var _currentlyUpdatingChildIndex: Int? = nil
+
     // MARK: - Lifecycle
 
     override func mount(_ parent: Element?, _ newSlot: Any?) {
@@ -377,6 +385,8 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
             for index in _childElements.keys.sorted() {
                 guard let oldElement = _childElements[index] else { continue }
                 if let newChildWidget = newAdaptorWidget.delegate.build(self, index: index) {
+                    _currentlyUpdatingChildIndex = index
+                    defer { _currentlyUpdatingChildIndex = nil }
                     _childElements[index] = updateChild(
                         oldElement, newWidget: newChildWidget, newSlot: index)
                 } else {
@@ -427,6 +437,8 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
         }
 
         // Inflate the widget to create an element and render object.
+        _currentlyUpdatingChildIndex = index
+        defer { _currentlyUpdatingChildIndex = nil }
         let childElement = inflateWidget(childWidget, index)
         _childElements[index] = childElement
 
@@ -437,8 +449,11 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
         if let childRO = childElement.findRenderObject() as? RenderBox {
             let renderSliver = renderObject as! RenderSliverMultiBoxAdaptor
             if childRO.parent == nil {
+                // didAdoptChild stamps the index during this insert.
                 renderSliver.insert(childRO, after: after)
             }
+            // Also stamp directly for the already-attached path, where
+            // insert() — and with it didAdoptChild — does not run.
             let parentData = childRO.parentData as? SliverMultiBoxAdaptorParentData
             parentData?.index = index
         }
@@ -503,11 +518,17 @@ class _SliverMultiBoxAdaptorElement: RenderObjectElement, RenderSliverBoxChildMa
         return adaptorWidget.delegate.estimatedChildCount
     }
 
-    /// Called when a child is adopted by the render object.
+    /// Called when a child is adopted by the render object, from inside its
+    /// `insert()`. Stamps the index onto the child's parentData right away —
+    /// the sliver verifies child order (via `indexOf`, which asserts on a
+    /// nil index) before `insert()` returns, so waiting for `createChild`
+    /// to stamp it afterwards crashes debug builds.
     ///
     /// **Dart Source:** `sliver.dart:1027`
     func didAdoptChild(_ child: RenderBox) {
-        // Index is set in createChild.
+        guard let index = _currentlyUpdatingChildIndex else { return }
+        let childParentData = child.parentData as? SliverMultiBoxAdaptorParentData
+        childParentData?.index = index
     }
 
     /// Called to indicate whether the render object reported an underflow.

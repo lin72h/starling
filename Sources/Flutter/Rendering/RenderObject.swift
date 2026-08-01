@@ -721,6 +721,12 @@ open class RenderObject: HitTestTarget {
     ///
     /// **Dart Source:** `object.dart:2595-2834`
     public func layout(_ constraints: Constraints, parentUsesSize: Bool = false) {
+        // Dart asserts every applied constraint here (object.dart:2612).
+        // Without this, a tight-infinite constraint — e.g. a stretch
+        // cross-axis under an unbounded Row/Column — silently produces an
+        // infinite child that paints over everything after it, instead of
+        // the "BoxConstraints forces an infinite width/height" diagnostic.
+        assert(constraints.debugAssertIsValid(isAppliedConstraint: true))
         // Short-circuit: if this node doesn't need layout and the constraints
         // haven't changed, skip the expensive performLayout() call entirely.
         // This prevents walking clean subtrees during layout.
