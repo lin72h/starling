@@ -22,14 +22,19 @@ let taskManagerBloc = TaskManagerBloc()
 // MARK: - Palette and table metrics
 
 private enum Style {
+    /// Follows the shell's appearance — flipped by ThemedTaskManagerRoot
+    /// before the rebuild, so every var below reads the right side.
+    nonisolated(unsafe) static var dark = false
+
     static let accent = Color(0xFF007AFF)
-    static let body = Color(0xDD000000)
-    static let dim = Color(0x8A000000)
-    static let faint = Color(0x61000000)
-    static let cardBorder = Color(0x1F000000)
-    static let chrome = Color(0xFFF5F5F5)
-    static let stripe = Color(0x05000000)
-    static let divider = Color(0x14000000)
+    static var body: Color { dark ? Color(0xDDFFFFFF) : Color(0xDD000000) }
+    static var dim: Color { dark ? Color(0x8AFFFFFF) : Color(0x8A000000) }
+    static var faint: Color { dark ? Color(0x61FFFFFF) : Color(0x61000000) }
+    static var cardBorder: Color { dark ? Color(0x26FFFFFF) : Color(0x1F000000) }
+    static var card: Color { dark ? Color(0xFF232326) : Color(0xFFFFFFFF) }
+    static var chrome: Color { dark ? Color(0xFF2A2A2D) : Color(0xFFF5F5F5) }
+    static var stripe: Color { dark ? Color(0x0AFFFFFF) : Color(0x05000000) }
+    static var divider: Color { dark ? Color(0x1FFFFFFF) : Color(0x14000000) }
 
     static let cpuSeries = Color(0xFF2E7CF6)
     static let memorySeries = Color(0xFF34A853)
@@ -123,7 +128,7 @@ private class StatTile: StatelessWidget {
     override func build(_ context: any BuildContext) -> Widget {
         return DecoratedBox(
             decoration: BoxDecoration(
-                color: Color(0xFFFFFFFF),
+                color: Style.card,
                 border: Border.all(color: Style.cardBorder),
                 borderRadius: BorderRadius.all(Radius(circular: 6))
             )
@@ -403,6 +408,46 @@ class _TaskManagerPageState: State<StatefulWidget> {
 
 // MARK: - Run
 
+/// Rebuilds MacosApp with the pushed appearance (shell sends the theme at
+/// connect and on every switch) and flips the Style palette — the same
+/// shape as FileExplorer's ThemedFilesRoot, so the app matches the desktop
+/// instead of shipping its standalone-era hardcoded light.
+private class ThemedTaskManagerRoot: StatefulWidget {
+    override func createState() -> State<StatefulWidget> {
+        return _ThemedTaskManagerRootState()
+    }
+}
+
+private class _ThemedTaskManagerRootState: State<StatefulWidget> {
+    private var _dark = false
+
+    override func initState() {
+        super.initState()
+        // The shell pushed the desktop appearance when we connected, before
+        // this tree existed. Seed from it so the first frame is already right.
+        if let dark = GpuDmaBufRenderer.lastPushedThemeIsDark {
+            _dark = dark
+            Style.dark = dark
+        }
+        GpuDmaBufRenderer.onThemeChanged = { [weak self] dark in
+            guard let self, self._dark != dark else { return }
+            Style.dark = dark
+            self.setState { self._dark = dark }
+            // The process table rebuilds every tick anyway; pull the next
+            // one forward so rows re-read the palette immediately.
+            taskManagerBloc.add(.tick)
+        }
+    }
+
+    override func build(_ context: any BuildContext) -> Widget {
+        return MacosApp(
+            theme: _dark ? MacosThemeData.dark() : MacosThemeData.light(),
+            home: TaskManagerPage(),
+            title: "Task Manager"
+        )
+    }
+}
+
 // Sample once a second, on whatever loop the host runs the UI on — the BLoC
 // mutates state right where the rebuild happens. Registered before the loop
 // starts; it first fires once the tree is mounted.
@@ -411,11 +456,7 @@ startPeriodicTimer(seconds: 1) {
 }
 
 runStarlingApp(title: "Task Manager", width: 960, height: 700) {
-    MacosApp(
-        theme: MacosThemeData(brightness: .light),
-        home: TaskManagerPage(),
-        title: "Task Manager"
-    )
+    ThemedTaskManagerRoot()
 }
 
 #else
