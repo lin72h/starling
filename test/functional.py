@@ -682,13 +682,15 @@ def check_wifi_popup_connect() -> None:
         drive("key esc")
 
 
-@check("notifications: the daemon draws what the bus is told, and closes honestly")
+@check("notifications: events collect behind the bell, shown only on click")
 def check_notifications() -> None:
     """Drives org.freedesktop.Notifications over the session's real bus (as
     the session user — a session bus refuses other uids) and asserts through
-    the broker, never pixels: a post appears as a banner, CloseNotification
-    removes it, and a short-timeout post removes itself. The daemon is the
-    shell's own; a stock one cannot be here, the launchers mask it.
+    the broker, never pixels: a post collects silently (bell tints, no
+    popup), clicking the broker-reported bell center opens the center and
+    clears the tint, an expire_timeout does NOT remove anything — events
+    stay until dismissed or CloseNotification. The daemon is the shell's
+    own; a stock one cannot be here, the launchers mask it.
     """
     bus = os.path.dirname(broker_path()) + "/bus"
     if not os.path.exists(bus):
@@ -706,25 +708,38 @@ def check_notifications() -> None:
         assert r.returncode == 0, f"busctl failed: {r.stderr.strip()}"
         return r.stdout.strip()
 
+    def state() -> dict:
+        return ask("notification_state")
+
     def ids() -> list:
-        return [n["id"] for n in ask("notification_state")["notifications"]]
+        return [n["id"] for n in state()["notifications"]]
 
     info = busctl("GetServerInformation")
     assert '"Starling"' in info, f"someone else answers the bus name: {info}"
 
+    # A short expire_timeout is deliberately ignored: nothing may vanish
+    # before the user has looked.
     nid = int(busctl("Notify", "susssasa{sv}i", "functest", "0", "",
-                     "posted", "body", "0", "0", "60000").split()[1])
-    wait_for(lambda: nid in ids(), "the banner to appear")
+                     "collected", "shown only on click", "0", "0", "1500")
+              .split()[1])
+    wait_for(lambda: nid in ids(), "the event to be collected")
+    s = state()
+    assert not s["popup_open"], "a post must not open anything on its own"
+    assert s["unseen"], "the bell should be tinted until the user looks"
+    time.sleep(3)
+    assert nid in ids(), \
+        "the event expired on its own — a center shows what you missed"
+
+    drive(f"click {s['icon']['x']:.0f} {s['icon']['y']:.0f}")
+    wait_for(lambda: state()["popup_open"], "the bell click to open the center")
+    assert not state()["unseen"], "opening the center clears the tint"
+    drive("key esc")
+    wait_for(lambda: not state()["popup_open"], "esc to close the center")
+    assert nid in ids(), "closing the popup must not discard events"
+
     busctl("CloseNotification", "u", str(nid))
     wait_for(lambda: nid not in ids(), "CloseNotification to remove it")
-
-    quick = int(busctl("Notify", "susssasa{sv}i", "functest", "0", "",
-                       "fleeting", "gone on its own", "0", "0", "1500")
-                .split()[1])
-    wait_for(lambda: quick in ids(), "the short-lived banner to appear")
-    wait_for(lambda: quick not in ids(), "expiry to remove it on its own",
-             timeout=10)
-    log("posted, closed by call, and expired — all through the real bus")
+    log("collected, survived its timeout, shown on click, closed by call")
 
 
 @check("battery: the status bar tracks the kernel's battery")

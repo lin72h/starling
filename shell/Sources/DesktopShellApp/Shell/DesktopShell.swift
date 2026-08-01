@@ -69,7 +69,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var contextMenuPosition: Offset?
 
     // Status bar popup state (nil = no popup open)
-    enum StatusBarPopup { case wifi, battery, clock, power }
+    enum StatusBarPopup { case wifi, battery, notifications, clock, power }
     var activeStatusBarPopup: StatusBarPopup? = nil
 
     /// What the power menu is asking the user to confirm, or nil while it is
@@ -147,10 +147,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         var summary: String
         var body: String
         var urgency: Int      // 0 low / 1 normal / 2 critical
-        var expiryGen: Int    // invalidates a pending expiry on replace
     }
     var _notifications: [ShellNotification] = []
-    private var _notificationGen = 0
+    /// A post arrived while the popup was closed — tints the bell until the
+    /// user looks. Opening the popup is "looking"; it clears the tint, not
+    /// the list.
+    var _notificationsUnseen = false
     /// Non-nil while the popup is showing the password prompt for this SSID.
     var _wifiPasswordSSID: String? = nil
     /// The prompt target's SECURITY string (picks WPA2 vs WPA3 key-mgmt).
@@ -2602,19 +2604,6 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
 
         // Status bar popup (shown below status bar when an icon is tapped)
-        // Notification banners, top-right under the status bar. Below the
-        // status popups in the stack: an open popup is the user's current
-        // focus and draws over a banner that happens to arrive under it.
-        if !_notifications.isEmpty {
-            children.append(
-                Positioned(
-                    top: DesktopTheme.kStatusBarHeight + 8,
-                    right: 12,
-                    child: _buildNotificationBanners()
-                )
-            )
-        }
-
         if activeStatusBarPopup != nil {
             _appendDismissBarrier(&children) { [self] in
                 self.activeStatusBarPopup = nil
@@ -2923,6 +2912,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             onTap: { [self] in
                 setState {
                     activeStatusBarPopup = isActive ? nil : popup
+                    // Opening the bell is "looking": the tint clears, the
+                    // list stays.
+                    if activeStatusBarPopup == .notifications {
+                        _notificationsUnseen = false
+                    }
                     contextMenuPosition = nil
                     // Every open starts on the list. Reset here rather than at
                     // each of the eight places that close a popup — one of
@@ -3012,6 +3006,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                            popup: .battery,
                                            color: _batteryStatusColor())
                         }
+                        // The bell fills while anything is collected and
+                        // tints until the user looks; events only ever show
+                        // inside its popup, never as banners over the desktop.
+                        _statusBarItem(icon: _notifications.isEmpty
+                                           ? CupertinoIcons.bell
+                                           : CupertinoIcons.bell_fill,
+                                       popup: .notifications,
+                                       color: _notificationsUnseen
+                                           ? shellTheme.accent : nil)
                         // Rightmost, macOS-style. Until this existed there
                         // was no way to shut the desktop down from the UI
                         // at all — you had to find a terminal and sudo.
@@ -3030,6 +3033,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             return _buildWifiPopup()
         case .battery:
             return _buildBatteryPopup()
+        case .notifications:
+            return _buildNotificationsPopup()
         case .clock:
             return _buildClockPopup()
         case .power:
@@ -3135,17 +3140,19 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// is left-anchored.
     private func _statusPopupGeometry(_ popup: StatusBarPopup) -> (width: Double, left: Double) {
         // Right-side items are 27px wide with 2px spacing, right-padded 16
-        // (see _buildStatusBar): power's right edge is at -16, battery's at
-        // -45. The battery icon exists only on machines with a battery, so
-        // wifi's position depends on it — a fixed -74 put the wifi panel
-        // (and the broker-reported icon center) 29px left of the real icon
-        // on every desktop.
+        // (see _buildStatusBar). Right to left: power at -16 (FIXED — the
+        // release gate clicks it at measured pixels), the bell at -45,
+        // battery at -74 when a battery exists, wifi left of whichever of
+        // those are present. The battery icon exists only on machines with
+        // a battery, so wifi's position depends on it — a fixed offset once
+        // put the wifi panel 29px left of the real icon on every desktop.
         let batteryW: Double = batteryService.snapshot.present ? 29 : 0
         switch popup {
-        case .wifi:    return (280, screenWidth - 45 - batteryW - 280)
-        case .battery: return (260, screenWidth - 45 - 260)
-        case .power:   return (220, screenWidth - 16 - 220)
-        case .clock:   return (260, 16)
+        case .wifi:          return (280, screenWidth - 74 - batteryW - 280)
+        case .battery:       return (260, screenWidth - 74 - 260)
+        case .notifications: return (340, screenWidth - 45 - 340)
+        case .power:         return (220, screenWidth - 16 - 220)
+        case .clock:         return (260, 16)
         }
     }
 
@@ -3876,37 +3883,28 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     // MARK: - Notifications
 
-    /// Upsert from the daemon (already hopped to main). Expiry: the spec's
-    /// timeout is milliseconds, -1 meaning "server default" (6s here) and 0
-    /// meaning never. Critical notifications never auto-expire regardless —
-    /// "the battery is dying" must outlive a glance away — they leave when
-    /// clicked or explicitly closed.
+    /// Upsert from the daemon (already hopped to main). The spec's
+    /// expire_timeout is a banner concept — how long to interrupt the user.
+    /// This desktop never interrupts: events collect behind the bell and are
+    /// shown only when it is clicked, so they stay until the user dismisses
+    /// them or the client closes them. The parameter is accepted and
+    /// ignored, which the spec permits ("the server may override").
     func _notificationPosted(id: UInt32, appName: String, summary: String,
                              body: String, urgency: Int, timeoutMs: Int,
                              replaces: Bool) {
-        _notificationGen += 1
-        let gen = _notificationGen
         setState {
             let note = ShellNotification(id: id, appName: appName,
                                          summary: summary, body: body,
-                                         urgency: urgency, expiryGen: gen)
+                                         urgency: urgency)
             if let i = _notifications.firstIndex(where: { $0.id == id }) {
                 _notifications[i] = note
             } else {
                 _notifications.append(note)
             }
+            if activeStatusBarPopup != .notifications {
+                _notificationsUnseen = true
+            }
         }
-        guard urgency < 2, timeoutMs != 0 else { return }
-        let delay = timeoutMs > 0 ? Double(timeoutMs) / 1000.0 : 6.0
-        let work: () -> Void = { [weak self] in
-            guard let self,
-                  let i = self._notifications.firstIndex(where: { $0.id == id }),
-                  self._notifications[i].expiryGen == gen else { return }
-            self._dismissNotification(id: id, reason: 1)
-        }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + delay,
-            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
     }
 
     /// CloseNotification from the bus (already hopped to main). Closing an
@@ -3921,75 +3919,67 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         notificationIntegration?.emitClosed(id: id, reason: reason)
     }
 
-    /// The visible stack: newest on top, at most five — a flood collapses
-    /// into its five newest, and the rest are still live for the broker and
-    /// for CloseNotification.
-    private func _buildNotificationBanners() -> Widget {
-        let visible = _notifications.suffix(5).reversed()
-        return Column(
-            mainAxisSize: .min,
-            crossAxisAlignment: .end,
-            children: visible.map { note in
-                Padding(
-                    padding: EdgeInsets(left: 0, top: 0, right: 0, bottom: 8),
-                    child: _notificationBanner(note)
-                )
+    /// The bell's popup: every collected event, newest first, in the same
+    /// glass panel as the other status popups. A row's tap dismisses that
+    /// event (reason 2); Clear All dismisses everything. Ten rows render —
+    /// older ones stay live for the broker and CloseNotification, and the
+    /// footer says how many.
+    private func _buildNotificationsPopup() -> Widget {
+        var children: [Widget] = [_popupSectionHeader("Notifications")]
+        if _notifications.isEmpty {
+            children.append(Text(
+                "No notifications",
+                style: TextStyle(color: shellTheme.fgTertiary, fontSize: 12)))
+            return _statusPopupPanel(popup: .notifications, children: children)
+        }
+        let newestFirst = Array(_notifications.reversed())
+        for (i, note) in newestFirst.prefix(10).enumerated() {
+            if i > 0 { children.append(_popupDivider()) }
+            var lines: [Widget] = []
+            if !note.appName.isEmpty {
+                lines.append(Text(
+                    note.appName,
+                    style: TextStyle(color: shellTheme.fgTertiary, fontSize: 10)))
+                lines.append(SizedBox(height: 2))
             }
-        )
-    }
-
-    private func _notificationBanner(_ note: ShellNotification) -> Widget {
-        var lines: [Widget] = []
-        if !note.appName.isEmpty {
             lines.append(Text(
-                note.appName,
-                style: TextStyle(color: shellTheme.fgTertiary, fontSize: 10)))
-            lines.append(SizedBox(height: 2))
-        }
-        lines.append(Text(
-            note.summary,
-            style: TextStyle(color: shellTheme.fgPrimary, fontSize: 13,
-                             fontWeight: .w600),
-            overflow: .ellipsis, maxLines: 1))
-        if !note.body.isEmpty {
-            lines.append(SizedBox(height: 2))
-            lines.append(Text(
-                note.body,
-                style: TextStyle(color: shellTheme.fgSecondary, fontSize: 12),
-                overflow: .ellipsis, maxLines: 3))
-        }
-        let panel = DecoratedBox(
-            decoration: BoxDecoration(
-                color: shellTheme.isDark ? Color(0xF21E242E) : Color(0xF2F2F4F8),
-                border: Border.all(
-                    color: note.urgency >= 2
-                        ? Color(0xFFE0655A) : shellTheme.popupInnerBorder,
-                    width: 1.0),
-                borderRadius: BorderRadius.circular(10),
-                boxShadow: [
-                    BoxShadow(color: shellTheme.popupShadow,
-                              offset: Offset(0, 4), blurRadius: 16),
-                ]
-            ),
-            child: SizedBox(
-                width: 340,
-                child: Padding(
-                    padding: EdgeInsets(all: 12),
-                    child: Column(
-                        mainAxisSize: .min,
-                        crossAxisAlignment: .start,
-                        children: lines
-                    )
+                note.summary,
+                style: TextStyle(
+                    color: note.urgency >= 2 ? Color(0xFFE0655A)
+                                             : shellTheme.fgPrimary,
+                    fontSize: 13, fontWeight: .w600),
+                overflow: .ellipsis, maxLines: 1))
+            if !note.body.isEmpty {
+                lines.append(SizedBox(height: 2))
+                lines.append(Text(
+                    note.body,
+                    style: TextStyle(color: shellTheme.fgSecondary, fontSize: 12),
+                    overflow: .ellipsis, maxLines: 3))
+            }
+            children.append(GestureDetector(
+                onTap: { [weak self] in
+                    self?._dismissNotification(id: note.id, reason: 2)
+                },
+                behavior: .opaque,
+                child: Column(
+                    mainAxisSize: .min,
+                    crossAxisAlignment: .start,
+                    children: lines
                 )
-            )
-        )
-        return GestureDetector(
-            onTap: { [weak self] in
-                self?._dismissNotification(id: note.id, reason: 2)
-            },
-            behavior: .opaque,
-            child: panel
-        )
+            ))
+        }
+        if _notifications.count > 10 {
+            children.append(SizedBox(height: 6))
+            children.append(Text(
+                "…and \(_notifications.count - 10) older",
+                style: TextStyle(color: shellTheme.fgTertiary, fontSize: 11)))
+        }
+        children.append(_popupDivider())
+        children.append(_popupActionRow(label: "Clear All") { [self] in
+            let ids = _notifications.map { $0.id }
+            for id in ids { _dismissNotification(id: id, reason: 2) }
+        })
+        return _statusPopupPanel(popup: .notifications, children: children)
     }
 
     private func _buildClockPopup() -> Widget {

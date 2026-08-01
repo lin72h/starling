@@ -450,11 +450,16 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
-        // The banners the daemon is showing right now, so the functional
-        // tier can post over the real bus and assert what appeared without
-        // reading pixels.
+        // The notification center's state — the collected events, the bell's
+        // position and unseen tint, whether its popup is open — so the
+        // functional tier posts over the real bus and asserts what the bell
+        // collects without reading pixels.
         if op == "notification_state" {
+            let icon = shell.statusItemCenter(.notifications)
             conn.send(["id": id, "ok": true,
+                       "icon": ["x": icon.x, "y": icon.y],
+                       "popup_open": shell.activeStatusBarPopup == .notifications,
+                       "unseen": shell._notificationsUnseen,
                        "notifications": shell._notifications.map {
                            ["id": Int($0.id), "app": $0.appName,
                             "summary": $0.summary,
