@@ -195,6 +195,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// cursor approaches the top edge of the screen. The title bar then
     /// overlays inside the window; non-fullscreen windows always show it.
     private var _topBarRevealed: Bool = false
+    /// Same treatment for the dock: hidden while a fullscreen window is on
+    /// top, revealed while the cursor is in its band at the bottom edge.
+    private var _dockRevealed: Bool = false
 
     // Popup tracking: popupId → (textureId, parentSurfaceId, x, y, width, height, mapped)
     // mapped=false until first buffer commit (Hyprland-style: don't render until content ready)
@@ -2130,9 +2133,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // macOS-style auto-hide of the desktop status bar.
         let topmostWindow = windowManager.visibleWindows.last
         let isFullscreenMode = topmostWindow?.isFullscreen ?? false
-        if !isFullscreenMode && _topBarRevealed {
+        if !isFullscreenMode && (_topBarRevealed || _dockRevealed) {
             // No fullscreen window any more — reset reveal state.
             _topBarRevealed = false
+            _dockRevealed = false
         }
 
         // [1..N] Visible windows — both spaces' windows during a slide,
@@ -2510,6 +2514,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // Leaving the AI Space fades the dock in; entering fades it out.
             dockOpacity = agentTarget ? 1.0 - curve.value : curve.value
         }
+        // Fullscreen hides the dock like it hides the status bar — it only
+        // draws while the cursor holds it revealed (the bottom sensor).
+        if isFullscreenMode && !_dockRevealed {
+            dockOpacity = 0
+        }
         if dockOpacity > 0.01 {
             children.append(dockOpacity < 0.99
                 ? Positioned(
@@ -2526,10 +2535,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 : dockWidget)
         }
 
-        // Top-edge cursor sensors for macOS-style auto-hide. While in
-        // fullscreen mode, two translucent Listeners sit on top of everything:
+        // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
+        // mode, three translucent Listeners sit on top of everything:
         //   - Top region: hovering inside reveals the bars.
-        //   - Bottom region: hovering inside hides the bars.
+        //   - Middle region: hovering inside hides both bars and dock.
+        //   - Bottom region: hovering inside reveals the dock.
         // Using `.translucent` lets the events also reach the window content
         // below so the focused Wayland/X11 client still gets hover events.
         if isFullscreenMode && !_missionControlOpen {
@@ -2539,6 +2549,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // cursor "exiting" the sensor zone.
             let revealZoneH = _topBarRevealed
                 ? DesktopTheme.kStatusBarHeight + DesktopTheme.kTitleBarHeight
+                : 4.0
+            // Same shape at the bottom: a sliver to catch the approach, the
+            // dock's whole band while revealed so hovering (and magnifying)
+            // the dock doesn't count as leaving it.
+            let dockZoneH = _dockRevealed
+                ? DesktopTheme.kDockBottomMargin + DesktopTheme.kDockContainerHeight
                 : 4.0
             children.append(
                 Positioned(
@@ -2557,11 +2573,29 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             )
             children.append(
                 Positioned(
-                    left: 0, top: revealZoneH, right: 0, bottom: 0,
+                    left: 0, top: revealZoneH, right: 0, bottom: dockZoneH,
                     child: Listener(
                         onPointerHover: { [self] _ in
-                            if _topBarRevealed {
-                                setState { _topBarRevealed = false }
+                            if _topBarRevealed || _dockRevealed {
+                                setState {
+                                    _topBarRevealed = false
+                                    _dockRevealed = false
+                                }
+                            }
+                        },
+                        behavior: .translucent,
+                        child: SizedBox(expand: ())
+                    )
+                )
+            )
+            children.append(
+                Positioned(
+                    left: 0, right: 0, bottom: 0,
+                    height: dockZoneH,
+                    child: Listener(
+                        onPointerHover: { [self] _ in
+                            if !_dockRevealed {
+                                setState { _dockRevealed = true }
                             }
                         },
                         behavior: .translucent,
