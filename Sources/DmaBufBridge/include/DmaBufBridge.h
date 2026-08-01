@@ -107,6 +107,9 @@ struct DmaBufMeta {
 #define DMABUF_INPUT_SCROLL     0x07
 /* Window-manager layout (either direction): x = 1 tiling, 0 floating. */
 #define DMABUF_CONTROL_SET_LAYOUT 0x09
+/* Desktop wallpaper preset (either direction): x = the preset's raw value.
+ * The shell owns the enum; children treat it as an opaque small integer. */
+#define DMABUF_CONTROL_SET_WALLPAPER 0x0a
 /* Caret rect report (child→parent): x/y = caret top-left in the child's
  * logical content coordinates; buttons packs width (low Float32) and
  * height (high Float32); phase = 1 caret visible / 0 hidden. Drives the

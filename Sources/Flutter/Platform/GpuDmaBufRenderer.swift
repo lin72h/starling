@@ -710,6 +710,14 @@ public class GpuDmaBufRenderer {
         _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
+    /// Ask the shell to switch the wallpaper preset (Settings picker). The
+    /// value is the shell's WallpaperPreset raw value — opaque here.
+    public func sendWallpaperChange(preset: Int) {
+        var event = DmaBufInputEvent(x: Double(preset), y: 0, buttons: 0,
+                                     type: DMABUF_CONTROL_SET_WALLPAPER, phase: 0)
+        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+    }
+
     /// Global reference for child apps to send control messages.
     public nonisolated(unsafe) static var current: GpuDmaBufRenderer? = nil
 
@@ -774,9 +782,39 @@ public class GpuDmaBufRenderer {
         }
     }
 
+    // Wallpaper preset push — same latch/replay contract as the theme.
+
+    public nonisolated(unsafe) static var onWallpaperChanged: ((Int) -> Void)? = nil {
+        didSet {
+            guard let cb = onWallpaperChanged, let preset = pendingWallpaper else { return }
+            pendingWallpaper = nil
+            deliverIntChange(cb, preset)
+        }
+    }
+
+    /// The most recent wallpaper preset the parent pushed, or nil.
+    public private(set) nonisolated(unsafe) static var lastPushedWallpaper: Int? = nil
+
+    private nonisolated(unsafe) static var pendingWallpaper: Int? = nil
+
+    fileprivate static func receiveWallpaperPush(_ preset: Int) {
+        lastPushedWallpaper = preset
+        if let cb = onWallpaperChanged {
+            deliverIntChange(cb, preset)
+        } else {
+            pendingWallpaper = preset
+        }
+    }
+
     /// App UI state is main-thread only; hop before touching it.
     private static func deliverThemeChange(_ cb: @escaping (Bool) -> Void, _ dark: Bool) {
         let call: () -> Void = { cb(dark) }
+        DispatchQueue.main.async(
+            execute: unsafeBitCast(call, to: (@Sendable () -> Void).self))
+    }
+
+    private static func deliverIntChange(_ cb: @escaping (Int) -> Void, _ value: Int) {
+        let call: () -> Void = { cb(value) }
         DispatchQueue.main.async(
             execute: unsafeBitCast(call, to: (@Sendable () -> Void).self))
     }
@@ -1124,6 +1162,11 @@ public class GpuDmaBufRenderer {
 
                     if inputEvent.type == DMABUF_CONTROL_SET_LAYOUT {
                         GpuDmaBufRenderer.receiveLayoutPush(inputEvent.x > 0.5)
+                        continue
+                    }
+
+                    if inputEvent.type == DMABUF_CONTROL_SET_WALLPAPER {
+                        GpuDmaBufRenderer.receiveWallpaperPush(Int(inputEvent.x))
                         continue
                     }
 
