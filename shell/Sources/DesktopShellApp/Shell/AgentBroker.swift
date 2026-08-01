@@ -468,13 +468,37 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // Screen recording as the shell sees it — the state machine, the
+        // elapsed clock, and where the stop indicator is — so a test can
+        // start a recording from the tile, watch it become real, and stop
+        // it, all without reading pixels.
+        if op == "recording_state" {
+            let rec = recordingService
+            let stateName: String
+            switch rec?.state {
+            case .starting:  stateName = "starting"
+            case .recording: stateName = "recording"
+            case .stopping:  stateName = "stopping"
+            default:         stateName = "idle"
+            }
+            let indicator = shell.recordingIndicatorCenter()
+            conn.send(["id": id, "ok": true,
+                       "available": rec?.available ?? false,
+                       "state": stateName,
+                       "recording": rec?.isRecording ?? false,
+                       "elapsed_s": rec?.elapsedSeconds ?? 0,
+                       "indicator": ["x": indicator.x, "y": indicator.y],
+                       "last_file": rec?.lastSavedPath ?? ""])
+            return
+        }
+
         // The control center as drawn right now — the icon, whether it is
         // open, each quick tile's center in declaration order, and the
         // levels behind the sliders — so a test taps what the shell laid
         // out instead of reproducing its arithmetic.
         if op == "control_center_state" {
             let icon = shell.statusItemCenter(.controlCenter)
-            let tileIds = ["wifi", "dark", "tiling", "mute"]
+            let tileIds = ["wifi", "dark", "tiling", "mute", "record"]
             var tiles: [[String: Any]] = []
             for (i, tid) in tileIds.enumerated() {
                 let c = shell.controlCenterTileCenter(i)

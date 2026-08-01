@@ -21,6 +21,7 @@ in a real session (the VM tier). The CLI path those buttons invoke is covered
 here.
 """
 
+import contextlib
 import glob
 import json
 import os
@@ -1049,6 +1050,62 @@ def check_control_center() -> None:
 
     drive("key esc")
     wait_for(lambda: not cc()["open"], "esc to close the panel")
+
+
+@check("recording: the record tile produces a playable MP4")
+def check_recording() -> None:
+    """Starts a recording from the control-center tile, waits for the state
+    machine to reach `recording` — which only happens once a frame has gone
+    all the way through capture, the mailbox, the pacer and into ffmpeg —
+    stops it from the tile, and ffprobes the file the shell says it saved.
+    Skips without ffmpeg (the .deb Recommends it; a dev box may not)."""
+    rec = lambda: ask("recording_state")
+    r = rec()
+    if not r["available"]:
+        raise Skip("no ffmpeg on this machine")
+    assert r["state"] == "idle", f"a recording is already {r['state']}"
+
+    cc = lambda: ask("control_center_state")
+    try:
+        drive(f"click {cc()['icon']['x']:.0f} {cc()['icon']['y']:.0f}")
+        wait_for(lambda: cc()["open"], "the panel to open")
+        tiles = {t["id"]: t for t in cc()["tiles"]}
+        drive(f"click {tiles['record']['x']:.0f} {tiles['record']['y']:.0f}")
+        wait_for(lambda: rec()["state"] == "recording",
+                 "the first frame to reach ffmpeg")
+        time.sleep(2)  # a couple of seconds of real desktop
+        assert rec()["elapsed_s"] >= 1, "the elapsed clock is not advancing"
+
+        drive(f"click {cc()['icon']['x']:.0f} {cc()['icon']['y']:.0f}")
+        wait_for(lambda: cc()["open"], "the panel to reopen")
+        drive(f"click {tiles['record']['x']:.0f} {tiles['record']['y']:.0f}")
+        wait_for(lambda: rec()["state"] == "idle", "the encode to finalize")
+        drive("key esc")
+    finally:
+        if rec()["state"] not in ("idle", "stopping"):
+            drive("key ctrl+shift+r")  # don't leave a session recording
+
+    path = rec()["last_file"]
+    assert path, "the shell reports no saved file"
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name,width,height",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True)
+    try:
+        assert probe.returncode == 0, f"ffprobe rejects {path}: {probe.stderr}"
+        codec, w, h = probe.stdout.strip().split(",")[:3]
+        assert codec == "h264", f"expected h264, got {codec}"
+        # Full-resolution capture: the video is the physical screen, give or
+        # take the even-dimension crop.
+        pw, ph = ask("screen")["physical"]
+        assert abs(int(w) - pw) <= 1 and abs(int(h) - ph) <= 1, \
+            f"recorded {w}x{h}, screen is {pw:.0f}x{ph:.0f}"
+        log(f"{codec} {w}x{h}, {os.path.getsize(path)} bytes")
+    finally:
+        # The tier must not grow the session user's Videos on every run.
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 CHECKS = [v for v in dict(globals()).values()

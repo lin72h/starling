@@ -125,6 +125,11 @@ nonisolated(unsafe) var waylandIntegration: WaylandIntegration? = nil
 nonisolated(unsafe) var x11Integration: X11Integration? = nil
 nonisolated(unsafe) var portalIntegration: PortalIntegration? = nil
 nonisolated(unsafe) var notificationIntegration: NotificationIntegration? = nil
+/// Screen recording. A global (not a shell-state property) because the
+/// engine's frame callback lands on the recorder writer thread, where
+/// touching shell state is off-limits — the service is the thread-safe
+/// mailbox between the two worlds.
+nonisolated(unsafe) var recordingService: RecordingService? = nil
 
 /// Current shell DPI — updated at runtime by Settings app. Read this instead
 /// of the FLUTTER_DRM_DPI env var for coordinate conversion.
@@ -579,6 +584,16 @@ func runDRM() -> Never {
     fl_drm_view_set_present_callback(view, { userData, flipTimeNs, refreshNs in
         guard let wl = waylandIntegration else { return }
         wl.handlePresent(flipTimeNs: flipTimeNs, refreshNs: refreshNs)
+    }, nil)
+
+    // Screen recording: register the frame sink before the event loop runs
+    // (the engine refuses recording_start with no callback). Frames arrive
+    // on the engine's recorder writer thread; ingest copies into the
+    // service's mailbox and returns — nothing here may touch shell state.
+    let recording = RecordingService()
+    recordingService = recording
+    fl_drm_view_set_record_frame_callback(view, { _, rgba, w, h, _ in
+        recordingService?.ingest(rgba, width: Int(w), height: Int(h))
     }, nil)
 
     // Mark as epoll-driven so tick() doesn't dispatch (epoll handles it).

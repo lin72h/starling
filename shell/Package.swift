@@ -86,6 +86,7 @@ let shellDeps: [Target.Dependency] = [
     .product(name: "StarlingNet", package: "StarlingNet"),
     .product(name: "StarlingPower", package: "StarlingPower"),
     .product(name: "StarlingAudio", package: "StarlingAudio"),
+    .product(name: "StarlingRecord", package: "StarlingRecord"),
 ]
 
 let shellSwiftSettings: [SwiftSetting] = [
@@ -201,6 +202,8 @@ let package = Package(
         .package(name: "StarlingPower", path: "../power"),
         // The wpctl layer — the control center's volume slider.
         .package(name: "StarlingAudio", path: "../audio"),
+        // The ffmpeg layer — the control center's screen recorder.
+        .package(name: "StarlingRecord", path: "../record"),
     ],
     targets: targets,
     cxxLanguageStandard: .cxx20

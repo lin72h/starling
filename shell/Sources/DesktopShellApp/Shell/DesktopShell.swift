@@ -333,6 +333,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     private var _frameTick: Int = 0
     private var _frameTickTimer: DispatchSourceTimer?
 
+    // Screen recording: 1s repaint tick for the indicator's elapsed time
+    // (fires only while recording), and the id counter for shell-posted
+    // notifications — high range, disjoint from the daemon's allocator,
+    // which counts up from 1 and cannot plausibly reach 2^31.
+    private var _recordingTickTimer: DispatchSourceTimer?
+    private var _localNoteId: UInt32 = 0x8000_0000
+
     // Modifier key tracking for keyboard shortcuts (Ctrl+Tab, etc.)
     private var _ctrlPressed: Bool = false
     private var _shiftPressed: Bool = false
@@ -614,6 +621,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
             #if os(Linux)
             if fl_drm_view_capture_active() != 0 { tick = true }
+            // Recording rides the same pump: presents carry the engine's
+            // start/stop requests AND feed the frame mailbox, so it runs
+            // from the start tap until the engine confirms the stop.
+            if recordingService?.needsFramePump == true { tick = true }
             #endif
             if tick { self?.setState { self?._frameTick += 1 } }
         }
@@ -642,6 +653,35 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             self?.setState {}
         }
         batteryService.start()
+
+        // Screen recording: state changes repaint the tile + indicator, a
+        // finished session posts to the bell, and a 1s tick keeps the
+        // indicator's elapsed time honest while (and only while) recording
+        // — the tick-only-while-watched shape, like the agent status timer.
+        recordingService?.onChange = { [weak self] in
+            self?.setState {}
+        }
+        recordingService?.onFinished = { [weak self] saved, detail in
+            guard let self else { return }
+            if let saved {
+                let home = LoginUser.home
+                let shown = saved.hasPrefix(home)
+                    ? "~" + saved.dropFirst(home.count) : saved
+                self._postLocalNotification(summary: "Recording saved",
+                                            body: shown)
+            } else {
+                self._postLocalNotification(summary: "Recording failed",
+                                            body: detail)
+            }
+        }
+        let recTimer = DispatchSource.makeTimerSource(queue: .main)
+        recTimer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+        recTimer.setEventHandler { [weak self] in
+            guard let self, recordingService?.isRecording == true else { return }
+            self.setState {}
+        }
+        recTimer.resume()
+        _recordingTickTimer = recTimer
         #endif
     }
 
@@ -1434,6 +1474,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
                 if phys == 0x2C && keyData.type == .down {  // Space — IME toggle
                     self._toggleIme()
+                    return true
+                }
+                // Ctrl+Shift+R — toggle screen recording. Swallowed only
+                // with Shift down, so apps keep plain Ctrl+R (reload).
+                if phys == 0x15 && self._shiftPressed && keyData.type == .down {
+                    #if os(Linux)
+                    if let rec = recordingService, rec.available {
+                        rec.isRecording ? rec.stop() : rec.start()
+                    }
+                    #endif
                     return true
                 }
             }
@@ -2952,6 +3002,45 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         )
     }
 
+    /// "● 0:42" while a recording runs — red, one tap to stop. A direct
+    /// action rather than a popup: by the time someone wants the recording
+    /// to end, a menu between them and "stop" is only footage of a menu.
+    private func _recordingIndicator() -> Widget {
+        let secs = recordingService?.elapsedSeconds ?? 0
+        let label = String(format: "%d:%02d", secs / 60, secs % 60)
+        return GestureDetector(
+            onTap: { recordingService?.stop() },
+            behavior: .opaque,
+            child: Padding(
+                padding: EdgeInsets(left: 6, top: 2, right: 6, bottom: 2),
+                child: Row(mainAxisSize: .min, crossAxisAlignment: .center) {
+                    MacosIcon(icon: CupertinoIcons.circle_fill,
+                              color: Color(0xFFFF453A), size: 11)
+                    SizedBox(width: 5)
+                    Text(label, style: TextStyle(
+                        color: Color(0xFFFF453A), fontSize: 12,
+                        fontWeight: .w600))
+                }
+            )
+        )
+    }
+
+    /// Approximate screen center of the recording indicator, for the broker.
+    /// The glyph-width term is an estimate, but the whole item is one tap
+    /// target ~60px wide, so the center misses by a few px at worst; tests
+    /// that need exactness stop via the control-center tile instead.
+    /// Only meaningful while the indicator exists (isRecording).
+    func recordingIndicatorCenter() -> (x: Double, y: Double) {
+        // The indicator sits immediately left of the wifi item (2px gap).
+        let wifiGeo = _statusPopupGeometry(.wifi)
+        let wifiLeft = wifiGeo.left + wifiGeo.width - 27
+        let secs = recordingService?.elapsedSeconds ?? 0
+        let label = String(format: "%d:%02d", secs / 60, secs % 60)
+        // 6 pad + 11 icon + 5 gap + text + 6 pad, matching the Row above.
+        let width = 6.0 + 11 + 5 + Double(label.count) * 7 + 6
+        return (wifiLeft - 2 - width / 2, DesktopTheme.kStatusBarHeight / 2)
+    }
+
     private func _statusBarClockItem(dateString: String) -> Widget {
         let isActive = activeStatusBarPopup == .clock
         let textWidget = Text(
@@ -3013,6 +3102,14 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         crossAxisAlignment: .center,
                         spacing: 2
                     ) {
+                        // Recording indicator — leftmost ON PURPOSE: every
+                        // popup offset in _statusPopupGeometry is measured
+                        // from the right edge, so a conditional item can
+                        // only sit left of them all without moving them.
+                        // Tap = stop; it exists only while a session runs.
+                        if recordingService?.isRecording == true {
+                            _recordingIndicator()
+                        }
                         _statusBarItem(icon: _networkStatusIcon(), popup: .wifi)
                         if batteryService.snapshot.present {
                             _statusBarItem(icon: _batteryStatusIcon(),
@@ -3925,6 +4022,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
     }
 
+    /// The shell posting to its own bell (recording saved, …) — same upsert
+    /// as a bus post, but the id comes from the shell's own high-range
+    /// counter so it can never collide with the daemon's.
+    func _postLocalNotification(summary: String, body: String) {
+        _localNoteId += 1
+        _notificationPosted(id: _localNoteId, appName: "Screen Recording",
+                            summary: summary, body: body, urgency: 1,
+                            timeoutMs: -1, replaces: false)
+    }
+
     /// CloseNotification from the bus (already hopped to main). Closing an
     /// id we no longer show is not an error — the spec says so.
     func _notificationCloseRequested(_ id: UInt32) {
@@ -4013,7 +4120,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     static let kCcGap: Double = 8
 
     /// Screen center of one quick tile: 2 columns, in declaration order
-    /// (wifi, dark, tiling, mute). Read by the broker; never used for layout.
+    /// (wifi, dark, tiling, mute, record). Read by the broker; never used
+    /// for layout.
     func controlCenterTileCenter(_ index: Int) -> (x: Double, y: Double) {
         let geo = _statusPopupGeometry(.controlCenter)
         let col = Double(index % 2), row = Double(index / 2)
@@ -4115,7 +4223,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         ])
     }
 
-    /// iOS-style quick panel: four toggle tiles, then the level sliders.
+    /// iOS-style quick panel: five toggle tiles, then the level sliders.
     /// Every control drives the same backend its Settings pane does — the
     /// tile IS the setting, so the two cannot disagree.
     private func _buildControlCenterPopup() -> Widget {
@@ -4148,11 +4256,32 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     AudioControl.setMuted(muted)
                 }
             },
+            _ccToggleTile(icon: recordingService?.isRecording == true
+                              ? CupertinoIcons.stop_fill
+                              : CupertinoIcons.largecircle_fill_circle,
+                          label: recordingService?.isRecording == true
+                              ? "Recording" : "Record",
+                          active: recordingService?.isRecording == true,
+                          enabled: recordingService?.available == true) { [self] in
+                if recordingService?.isRecording == true {
+                    recordingService?.stop()
+                } else {
+                    // Close the panel first and give it a beat to leave the
+                    // screen — a recording that opens on the control center
+                    // sliding away is footage of the button, not the desktop.
+                    setState { activeStatusBarPopup = nil }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) {
+                        recordingService?.start()
+                    }
+                }
+            },
         ]
         var children: [Widget] = [
             Row(children: [tiles[0], SizedBox(width: Self.kCcGap), tiles[1]]),
             SizedBox(height: Self.kCcGap),
             Row(children: [tiles[2], SizedBox(width: Self.kCcGap), tiles[3]]),
+            SizedBox(height: Self.kCcGap),
+            Row(children: [tiles[4]]),
             SizedBox(height: 14),
             _ccSliderRow(icon: CupertinoIcons.speaker_2_fill,
                          value: min(_ccAudio.volume, 1.0) * 100,

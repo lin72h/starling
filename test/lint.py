@@ -310,6 +310,49 @@ def check_wayland_callbacks() -> None:
     print(f"  wayland callbacks: {len(declared)} declared, {len(gaps)} known gap(s)")
 
 
+# ── check: the engine's C API header and the sdk's copy agree ────────────────
+
+def check_engine_header_mirror() -> None:
+    """fl_drm_view.h exists twice — the engine compiles the original, Swift
+    imports the copy in sdk/Sources/FlutterDRMBridge — and nothing but this
+    check notices when they drift. A function added on one side only either
+    fails to link (loud, lucky) or silently calls the old ABI (unlucky).
+
+    Same file, same trap, second shape: an `fl_drm_view_set_*_callback` the
+    engine declares but no Swift ever registers fires into a NULL pointer
+    and drops whatever it carries — the wl_shm lesson, one layer down.
+    """
+    check = "engine-header"
+    engine_header = (REPO / "engine/src/flutter/shell/platform/linux_drm"
+                     / "fl_drm_view.h")
+    sdk_header = (REPO / "sdk/Sources/FlutterDRMBridge/include/engine"
+                  / "fl_drm_view.h")
+    if not engine_header.exists() or not sdk_header.exists():
+        note(check, "engine/ or sdk/ checkout not present — skipped "
+                    "(run bootstrap.sh)")
+        return
+    if engine_header.read_text() != sdk_header.read_text():
+        fail(check, "fl_drm_view.h differs between the engine and the sdk "
+                    "copy Swift imports — copy the engine's over "
+                    "sdk/Sources/FlutterDRMBridge/include/engine/")
+        return
+    ok("fl_drm_view.h engine/sdk copies identical")
+
+    declared = set(re.findall(r"\bfl_drm_view_(set_\w*_callback)\s*\(",
+                              sdk_header.read_text()))
+    swift = " ".join(p.read_text() for p in
+                     (REPO / "shell/Sources/DesktopShellApp").rglob("*.swift"))
+    for name in sorted(declared):
+        full = f"fl_drm_view_{name}"
+        if full in swift:
+            ok(full)
+        else:
+            fail(check, f"{full} is declared in fl_drm_view.h but never "
+                        "called in the shell: the engine will fire it into "
+                        "a NULL pointer and drop whatever it carries, silently")
+    print(f"  engine header: mirrored, {len(declared)} callback setter(s)")
+
+
 # ── check: builder overloads track the initializers they wrap ────────────────
 
 def _split_params(text: str) -> list[str]:
@@ -519,6 +562,7 @@ def main() -> int:
     print("starling lint")
     check_catalog()
     check_wayland_callbacks()
+    check_engine_header_mirror()
     check_result_builders()
     check_script_syntax()
 
