@@ -85,6 +85,7 @@ let shellDeps: [Target.Dependency] = [
     .product(name: "StarlingRegistry", package: "StarlingRegistry"),
     .product(name: "StarlingNet", package: "StarlingNet"),
     .product(name: "StarlingPower", package: "StarlingPower"),
+    .product(name: "StarlingAudio", package: "StarlingAudio"),
 ]
 
 let shellSwiftSettings: [SwiftSetting] = [
@@ -198,6 +199,8 @@ let package = Package(
         .package(name: "StarlingNet", path: "../network"),
         // The sysfs battery layer.
         .package(name: "StarlingPower", path: "../power"),
+        // The wpctl layer — the control center's volume slider.
+        .package(name: "StarlingAudio", path: "../audio"),
     ],
     targets: targets,
     cxxLanguageStandard: .cxx20

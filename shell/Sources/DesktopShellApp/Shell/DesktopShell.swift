@@ -8,6 +8,7 @@ import CupertinoIcons
 import StarlingRegistry
 import StarlingNet
 import StarlingPower
+import StarlingAudio
 #if os(Linux)
 import FlutterDRMBridge  // fl_drm_view_capture_active (X11 GetImage present pump)
 #endif
@@ -69,7 +70,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var contextMenuPosition: Offset?
 
     // Status bar popup state (nil = no popup open)
-    enum StatusBarPopup { case wifi, battery, notifications, clock, power }
+    enum StatusBarPopup { case wifi, battery, notifications, controlCenter, clock, power }
     var activeStatusBarPopup: StatusBarPopup? = nil
 
     /// What the power menu is asking the user to confirm, or nil while it is
@@ -153,6 +154,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// user looks. Opening the popup is "looking"; it clears the tint, not
     /// the list.
     var _notificationsUnseen = false
+
+    // Control center: live levels behind the quick panel, read on open and
+    // on a 2s tick while it stays up — volume moved by a keyboard key or
+    // wpctl by hand must show here, the same contract as the wifi popup.
+    var _ccAudio = AudioStatus()
+    var _ccBacklight = BacklightStatus()
+    private var _ccTickScheduled = false
     /// Non-nil while the popup is showing the password prompt for this SSID.
     var _wifiPasswordSSID: String? = nil
     /// The prompt target's SECURITY string (picks WPA2 vs WPA3 key-mgmt).
@@ -2917,6 +2925,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     if activeStatusBarPopup == .notifications {
                         _notificationsUnseen = false
                     }
+                    // The control center reads live levels on open, then
+                    // ticks while it stays up (see _refreshControlCenter).
+                    if activeStatusBarPopup == .controlCenter {
+                        _refreshControlCenter()
+                    }
                     contextMenuPosition = nil
                     // Every open starts on the list. Reset here rather than at
                     // each of the eight places that close a popup — one of
@@ -3015,6 +3028,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                        popup: .notifications,
                                        color: _notificationsUnseen
                                            ? shellTheme.accent : nil)
+                        _statusBarItem(icon: CupertinoIcons.slider_horizontal_3,
+                                       popup: .controlCenter)
                         // Rightmost, macOS-style. Until this existed there
                         // was no way to shut the desktop down from the UI
                         // at all — you had to find a terminal and sudo.
@@ -3035,6 +3050,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             return _buildBatteryPopup()
         case .notifications:
             return _buildNotificationsPopup()
+        case .controlCenter:
+            return _buildControlCenterPopup()
         case .clock:
             return _buildClockPopup()
         case .power:
@@ -3148,9 +3165,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // put the wifi panel 29px left of the real icon on every desktop.
         let batteryW: Double = batteryService.snapshot.present ? 29 : 0
         switch popup {
-        case .wifi:          return (280, screenWidth - 74 - batteryW - 280)
-        case .battery:       return (260, screenWidth - 74 - 260)
-        case .notifications: return (340, screenWidth - 45 - 340)
+        case .wifi:          return (280, screenWidth - 103 - batteryW - 280)
+        case .battery:       return (260, screenWidth - 103 - 260)
+        case .notifications: return (340, screenWidth - 74 - 340)
+        case .controlCenter: return (Self.kCcPanelW, screenWidth - 45 - Self.kCcPanelW)
         case .power:         return (220, screenWidth - 16 - 220)
         case .clock:         return (260, 16)
         }
@@ -3980,6 +3998,191 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             for id in ids { _dismissNotification(id: id, reason: 2) }
         })
         return _statusPopupPanel(popup: .notifications, children: children)
+    }
+
+    // MARK: - Control center
+
+    // The panel's blocks are given these sizes explicitly, so they are the
+    // layout rather than a description of it — tooling that taps a tile asks
+    // the broker where it is (`control_center_state.tiles`), the same
+    // arrangement that keeps the wifi rows and the dock honest.
+    static let kCcPanelW: Double = 304
+    static let kCcPad: Double = 16
+    static let kCcTileW: Double = 132
+    static let kCcTileH: Double = 60
+    static let kCcGap: Double = 8
+
+    /// Screen center of one quick tile: 2 columns, in declaration order
+    /// (wifi, dark, tiling, mute). Read by the broker; never used for layout.
+    func controlCenterTileCenter(_ index: Int) -> (x: Double, y: Double) {
+        let geo = _statusPopupGeometry(.controlCenter)
+        let col = Double(index % 2), row = Double(index / 2)
+        return (geo.left + Self.kCcPad + col * (Self.kCcTileW + Self.kCcGap)
+                    + Self.kCcTileW / 2,
+                DesktopTheme.kStatusBarHeight + 1 + Self.kCcPad
+                    + row * (Self.kCcTileH + Self.kCcGap) + Self.kCcTileH / 2)
+    }
+
+    /// Re-read levels off the main thread, then keep a 2s tick alive while
+    /// the panel is the one on screen.
+    func _refreshControlCenter() {
+        let work: () -> Void = { [weak self] in
+            let audio = AudioControl.status()
+            let backlight = BacklightControl.read()
+            let apply: () -> Void = { [weak self] in
+                guard let self else { return }
+                self.setState {
+                    self._ccAudio = audio
+                    self._ccBacklight = backlight
+                }
+                self._scheduleCcTick()
+            }
+            DispatchQueue.main.async(
+                execute: unsafeBitCast(apply, to: (@Sendable () -> Void).self))
+            _ = self
+        }
+        DispatchQueue.global(qos: .userInitiated).async(
+            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+    }
+
+    private func _scheduleCcTick() {
+        guard activeStatusBarPopup == .controlCenter, !_ccTickScheduled else { return }
+        _ccTickScheduled = true
+        let work: () -> Void = { [weak self] in
+            guard let self else { return }
+            self._ccTickScheduled = false
+            guard self.activeStatusBarPopup == .controlCenter else { return }
+            self._refreshControlCenter()
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 2,
+            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+    }
+
+    private func _ccToggleTile(icon: IconData, label: String, active: Bool,
+                               enabled: Bool = true,
+                               onTap: @escaping () -> Void) -> Widget {
+        let fg: Color = !enabled
+            ? shellTheme.fgTertiary
+            : (active ? Color(0xFFFFFFFF) : shellTheme.fgPrimary)
+        return GestureDetector(
+            onTap: { if enabled { onTap() } },
+            behavior: .opaque,
+            child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: active && enabled
+                        ? shellTheme.accent : shellTheme.hoverFill,
+                    borderRadius: BorderRadius.circular(10)
+                ),
+                child: SizedBox(
+                    width: Self.kCcTileW, height: Self.kCcTileH,
+                    child: Padding(
+                        padding: EdgeInsets(horizontal: 12),
+                        child: Column(
+                            mainAxisAlignment: .center,
+                            crossAxisAlignment: .start,
+                            children: [
+                                MacosIcon(icon: icon, color: fg, size: 16),
+                                SizedBox(height: 4),
+                                Text(label, style: TextStyle(
+                                    color: fg, fontSize: 11,
+                                    fontWeight: .w600)),
+                            ]
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private func _ccSliderRow(icon: IconData, value: Double, enabled: Bool,
+                              onChanged: @escaping (Double) -> Void) -> Widget {
+        Row(children: [
+            MacosIcon(icon: icon,
+                      color: enabled ? shellTheme.fgSecondary
+                                     : shellTheme.fgTertiary, size: 14),
+            SizedBox(width: 10),
+            Expanded(
+                child: Slider(
+                    value: value,
+                    onChanged: { v in if enabled { onChanged(v) } },
+                    min: 0, max: 100
+                )
+            ),
+            SizedBox(width: 10),
+            Text("\(Int(value.rounded()))%",
+                 style: TextStyle(color: shellTheme.fgTertiary, fontSize: 11)),
+        ])
+    }
+
+    /// iOS-style quick panel: four toggle tiles, then the level sliders.
+    /// Every control drives the same backend its Settings pane does — the
+    /// tile IS the setting, so the two cannot disagree.
+    private func _buildControlCenterPopup() -> Widget {
+        let net = networkService.snapshot
+        let wifiOn = net.available && net.wifiEnabled
+        let tiles: [Widget] = [
+            _ccToggleTile(icon: wifiOn ? CupertinoIcons.wifi
+                                       : CupertinoIcons.wifi_slash,
+                          label: "Wi-Fi", active: wifiOn,
+                          enabled: net.available) { [self] in
+                setState { networkService.setWifiEnabled(!net.wifiEnabled) }
+            },
+            _ccToggleTile(icon: CupertinoIcons.moon_fill, label: "Dark Mode",
+                          active: shellTheme.isDark) { [self] in
+                _setAppearance(dark: !shellTheme.isDark)
+            },
+            _ccToggleTile(icon: CupertinoIcons.rectangle_grid_2x2,
+                          label: "Tiling", active: windowManager.tilingEnabled) { [self] in
+                _setTiling(!windowManager.tilingEnabled)
+            },
+            _ccToggleTile(icon: _ccAudio.muted
+                              ? CupertinoIcons.speaker_slash_fill
+                              : CupertinoIcons.speaker_2_fill,
+                          label: _ccAudio.muted ? "Muted" : "Sound",
+                          active: !_ccAudio.muted,
+                          enabled: _ccAudio.available) { [self] in
+                let muted = !_ccAudio.muted
+                setState { _ccAudio.muted = muted }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    AudioControl.setMuted(muted)
+                }
+            },
+        ]
+        var children: [Widget] = [
+            Row(children: [tiles[0], SizedBox(width: Self.kCcGap), tiles[1]]),
+            SizedBox(height: Self.kCcGap),
+            Row(children: [tiles[2], SizedBox(width: Self.kCcGap), tiles[3]]),
+            SizedBox(height: 14),
+            _ccSliderRow(icon: CupertinoIcons.speaker_2_fill,
+                         value: min(_ccAudio.volume, 1.0) * 100,
+                         enabled: _ccAudio.available) { [self] v in
+                setState { _ccAudio.volume = v / 100 }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    AudioControl.setVolume(v / 100)
+                }
+            },
+        ]
+        if _ccBacklight.present {
+            children.append(SizedBox(height: 6))
+            let backlight = _ccBacklight
+            children.append(_ccSliderRow(
+                icon: CupertinoIcons.sun_max_fill,
+                value: Double(backlight.percent),
+                enabled: true) { [self] v in
+                let pct = Int(v.rounded())
+                let scale = Double(backlight.maxBrightness) / 100.0
+                setState {
+                    _ccBacklight.brightness = max(1, Int((Double(pct) * scale).rounded()))
+                }
+                let work: () -> Void = {
+                    BacklightControl.setPercent(pct, status: backlight)
+                }
+                DispatchQueue.global(qos: .userInitiated).async(
+                    execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+            })
+        }
+        return _statusPopupPanel(popup: .controlCenter, children: children)
     }
 
     private func _buildClockPopup() -> Widget {

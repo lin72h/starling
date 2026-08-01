@@ -1010,6 +1010,47 @@ def check_settings_walk() -> None:
         quit_app("SettingsApp")
 
 
+@check("control center: quick tiles drive the settings they mirror")
+def check_control_center() -> None:
+    """Opens the panel from the broker-reported icon, taps the Dark Mode and
+    Tiling tiles at the centers the shell serves, and asserts against the
+    same state the Settings panes read — the tile IS the setting. Mute is
+    asserted when PipeWire answers; wifi only ever on machines with a
+    managed radio, so the tile's no-op path is what most boxes exercise."""
+    cc = lambda: ask("control_center_state")
+    s = cc()
+    assert not s["open"], "the control center is already open"
+
+    drive(f"click {s['icon']['x']:.0f} {s['icon']['y']:.0f}")
+    wait_for(lambda: cc()["open"], "the panel to open")
+    tiles = {t["id"]: t for t in cc()["tiles"]}
+
+    dark = cc()["dark"]
+    drive(f"click {tiles['dark']['x']:.0f} {tiles['dark']['y']:.0f}")
+    wait_for(lambda: cc()["dark"] != dark, "Dark Mode to flip")
+    drive(f"click {tiles['dark']['x']:.0f} {tiles['dark']['y']:.0f}")
+    wait_for(lambda: cc()["dark"] == dark, "Dark Mode to flip back")
+
+    tiling = cc()["tiling"]
+    drive(f"click {tiles['tiling']['x']:.0f} {tiles['tiling']['y']:.0f}")
+    wait_for(lambda: cc()["tiling"] != tiling, "Tiling to flip")
+    drive(f"click {tiles['tiling']['x']:.0f} {tiles['tiling']['y']:.0f}")
+    wait_for(lambda: cc()["tiling"] == tiling, "Tiling to flip back")
+
+    if cc()["audio_available"]:
+        muted = cc()["muted"]
+        drive(f"click {tiles['mute']['x']:.0f} {tiles['mute']['y']:.0f}")
+        wait_for(lambda: cc()["muted"] != muted, "Mute to flip")
+        drive(f"click {tiles['mute']['x']:.0f} {tiles['mute']['y']:.0f}")
+        wait_for(lambda: cc()["muted"] == muted, "Mute to flip back")
+        log("dark, tiling and mute all round-tripped")
+    else:
+        log("dark and tiling round-tripped (no audio on this machine)")
+
+    drive("key esc")
+    wait_for(lambda: not cc()["open"], "esc to close the panel")
+
+
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
 

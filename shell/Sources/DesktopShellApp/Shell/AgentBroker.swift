@@ -468,6 +468,35 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // The control center as drawn right now — the icon, whether it is
+        // open, each quick tile's center in declaration order, and the
+        // levels behind the sliders — so a test taps what the shell laid
+        // out instead of reproducing its arithmetic.
+        if op == "control_center_state" {
+            let icon = shell.statusItemCenter(.controlCenter)
+            let tileIds = ["wifi", "dark", "tiling", "mute"]
+            var tiles: [[String: Any]] = []
+            for (i, tid) in tileIds.enumerated() {
+                let c = shell.controlCenterTileCenter(i)
+                tiles.append(["id": tid, "x": c.x, "y": c.y])
+            }
+            let net = shell.networkService.snapshot
+            conn.send(["id": id, "ok": true,
+                       "icon": ["x": icon.x, "y": icon.y],
+                       "open": shell.activeStatusBarPopup == .controlCenter,
+                       "tiles": tiles,
+                       "wifi_available": net.available,
+                       "wifi_enabled": net.wifiEnabled,
+                       "dark": shellTheme.isDark,
+                       "tiling": shell.windowManager.tilingEnabled,
+                       "audio_available": shell._ccAudio.available,
+                       "volume": shell._ccAudio.volume,
+                       "muted": shell._ccAudio.muted,
+                       "backlight_present": shell._ccBacklight.present,
+                       "brightness": shell._ccBacklight.percent])
+            return
+        }
+
         // The screen as the shell sees it. Tooling that synthesises absolute
         // pointer events needs the PHYSICAL size to set up its device and the
         // DPI to convert; guessing either puts every click somewhere else.
