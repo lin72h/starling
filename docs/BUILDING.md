@@ -221,23 +221,21 @@ fine — the path is what matters, not how the toolchain got there.
 On 26.04, `swift-build` cannot start until the toolchain gets a libxml2 compat
 symlink; `./bootstrap.sh` in the next step creates it.
 
-### 2.3 Clone, and point it at the engine and the framework
+### 2.3 Clone, and point it at the engine
 
-The Flutter→Swift framework is its own repo. Clone it beside this one:
+The Flutter→Swift framework lives in this repo at `sdk/` — nothing to clone
+for it. Only the engine is a sibling checkout:
 
 ```bash
 cd ~/dev/starling-build
-git clone https://github.com/starling-build/starling-sdk.git
 git clone https://github.com/starling-build/starling.git
 cd starling
 ./bootstrap.sh                  # engine -> ../starling-engine/engine
-                                # sdk    -> ../starling-sdk
 ```
 
-Every engine and framework reference in this repo goes through those two
-symlinks; pass paths to `bootstrap.sh` to use checkouts elsewhere
-(`./bootstrap.sh <engine> <starling-sdk>`, or `$STARLING_ENGINE` /
-`$STARLING_SDK`).
+Every engine reference in this repo goes through that symlink; pass a path
+to `bootstrap.sh` to use a checkout elsewhere (`./bootstrap.sh <engine>`,
+or `$STARLING_ENGINE`).
 
 ### 2.4 Build the shell and the apps
 

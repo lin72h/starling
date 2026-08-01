@@ -1,5 +1,12 @@
 # Splitting `sdk/` into a standalone package
 
+> **Status 2026-08-01: reversed.** The framework moved back into this repo
+> at `sdk/` (git subtree, full history) so one public repo carries the whole
+> desktop — a single front door beats two half-trafficked ones for now. The
+> packaging work below still holds; `git subtree split --prefix=sdk`
+> re-extracts the folder, history intact, if a standalone package becomes
+> worth it again.
+
 Goal: `FlutterSwift` becomes a Swift package someone else can depend on, on Linux
 and macOS, without checking out starling-desktop or the engine.
 

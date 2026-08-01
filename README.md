@@ -188,10 +188,10 @@ shell came from a working branch (`flutter_swift/` → `sdk/`,
 from a second one. Neither is public, so the pre-import history is not
 reachable — everything since is in this repo's log.
 
-The framework port has since moved out again, to
-[starling-sdk](https://github.com/starling-build/starling-sdk), with the
-`sdk/` history that led to it. It is a derivative of Flutter and keeps Flutter's
-licence. The C++ half lives in
+The framework port lives in this repo at `sdk/` (it spent a stretch as the
+separate starling-sdk repo; that history came back with it as a subtree).
+It is a derivative of Flutter and keeps Flutter's licence. The C++ half
+lives in
 [starling-engine](https://github.com/starling-build/starling-engine), a fork of
 `flutter/flutter` whose `starling` branch carries the Starling delta on top of
 real upstream history.

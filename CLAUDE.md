@@ -1,11 +1,12 @@
 # starling-desktop — project guide
 
-The Starling desktop: Swift shell + compositor + apps, running on the Flutter
-engine's C core from the sibling repo **starling-engine** and the Flutter→Swift
-framework from the sibling repo **flutter-swift**. Both are reached through
-repo-root symlinks (`engine`, `sdk`) that `./bootstrap.sh` makes after cloning.
-Read starling-engine's `CLAUDE.md` too: a feature usually touches more than one
-of these repos, and they all get committed.
+The Starling desktop: Swift shell + compositor + apps + the Flutter→Swift
+framework (`sdk/`), running on the Flutter engine's C core from the sibling
+repo **starling-engine**, reached through the repo-root `engine` symlink that
+`./bootstrap.sh` makes after cloning. Read starling-engine's `CLAUDE.md` too:
+a feature often touches both repos, and both get committed. (`sdk/` spent a
+stretch as its own repo; it was folded back as a git subtree in 2026-08 —
+`git subtree split --prefix=sdk` re-extracts it if that ever reverses.)
 
 Everything needed to build, run, drive, and package the desktop is in this repo
 (`build/`). The older `starling-os` repo still holds the Bazel-built Starling OS
@@ -14,9 +15,8 @@ image and its QEMU boot gates; the desktop dev loop no longer depends on it.
 ## Layout
 
 ```
-sdk         -> SYMLINK to a flutter-swift checkout (SwiftPM package
-               "FlutterSwift"): the Flutter→Swift framework port, no Dart VM.
-               Its own repo — edit and commit it there, not here.
+sdk/       the Flutter→Swift framework port (SwiftPM package "FlutterSwift"),
+           no Dart VM. In-repo — edit it here. Has its own CLAUDE.md.
 engine      -> SYMLINK to a starling-engine checkout
 host/       the windowed host (FlutterRunner + GLFWBridge): run a Swift Flutter
             app in an ordinary window instead of compositing through the shell.
@@ -38,8 +38,9 @@ build/     stage.sh (assembles the tree — the single definition of the layout)
            live in shell/Resources
 macos-compat/  research: running unmodified Mach-O macOS binaries on Linux.
                Not part of the desktop, and deliberately not part of the SDK.
-docs/plans/    design notes, including standalone-sdk.md — why the framework is
-               its own repo and how it is distributed
+docs/plans/    design notes, including standalone-sdk.md — the framework's
+               spell as its own repo, reversed 2026-08 (folded back for one
+               public repo; re-splittable via git subtree)
 ```
 
 ## Build & iterate
@@ -152,17 +153,18 @@ Framework (`sdk/`):
   `test/lint.py` compares the two and fails on drift.
 
 Build / runtime:
-- **Clang normalises `-L` paths lexically, and `sdk` is a symlink out of the
-  tree.** `sdk` points at a flutter-swift checkout beside this repo, so a path
-  built as `<repo>/sdk/../<something>` is correct on disk — the kernel resolves
-  the symlink first, so it lands beside *flutter-swift*, not beside the repo.
-  Clang collapses `sdk/..` textually and looks beside the repo instead. The
-  build then fails with `cannot find -lflutter_engine` against a `-L` you can
-  read on the command line and confirm by hand: `ls` finds the library, and
-  `ld` with the same `-L` links fine, because ld does no such rewrite. Only
-  `clang -###` reveals the substitution. Anything that composes a path through
-  `sdk/..` or `engine/..` must canonicalise it — `resolvingSymlinksInPath()`,
-  never `.standardized`, which does exactly the collapse clang does.
+- **Clang normalises `-L` paths lexically, and `engine` is a symlink out of
+  the tree.** A path built as `<repo>/engine/../<something>` is correct on
+  disk — the kernel resolves the symlink first, so it lands beside the
+  *engine checkout*, not beside the repo. Clang collapses `engine/..`
+  textually and looks beside the repo instead. The build then fails with
+  `cannot find -lflutter_engine` against a `-L` you can read on the command
+  line and confirm by hand: `ls` finds the library, and `ld` with the same
+  `-L` links fine, because ld does no such rewrite. Only `clang -###`
+  reveals the substitution. Anything that composes a path through
+  `engine/..` must canonicalise it — `resolvingSymlinksInPath()`, never
+  `.standardized`, which does exactly the collapse clang does. (`sdk` used
+  to be the second such symlink; it is a real directory now.)
 - **Never forward the engine's env knobs as empty strings.** Several are read
   with a bare `getenv()`, and `""` is non-NULL in C: `FLUTTER_DRM_CONNECTOR=""`
   makes the connector filter compare every output against `""` and reject them

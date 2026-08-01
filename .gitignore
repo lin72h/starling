@@ -1,7 +1,7 @@
-# Both are symlinks into sibling checkouts, made by ./bootstrap.sh — machine
-# paths, not content.
+# A symlink into a sibling checkout, made by ./bootstrap.sh — a machine
+# path, not content. (sdk/ used to be its second; the framework now lives
+# in-repo.)
 /engine
-/sdk
 .build/
 .build-starling/
 .DS_Store
