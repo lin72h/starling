@@ -140,7 +140,7 @@ let staticBundleLocal: String? = {
         ? ".build/static-engine/FlutterEngineStatic.artifactbundle" : nil
 }()
 let staticBundleURL =
-    "https://github.com/starling-build/flutter-swift/releases/download/v0.1.0/FlutterEngineStatic.artifactbundle.zip"
+    "https://github.com/starling-build/starling-sdk/releases/download/v0.1.0/FlutterEngineStatic.artifactbundle.zip"
 let staticBundleChecksum =
     "acc453fd93119e9d1ddd6aa1a9fcf63b545c7f8b8ae9adfee5458d7f695d4646"
 

@@ -4,10 +4,10 @@
 #
 #   tools/make-bundle.sh [--debug|--release] [outdir]
 #
-# Produces <outdir>/flutter-swift-<platform>-<arch>/ and a .tar.gz of it. A
+# Produces <outdir>/starling-sdk-<platform>-<arch>/ and a .tar.gz of it. A
 # consumer unpacks that and depends on it by path:
 #
-#   .package(path: "/opt/flutter-swift")
+#   .package(path: "/opt/starling-sdk")
 #
 # and needs no engine checkout, no ../engine symlink, and no configuration —
 # Package.swift probes for engine/lib inside the bundle.
@@ -38,7 +38,7 @@ case "${1:-}" in
     --debug)   CONFIG=debug;   shift ;;
     --release) CONFIG=release; shift ;;
 esac
-OUT="${1:-/tmp/flutter-swift-bundle}"
+OUT="${1:-/tmp/starling-sdk-bundle}"
 
 case "$(uname -s)" in
     Linux)  PLATFORM=linux  ;;
@@ -46,7 +46,7 @@ case "$(uname -s)" in
     *) echo "error: unsupported platform $(uname -s)" >&2; exit 1 ;;
 esac
 ARCH="$(uname -m)"
-NAME="flutter-swift-$PLATFORM-$ARCH"
+NAME="starling-sdk-$PLATFORM-$ARCH"
 DEST="$OUT/$NAME"
 
 # The engine build to take binaries from. host_debug is what the desktop links

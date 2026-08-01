@@ -131,15 +131,15 @@ Two ways, by how the engine arrives.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/starling-build/flutter-swift.git", from: "0.1.0"),
+    .package(url: "https://github.com/starling-build/starling-sdk.git", from: "0.1.0"),
 ],
 targets: [
     .executableTarget(
         name: "App",
         dependencies: [
-            .product(name: "Flutter", package: "flutter-swift"),
-            .product(name: "FlutterSwiftBridge", package: "flutter-swift"),
-            .product(name: "FlutterGTK", package: "flutter-swift"),  // desktop window host
+            .product(name: "Flutter", package: "starling-sdk"),
+            .product(name: "FlutterSwiftBridge", package: "starling-sdk"),
+            .product(name: "FlutterGTK", package: "starling-sdk"),  // desktop window host
         ],
         swiftSettings: [.interoperabilityMode(.Cxx)]
     ),
@@ -171,7 +171,7 @@ lands. `FLUTTER_SWIFT_LINK=static|dynamic` overrides the mode choice.
 `tools/make-bundle.sh` produces a self-contained tree carrying the framework and
 the engine binaries together:
 
-    flutter-swift-linux-aarch64/
+    starling-sdk-linux-aarch64/
       Package.swift Sources/ Examples/ Tests/ tools/ LICENSE
       engine/lib/     libflutter_engine.so, libflutter_linux_drm.so
       engine/share/   icudtl.dat, flutter_assets/
@@ -179,15 +179,15 @@ the engine binaries together:
 Unpack it and depend on it by path:
 
 ```swift
-dependencies: [.package(path: "/opt/flutter-swift-linux-aarch64")],
+dependencies: [.package(path: "/opt/starling-sdk-linux-aarch64")],
 targets: [
     .executableTarget(
         name: "App",
         dependencies: [
-            .product(name: "Flutter", package: "flutter-swift-linux-aarch64"),
+            .product(name: "Flutter", package: "starling-sdk-linux-aarch64"),
             // The dart:ui types — Offset, Size, Rect, Paint, Canvas. A separate
             // product; Flutter does not re-export them.
-            .product(name: "FlutterSwiftBridge", package: "flutter-swift-linux-aarch64"),
+            .product(name: "FlutterSwiftBridge", package: "starling-sdk-linux-aarch64"),
         ],
         swiftSettings: [
             // Required — C++ interop is not inherited from the dependency.
