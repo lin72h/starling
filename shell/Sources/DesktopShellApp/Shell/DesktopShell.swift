@@ -7,6 +7,7 @@ import Foundation
 import CupertinoIcons
 import StarlingRegistry
 import StarlingNet
+import StarlingPower
 #if os(Linux)
 import FlutterDRMBridge  // fl_drm_view_capture_active (X11 GetImage present pump)
 #endif
@@ -133,6 +134,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // WiFi: real state behind the status-bar icon and popup. The service
     // owns all nmcli traffic; these vars are only the popup's UI state.
     let networkService = NetworkService()
+    // Battery: real state behind the status-bar icon and popup. On a machine
+    // with no battery the icon (and popup) simply don't exist.
+    let batteryService = BatteryService()
     /// Non-nil while the popup is showing the password prompt for this SSID.
     var _wifiPasswordSSID: String? = nil
     /// The prompt target's SECURITY string (picks WPA2 vs WPA3 key-mgmt).
@@ -598,6 +602,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
         wifiTimer.resume()
         _wifiRefreshTimer = wifiTimer
+
+        // Battery: the service polls on its own (5s) and calls back only on
+        // real change — the icon must track plug/unplug with no popup open.
+        batteryService.onChange = { [weak self] in
+            self?.setState {}
+        }
+        batteryService.start()
         #endif
     }
 
@@ -2853,8 +2864,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     // MARK: - Status Bar (macOS menu bar style, top)
 
-    private func _statusBarItem(icon: IconData, popup: StatusBarPopup) -> Widget {
+    private func _statusBarItem(icon: IconData, popup: StatusBarPopup,
+                                color: Color? = nil) -> Widget {
         let isActive = activeStatusBarPopup == popup
+        let iconColor = color ?? shellTheme.fgPrimary
         let bg: Widget = isActive
             ? DecoratedBox(
                 decoration: BoxDecoration(
@@ -2863,12 +2876,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 ),
                 child: Padding(
                     padding: EdgeInsets(left: 6, top: 2, right: 6, bottom: 2),
-                    child: MacosIcon(icon: icon, color: shellTheme.fgPrimary, size: 15)
+                    child: MacosIcon(icon: icon, color: iconColor, size: 15)
                 )
               )
             : Padding(
                 padding: EdgeInsets(left: 6, top: 2, right: 6, bottom: 2),
-                child: MacosIcon(icon: icon, color: shellTheme.fgPrimary, size: 15)
+                child: MacosIcon(icon: icon, color: iconColor, size: 15)
               )
         return GestureDetector(
             onTap: { [self] in
@@ -2951,20 +2964,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 children: [
                     // Left: clock + date
                     _statusBarClockItem(dateString: combined),
-                    // Right: wifi, battery
+                    // Right: wifi, battery (laptops only), power
                     Row(
                         mainAxisSize: .min,
                         crossAxisAlignment: .center,
-                        spacing: 2,
-                        children: [
-                            _statusBarItem(icon: _networkStatusIcon(), popup: .wifi),
-                            _statusBarItem(icon: CupertinoIcons.battery_100, popup: .battery),
-                            // Rightmost, macOS-style. Until this existed there
-                            // was no way to shut the desktop down from the UI
-                            // at all — you had to find a terminal and sudo.
-                            _statusBarItem(icon: CupertinoIcons.power, popup: .power),
-                        ]
-                    ),
+                        spacing: 2
+                    ) {
+                        _statusBarItem(icon: _networkStatusIcon(), popup: .wifi)
+                        if batteryService.snapshot.present {
+                            _statusBarItem(icon: _batteryStatusIcon(),
+                                           popup: .battery,
+                                           color: _batteryStatusColor())
+                        }
+                        // Rightmost, macOS-style. Until this existed there
+                        // was no way to shut the desktop down from the UI
+                        // at all — you had to find a terminal and sudo.
+                        _statusBarItem(icon: CupertinoIcons.power, popup: .power)
+                    },
                 ]
             )
         )
@@ -3082,8 +3098,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// the right — power, battery, wifi, in status-bar order. The clock popup
     /// is left-anchored.
     private func _statusPopupGeometry(_ popup: StatusBarPopup) -> (width: Double, left: Double) {
+        // Right-side items are 27px wide with 2px spacing, right-padded 16
+        // (see _buildStatusBar): power's right edge is at -16, battery's at
+        // -45. The battery icon exists only on machines with a battery, so
+        // wifi's position depends on it — a fixed -74 put the wifi panel
+        // (and the broker-reported icon center) 29px left of the real icon
+        // on every desktop.
+        let batteryW: Double = batteryService.snapshot.present ? 29 : 0
         switch popup {
-        case .wifi:    return (280, screenWidth - 74 - 280)
+        case .wifi:    return (280, screenWidth - 45 - batteryW - 280)
         case .battery: return (260, screenWidth - 45 - 260)
         case .power:   return (220, screenWidth - 16 - 220)
         case .clock:   return (260, 16)
@@ -3698,9 +3721,50 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         return _statusPopupPanel(popup: .wifi, children: children)
     }
 
+    /// The status-bar battery glyph. The Cupertino set is coarse — empty,
+    /// quarter, three-quarter, full — so the thresholds just sit between
+    /// glyphs. The charging bolt shows only while charge is actually
+    /// flowing: `notCharging` is the firmware holding at a stop threshold,
+    /// and a bolt there would claim something the kernel just said isn't
+    /// happening.
+    private func _batteryStatusIcon() -> IconData {
+        let snap = batteryService.snapshot
+        if snap.state == .charging { return CupertinoIcons.battery_charging }
+        switch snap.percent {
+        case ..<13: return CupertinoIcons.battery_empty
+        case ..<45: return CupertinoIcons.battery_25_percent
+        case ..<88: return CupertinoIcons.battery_75_percent
+        default:    return CupertinoIcons.battery_full
+        }
+    }
+
+    /// Tint for that glyph: red only when low *and* draining (low on AC is
+    /// getting better, not worse), green while charge flows, nil otherwise
+    /// so the icon follows the theme like every other status item.
+    private func _batteryStatusColor() -> Color? {
+        let snap = batteryService.snapshot
+        if snap.state == .discharging && snap.percent <= 20 {
+            return Color(0xFFFF3B30)
+        }
+        if snap.state == .charging { return Color(0xFF34C759) }
+        return nil
+    }
+
+    /// "2 h 05 min" under an hour shortens to "45 min" — the popup's
+    /// time-remaining spelling.
+    private func _formatBatteryMinutes(_ minutes: Int) -> String {
+        if minutes >= 60 {
+            return "\(minutes / 60) h \(String(format: "%02d", minutes % 60)) min"
+        }
+        return "\(minutes) min"
+    }
+
     private func _buildBatteryPopup() -> Widget {
-        // Battery popup with percentage bar
-        let batteryPercent = 85.0
+        let snap = batteryService.snapshot
+        // The bar wears the icon's warning colors; at rest it takes the
+        // accent, not green — a battery sitting at 60% is a level, not a
+        // success state.
+        let barColor = _batteryStatusColor() ?? shellTheme.accent
         let batteryBar: Widget = SizedBox(
             height: 8,
             child: DecoratedBox(
@@ -3711,10 +3775,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 child: Align(
                     alignment: Alignment.centerLeft,
                     child: FractionallySizedBox(
-                        widthFactor: batteryPercent / 100.0,
+                        widthFactor: Double(snap.percent) / 100.0,
                         child: DecoratedBox(
                             decoration: BoxDecoration(
-                                color: Color(0xFF34C759),
+                                color: barColor,
                                 borderRadius: BorderRadius.circular(4)
                             ),
                             child: SizedBox(expand: ())
@@ -3724,14 +3788,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             )
         )
 
-        return _statusPopupPanel(popup: .battery, children: [
+        var children: [Widget] = [
             _popupSectionHeader("Battery"),
             Row(
                 children: [
-                    MacosIcon(icon: CupertinoIcons.battery_100, color: Color(0xFF34C759), size: 22),
+                    MacosIcon(icon: _batteryStatusIcon(),
+                              color: _batteryStatusColor() ?? shellTheme.fgPrimary,
+                              size: 22),
                     SizedBox(width: 10),
                     Text(
-                        "\(Int(batteryPercent))%",
+                        "\(snap.percent)%",
                         style: TextStyle(
                             color: shellTheme.fgPrimary,
                             fontSize: 24,
@@ -3744,20 +3810,32 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             batteryBar,
             SizedBox(height: 6),
             Text(
-                "Power Source: AC Power",
+                "Power Source: \(snap.acOnline ? "AC Power" : "Battery")",
                 style: TextStyle(color: shellTheme.fgTertiary, fontSize: 12)
             ),
             _popupDivider(),
-            _popupInfoRow(icon: CupertinoIcons.bolt, label: "Status", value: "Charging"),
-            _popupInfoRow(icon: CupertinoIcons.clock, label: "Full in", value: "~30 min"),
-            _popupDivider(),
-            _popupActionRow(label: "Battery Settings...") { [self] in
-                setState {
-                    activeStatusBarPopup = nil
-                    _launchOrFocusApp("settings")
-                }
-            },
-        ])
+            _popupInfoRow(icon: CupertinoIcons.bolt, label: "Status",
+                          value: snap.state.label),
+        ]
+        // The estimate rows exist only when the kernel offered a rate — a
+        // missing estimate reads as a missing row, never as a made-up time.
+        if snap.state == .charging, let m = snap.minutesToFull {
+            children.append(_popupInfoRow(icon: CupertinoIcons.clock,
+                                          label: "Full in",
+                                          value: _formatBatteryMinutes(m)))
+        } else if snap.state == .discharging, let m = snap.minutesToEmpty {
+            children.append(_popupInfoRow(icon: CupertinoIcons.clock,
+                                          label: "Remaining",
+                                          value: _formatBatteryMinutes(m)))
+        }
+        children.append(_popupDivider())
+        children.append(_popupActionRow(label: "Battery Settings...") { [self] in
+            setState {
+                activeStatusBarPopup = nil
+                _launchOrFocusApp("settings")
+            }
+        })
+        return _statusPopupPanel(popup: .battery, children: children)
     }
 
     private func _buildClockPopup() -> Widget {

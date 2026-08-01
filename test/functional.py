@@ -682,6 +682,52 @@ def check_wifi_popup_connect() -> None:
         drive("key esc")
 
 
+@check("battery: the status bar tracks the kernel's battery")
+def check_battery() -> None:
+    """Driven with the kernel's own fake-battery driver (test_power), which
+    creates test_battery/test_ac in the real /sys/class/power_supply — so the
+    whole shipping path runs: sysfs → BatteryReader → the 5s poll → the icon
+    and its broker-served geometry. No overrides, no fixture directory.
+
+    Waits are 15s where the icon must move: the poll is 5s and sysfs has no
+    inotify, so nothing here is event-driven.
+    """
+    if ask("battery_state")["present"]:
+        raise Skip("machine has a real battery; test_power would mix with it")
+    if subprocess.run(["modprobe", "test_power"],
+                      capture_output=True).returncode != 0:
+        raise Skip("test_power module not available (root? modules-extra?)")
+    status_param = Path("/sys/module/test_power/parameters/battery_status")
+    try:
+        wait_for(lambda: ask("battery_state")["present"],
+                 "the shell to notice the fake battery", timeout=15)
+        st = ask("battery_state")
+        assert "icon" in st, "present battery reports no icon position"
+        log(f"icon appeared at ({st['icon']['x']:.0f}, {st['icon']['y']:.0f}), "
+            f"{st['percent']}% {st['state']}")
+
+        # The popup opens from a click on the broker-reported center — the
+        # same drift-proof contract the wifi popup has.
+        drive(f"click {st['icon']['x']:.0f} {st['icon']['y']:.0f}")
+        wait_for(lambda: ask("battery_state")["popup_open"],
+                 "the battery popup to open")
+        drive("key esc")
+        wait_for(lambda: not ask("battery_state")["popup_open"],
+                 "the battery popup to close")
+
+        # Flip the kernel's reported state; the poll must follow. This is
+        # the plug-in-the-charger path a laptop exercises constantly.
+        status_param.write_text("charging")
+        wait_for(lambda: ask("battery_state")["state"] == "Charging",
+                 "the shell to follow the status flip", timeout=15)
+        log("state followed the kernel flip to Charging")
+    finally:
+        subprocess.run(["rmmod", "test_power"], capture_output=True)
+    wait_for(lambda: not ask("battery_state")["present"],
+             "the icon to go away with the module", timeout=15)
+    log("icon left with the module")
+
+
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
 

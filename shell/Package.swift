@@ -83,6 +83,7 @@ let shellDeps: [Target.Dependency] = [
     "ImeBridge",
     .product(name: "StarlingRegistry", package: "StarlingRegistry"),
     .product(name: "StarlingNet", package: "StarlingNet"),
+    .product(name: "StarlingPower", package: "StarlingPower"),
 ]
 
 let shellSwiftSettings: [SwiftSetting] = [
@@ -186,6 +187,8 @@ let package = Package(
         .package(name: "StarlingRegistry", path: "../registry"),
         // The nmcli layer, shared with Settings so the two cannot drift.
         .package(name: "StarlingNet", path: "../network"),
+        // The sysfs battery layer.
+        .package(name: "StarlingPower", path: "../power"),
     ],
     targets: targets,
     cxxLanguageStandard: .cxx20

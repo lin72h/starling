@@ -427,6 +427,29 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // The battery picture the status bar is drawing right now — present,
+        // percent, state, and where the icon is — so the functional tier can
+        // drive it against the kernel's test_power module without reading
+        // pixels. An absent battery reports present=false and no icon: the
+        // icon does not exist on screen, and a center for it would be a lie.
+        if op == "battery_state" {
+            let snap = shell.batteryService.snapshot
+            var reply: [String: Any] = [
+                "id": id, "ok": true,
+                "present": snap.present,
+                "percent": snap.percent,
+                "state": snap.state.label,
+                "ac_online": snap.acOnline,
+                "popup_open": shell.activeStatusBarPopup == .battery,
+            ]
+            if snap.present {
+                let icon = shell.statusItemCenter(.battery)
+                reply["icon"] = ["x": icon.x, "y": icon.y]
+            }
+            conn.send(reply)
+            return
+        }
+
         // The screen as the shell sees it. Tooling that synthesises absolute
         // pointer events needs the PHYSICAL size to set up its device and the
         // DPI to convert; guessing either puts every click somewhere else.

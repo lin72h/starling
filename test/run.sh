@@ -68,6 +68,13 @@ step "unit tests: registry"
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Executed [0-9]+ tests|error:|failed") || fails=$((fails + 1))
 
+# power/ is swift-testing, not XCTest — pure Swift, no C++ interop, so it
+# dodges the sdk's swift-testing/26.04 problem described below.
+step "unit tests: power"
+(cd "$REPO/power" && as_user "$SWIFT" test 2>&1 \
+    | grep -vE "libxml2.so.2: no version information" \
+    | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
+
 # sdk/'s test targets cannot be run with a plain `swift test` on Ubuntu 26.04:
 # the 6.2.4 toolchain is an ubuntu24.04 build, and under C++ interop 26.04's
 # libstdc++ 15 headers make Foundation's _CStdlib.h pull <cmath> textually
