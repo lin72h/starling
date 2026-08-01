@@ -464,6 +464,7 @@ targets += [
             "FlutterSwiftBridge",
             .target(name: "SwiftRuntime"),
         ],
+        path: "Examples/FlutterDemoApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
@@ -471,6 +472,9 @@ targets += [
 
 // The ported example apps, appended separately: one more entry in the array
 // literal above tips the manifest type-checker over its time budget.
+//
+// App targets live under Examples/ (explicit `path:`), keeping Sources/ to
+// the SDK — the targets a consumer can depend on.
 targets += [
     // Shared plumbing for the ported example apps: the engine-data bootstrap,
     // the GTK run sequence, and the Material-look chrome the classic samples
@@ -484,6 +488,7 @@ targets += [
             "CupertinoIcons",
             .target(name: "SwiftRuntime"),
         ],
+        path: "Examples/ExampleHost",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
     ),
     // The classic `flutter create` counter, ported from Dart.
@@ -495,6 +500,7 @@ targets += [
             "FlutterSwiftBridge",
             "CupertinoIcons",
         ],
+        path: "Examples/CounterApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
@@ -507,6 +513,7 @@ targets += [
             "FlutterSwiftBridge",
             "CupertinoIcons",
         ],
+        path: "Examples/StartupNamerApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
@@ -519,6 +526,7 @@ targets += [
             "FlutterSwiftBridge",
             "CupertinoIcons",
         ],
+        path: "Examples/TodosApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
@@ -548,6 +556,7 @@ targets += [
             "FlutterSwiftBridge",
             "CupertinoIcons",
         ],
+        path: "Examples/KalenderApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),

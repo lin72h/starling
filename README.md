@@ -23,12 +23,20 @@ thin platform bindings needed to host an engine — nothing desktop-specific.
 | `FlutterDRMBridge` | clang module over the DRM/KMS embedder (`fl_drm_view.h`) |
 | `DmaBufBridge` | GBM + `SCM_RIGHTS` + EGL dma-buf import helpers |
 | `FlutterGTK` | desktop-session host: the engine's GTK embedder (`FlView` in a `GtkWindow`) running in Swift mode, with `FlutterGTKBridge` (C glue + vendored `flutter_linux` headers) and `CGtk3` (system GTK 3 via pkg-config) underneath |
-| `FlutterDemoApp` | runnable demo — see *The demo app* below |
+| `Kalender` | port of the [kalender] calendar package — day/week/month views, event controllers, the overlap and multi-day layout delegates |
 | `FlutterMacOSBridge` | macOS embedder bindings (unverified — see *Status*) |
+
+[kalender]: https://github.com/werner-scholtz/kalender
 
 `FlutterShared` is a dynamic product bundling the whole stack into one
 `libFlutterShared.so`, so a fleet of apps ships one copy rather than a static
 duplicate each.
+
+`Sources/` carries only these SDK targets. The runnable apps live under
+`Examples/`: `FlutterDemoApp` (see *The demo app* below), the ported samples
+`CounterApp`, `StartupNamerApp`, `TodosApp` and `KalenderApp`, and their
+shared `ExampleHost` plumbing. They are targets of this same package, so
+`swift run -c release <AppName>` works from the repo root unchanged.
 
 ## Building
 
@@ -161,7 +169,7 @@ lands. `FLUTTER_SWIFT_LINK=static|dynamic` overrides the mode choice.
 the engine binaries together:
 
     flutter-swift-linux-aarch64/
-      Package.swift Sources/ Tests/ tools/ LICENSE
+      Package.swift Sources/ Examples/ Tests/ tools/ LICENSE
       engine/lib/     libflutter_engine.so, libflutter_linux_drm.so
       engine/share/   icudtl.dat, flutter_assets/
 

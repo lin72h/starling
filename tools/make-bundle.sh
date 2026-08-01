@@ -71,10 +71,13 @@ rm -rf "$DEST"
 mkdir -p "$DEST/engine/lib" "$DEST/engine/share"
 
 # --- framework source -------------------------------------------------------
-# Sources/, Tests/ and tools/ go as-is. .build is deliberately excluded — a
-# consumer's toolchain differs from ours.
+# Sources/, Examples/, Tests/ and tools/ go as-is. .build is deliberately
+# excluded — a consumer's toolchain differs from ours.
+# Examples/ must ship: the manifest declares the app targets with explicit
+# paths there, and SwiftPM refuses to parse a manifest whose target
+# directories are missing.
 # README.md is not copied: the bundle gets its own, written below.
-for item in Package.swift Sources Tests tools LICENSE; do
+for item in Package.swift Sources Examples Tests tools LICENSE; do
     [ -e "$SDK/$item" ] || { echo "error: missing $item" >&2; exit 1; }
     cp -r "$SDK/$item" "$DEST/"
 done
@@ -187,6 +190,7 @@ This bundle is built for **$PLATFORM/$ARCH**; other targets need their own.
 ## Layout
 
     Package.swift Sources/ Tests/   the framework
+    Examples/                       the demo and example apps
     engine/lib/                     engine binaries (linked, and loaded at runtime)
     engine/share/icudtl.dat         ICU data, needed to start an engine
     engine/share/flutter_assets/    default asset bundle

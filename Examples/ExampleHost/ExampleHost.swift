@@ -30,7 +30,7 @@ public func ensureEngineData() {
     for key in ["FLUTTER_SWIFT_ENGINE_OUT", "FLUTTER_ENGINE_OUT"] {
         if let v = env[key], !v.isEmpty { icuCandidates.append(v + "/icudtl.dat") }
     }
-    let packageDir = URL(fileURLWithPath: #filePath)         // …/Sources/ExampleHost/ExampleHost.swift
+    let packageDir = URL(fileURLWithPath: #filePath)         // …/Examples/ExampleHost/ExampleHost.swift
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
     icuCandidates += [
         packageDir + "/engine/share/icudtl.dat",
