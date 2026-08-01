@@ -104,3 +104,11 @@ void flgtk_host_run(FlGtkHost* host) {
   g_timeout_add(8, drain_gcd_main_queue, NULL);
   gtk_main();
 }
+
+void flgtk_host_set_fullscreen(FlGtkHost* host, int32_t fullscreen) {
+  if (fullscreen) {
+    gtk_window_fullscreen(host->window);
+  } else {
+    gtk_window_unfullscreen(host->window);
+  }
+}

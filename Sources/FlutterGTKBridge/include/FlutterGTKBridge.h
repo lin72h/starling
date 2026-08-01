@@ -39,6 +39,9 @@ void flgtk_host_show(FlGtkHost* host);
 // @MainActor / DispatchQueue.main work). Returns when the window is closed.
 void flgtk_host_run(FlGtkHost* host);
 
+// Fullscreens or restores the window (gtk_window_fullscreen/unfullscreen).
+void flgtk_host_set_fullscreen(FlGtkHost* host, int32_t fullscreen);
+
 #ifdef __cplusplus
 }
 #endif

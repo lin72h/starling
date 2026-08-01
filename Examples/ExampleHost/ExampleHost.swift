@@ -51,6 +51,10 @@ public func ensureEngineData() {
     print("[ExampleHost] Linked engine data into \(dataDir)")
 }
 
+/// The host created by runExampleApp, for apps that need window control
+/// beyond mounting a widget (e.g. the YouTube example's fullscreen toggle).
+public private(set) var activeGTKHost: GTKHost? = nil
+
 /// Opens a window on the desktop session (GTK embedder, engine in Swift
 /// mode), mounts the app widget, and runs until the window closes.
 public func runExampleApp(
@@ -65,6 +69,7 @@ public func runExampleApp(
         session (WAYLAND_DISPLAY/DISPLAY set).
         """)
     }
+    activeGTKHost = host
     host.mountWidget(root)
     host.run()
 }

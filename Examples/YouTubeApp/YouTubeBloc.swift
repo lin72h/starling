@@ -28,6 +28,9 @@ struct YouTubeAppState {
 
     // Watch
     var screen: YouTubeScreen = .browse
+    /// Whether the player owns the whole window (the window itself is
+    /// fullscreened by the UI layer via the GTK host).
+    var isFullscreen = false
     var nowPlaying: VideoResult? = nil
     var playerStatus: VideoPlayer.Status = .idle
     var frame: Image? = nil
@@ -48,6 +51,7 @@ final class YouTubeBloc: @unchecked Sendable {
         case open(VideoResult)
         case streamResolved(id: String, Result<String, ServiceFailure>)
         case togglePause
+        case toggleFullscreen
         case seek(fraction: Double)
         case back
         /// The 30 ms heartbeat: pump frames, bus messages, position.
@@ -87,6 +91,8 @@ final class YouTubeBloc: @unchecked Sendable {
         case .togglePause:
             player.togglePause()
             state.playerStatus = player.status
+        case .toggleFullscreen:
+            state.isFullscreen.toggle()
         case .seek(let fraction):
             player.seek(toFraction: fraction)
             if state.duration > 0 { state.position = fraction * state.duration }
@@ -94,6 +100,7 @@ final class YouTubeBloc: @unchecked Sendable {
             player.stop()
             _disposeFrames()
             state.screen = .browse
+            state.isFullscreen = false
             state.nowPlaying = nil
             state.playerStatus = .idle
             state.position = 0

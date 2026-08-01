@@ -52,5 +52,10 @@ public final class GTKHost {
         flgtk_host_show(host)
         flgtk_host_run(host)
     }
+
+    /// Fullscreens or restores the window.
+    public func setFullscreen(_ fullscreen: Bool) {
+        flgtk_host_set_fullscreen(host, fullscreen ? 1 : 0)
+    }
 }
 #endif

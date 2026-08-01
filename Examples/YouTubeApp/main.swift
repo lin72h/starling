@@ -190,6 +190,14 @@ class _YouTubePageState: State<StatefulWidget> {
 
     private func _buildContent() -> Widget {
         let s = youTubeBloc.state
+        // Fullscreen playback owns the whole window — no header, no chrome.
+        if s.screen == .watch && s.isFullscreen {
+            return ColoredBox(color: Color(0xFF000000)) {
+                _buildPlayer(s,
+                             width: Double(gdk_screen_width()),
+                             height: Double(gdk_screen_height()))
+            }
+        }
         return ColoredBox(color: YT.white) {
             Column(crossAxisAlignment: .stretch) {
                 _buildHeader(s)
@@ -388,12 +396,18 @@ class _YouTubePageState: State<StatefulWidget> {
             : String(format: "%d:%02d", m, s)
     }
 
-    private func _buildPlayer(_ s: YouTubeAppState) -> Widget {
+    private func _buildPlayer(
+        _ s: YouTubeAppState,
+        width: Double = YT.playerWidth,
+        height: Double = YT.playerHeight
+    ) -> Widget {
         let fraction = s.duration > 0 ? s.position / s.duration : 0
         let playGlyph = s.playerStatus == .playing
             ? CupertinoIcons.pause_fill : CupertinoIcons.play_fill
+        let fullscreenGlyph = s.isFullscreen
+            ? CupertinoIcons.fullscreen_exit : CupertinoIcons.fullscreen
 
-        return SizedBox(width: YT.playerWidth, height: YT.playerHeight) {
+        return SizedBox(width: width, height: height) {
             Stack(fit: .expand) {
                 GestureDetector(
                     onTap: { youTubeBloc.add(.togglePause) },
@@ -410,11 +424,11 @@ class _YouTubePageState: State<StatefulWidget> {
                             GestureDetector(
                                 onTapUp: { details in
                                     youTubeBloc.add(.seek(
-                                        fraction: details.localPosition.dx / YT.playerWidth))
+                                        fraction: details.localPosition.dx / width))
                                 },
                                 behavior: .opaque,
                                 child: SizedBox(
-                                    width: YT.playerWidth, height: 14,
+                                    width: width, height: 14,
                                     child: CustomPaint(
                                         painter: SeekBarPainter(fraction: fraction)))
                             ),
@@ -432,6 +446,16 @@ class _YouTubePageState: State<StatefulWidget> {
                                         "\(_formatTime(s.position)) / \(_formatTime(s.duration))",
                                         style: TextStyle(color: YT.white, fontSize: 12)),
                                     Expanded(child: SizedBox(width: 1, height: 1)),
+                                    GestureDetector(
+                                        onTap: {
+                                            youTubeBloc.add(.toggleFullscreen)
+                                            activeGTKHost?.setFullscreen(
+                                                youTubeBloc.state.isFullscreen)
+                                        },
+                                        behavior: .opaque,
+                                        child: Icon(fullscreenGlyph, size: 16,
+                                                    color: YT.white)
+                                    ),
                                 ])
                             ),
                         ])
