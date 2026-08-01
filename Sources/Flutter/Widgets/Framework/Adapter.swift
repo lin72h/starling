@@ -322,6 +322,11 @@ func _setupWidgetBinding(_ app: Widget) {
         if renderView!.configuration != newConfig {
             FileHandle.standardError.write(Data("[Adapter] config change: \(renderView!.configuration) -> \(newConfig)\n".utf8))
             renderView!.configuration = newConfig
+            // Metrics changed: re-run every build() so size-derived state
+            // (a terminal's row count) follows the new metrics — see the
+            // comment on onMetricsChanged for why the reassemble happens
+            // here, on the UI task runner, and not there.
+            rootElement?.reassemble()
         }
 
         // Skip rendering if the view has zero size (metrics not yet received)
@@ -433,8 +438,18 @@ func _setupWidgetBinding(_ app: Widget) {
     // there is nothing to be selective WITH, and a metrics change already
     // re-lays-out every render object, so a full rebuild is the same order
     // of work, at the rate windows resize, not per frame.
+    //
+    // The reassemble itself must NOT happen here. onMetricsChanged fires on
+    // whatever thread delivered the resize — for a dma-buf child that is the
+    // socket poll loop — while builds run on the engine's UI task runner.
+    // reassemble() walks the element tree and appends every element to the
+    // dirty list, so running it here mutated both under the UI thread's
+    // feet: heap corruption, surfacing as malloc/memcpy segfaults in
+    // whichever thread tripped first (the Settings app died on every tiling
+    // toggle this way). onBeginFrame runs on the UI task runner and already
+    // diffs the view configuration each frame, so the reassemble lives in
+    // that branch — same trigger, single thread.
     pd.onMetricsChanged = {
-        rootElement?.reassemble()
         pd.scheduleFrame()
     }
 
