@@ -23,17 +23,31 @@ struct VideoResult {
     let title: String
     let channel: String
     let duration: Double        // seconds; 0 when unknown (e.g. live)
+    let viewCount: Int?
 
     /// 320×180 thumbnail — mqdefault exists for effectively every video.
     var thumbnailURL: String { "https://i.ytimg.com/vi/\(id)/mqdefault.jpg" }
 
     var durationLabel: String {
-        guard duration > 0 else { return "live" }
+        guard duration > 0 else { return "LIVE" }
         let total = Int(duration)
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%d:%02d", m, s)
+    }
+
+    /// "1.2M views", the way YouTube compresses counts.
+    var viewsLabel: String? {
+        guard let views = viewCount else { return nil }
+        let compact: String
+        switch views {
+        case ..<1_000: compact = "\(views)"
+        case ..<1_000_000: compact = String(format: "%.1fK", Double(views) / 1_000)
+        case ..<1_000_000_000: compact = String(format: "%.1fM", Double(views) / 1_000_000)
+        default: compact = String(format: "%.1fB", Double(views) / 1_000_000_000)
+        }
+        return "\(compact.replacingOccurrences(of: ".0", with: "")) views"
     }
 }
 
@@ -60,7 +74,8 @@ enum YouTubeService {
                     title: object["title"] as? String ?? "(untitled)",
                     channel: object["channel"] as? String
                         ?? object["uploader"] as? String ?? "",
-                    duration: object["duration"] as? Double ?? 0
+                    duration: object["duration"] as? Double ?? 0,
+                    viewCount: (object["view_count"] as? NSNumber)?.intValue
                 ))
             }
             return results.isEmpty
