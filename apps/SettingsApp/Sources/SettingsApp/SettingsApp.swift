@@ -986,6 +986,46 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                 style: TextStyle(color: pal.textTertiary, fontSize: 11)
             ))
         }
+        // Brightness exists only where a backlight does — same gate as the
+        // battery icon. External monitors are DDC, a different world.
+        let bl = bloc.state.backlight
+        if bl.present {
+            children.append(SizedBox(height: 20))
+            children.append(_sectionHeader("Display Brightness"))
+            children.append(SizedBox(height: 12))
+            children.append(_macosGroupBox([
+                Padding(
+                    padding: EdgeInsets(horizontal: 16, vertical: 10),
+                    child: Row(children: [
+                        MacosIcon(icon: CupertinoIcons.sun_min_fill,
+                                  color: pal.textSecondary, size: 14),
+                        SizedBox(width: 10),
+                        Expanded(
+                            child: Slider(
+                                value: Double(bl.percent),
+                                onChanged: { [self] (val: Double) in
+                                    bloc.add(.changeBrightness(Int(val.rounded())))
+                                },
+                                min: 1, max: 100
+                            )
+                        ),
+                        SizedBox(width: 10),
+                        MacosIcon(icon: CupertinoIcons.sun_max_fill,
+                                  color: pal.textSecondary, size: 14),
+                        SizedBox(width: 12),
+                        Text("\(bl.percent)%",
+                             style: TextStyle(color: pal.textSecondary, fontSize: 12)),
+                    ])
+                ),
+            ]))
+        }
+        if let error = bloc.state.powerError {
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                error,
+                style: TextStyle(color: Color(0xFFE0655A), fontSize: 11)
+            ))
+        }
         return Padding(
             padding: EdgeInsets(all: 24),
             child: SingleChildScrollView(

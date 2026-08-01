@@ -70,6 +70,10 @@ struct SettingsState {
     // Power. Seeded synchronously — a handful of sysfs reads — so the pane
     // never draws a made-up default; refreshed on a 5s tick while visible.
     var battery: BatteryStatus = BatteryReader.read()
+    var backlight: BacklightStatus = BacklightControl.read()
+    /// logind's refusal from the last brightness write (an SSH-launched
+    /// session owns no seat devices) — shown verbatim, like timeError.
+    var powerError: String? = nil
 
     // Sound. Seeded empty (available=false), NOT synchronously: status()
     // spawns wpctl twice, too heavy for state init on the main thread.
@@ -122,6 +126,7 @@ enum SettingsEvent {
 
     // Power
     case refreshBattery
+    case changeBrightness(Int)
 
     // Sound
     case refreshAudio
@@ -189,6 +194,14 @@ final class SettingsBloc: @unchecked Sendable {
             state.wallpaper = value
         case .refreshBattery:
             _refreshBattery()
+        case .changeBrightness(let percent):
+            // Optimistic raw update so the slider tracks the drag; the tick
+            // re-reads what the kernel actually accepted.
+            let pct = min(max(percent, 1), 100)
+            let scale = Double(state.backlight.maxBrightness) / 100.0
+            let raw = Int((Double(pct) * scale).rounded())
+            state.backlight.brightness = max(1, raw)
+            _applyBrightness(percent)
         case .refreshAudio:
             _refreshAudio()
         case .changeVolume(let value):
@@ -398,10 +411,20 @@ final class SettingsBloc: @unchecked Sendable {
     private func _refreshBattery() {
         Task.detached {
             let status = BatteryReader.read()
+            let backlight = BacklightControl.read()
             await MainActor.run { [self] in
                 state.battery = status
+                state.backlight = backlight
                 _scheduleBatteryTick()
             }
+        }
+    }
+
+    private func _applyBrightness(_ percent: Int) {
+        let current = state.backlight
+        Task.detached {
+            let error = BacklightControl.setPercent(percent, status: current)
+            await MainActor.run { [self] in state.powerError = error }
         }
     }
 
