@@ -26,6 +26,7 @@ enum IconType {
     case store       // App Store "A" built from three strokes in a circle
     case photos      // framed landscape: sun + mountains (image viewer)
     case video       // play triangle in a circle (video player)
+    case activity    // ECG pulse line (task manager)
 }
 
 // MARK: - IconPainter
@@ -86,7 +87,26 @@ class IconPainter: CustomPainter {
             paintPhotos(canvas, w, h, paint)
         case .video:
             paintVideo(canvas, w, h, paint)
+        case .activity:
+            paintActivity(canvas, w, h, paint)
         }
+    }
+
+    /// ECG pulse line — Activity Monitor's read: flat, sharp up, sharp
+    /// down, flat, one stroked polyline across the middle.
+    private func paintActivity(_ canvas: any Canvas, _ w: Double, _ h: Double, _ paint: Paint) {
+        paint.style = .stroke
+        paint.strokeWidth = w * 0.085
+        let midY = h * 0.52
+        let line = Path()
+        line.moveTo(w * 0.10, midY)
+        line.lineTo(w * 0.34, midY)
+        line.lineTo(w * 0.45, h * 0.22)
+        line.lineTo(w * 0.58, h * 0.78)
+        line.lineTo(w * 0.66, midY)
+        line.lineTo(w * 0.90, midY)
+        canvas.drawPath(line, paint)
+        paint.style = .fill
     }
 
     // MARK: - Icon Shapes

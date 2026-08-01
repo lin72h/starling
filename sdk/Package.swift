@@ -260,7 +260,6 @@ products += [
     .executable(name: "CounterApp", targets: ["CounterApp"]),
     .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
     .executable(name: "TodosApp", targets: ["TodosApp"]),
-    .executable(name: "TaskManagerApp", targets: ["TaskManagerApp"]),
     .executable(name: "YouTubeApp", targets: ["YouTubeApp"]),
     // The calendar package (a kalender port: day/week/month views) as a
     // library plus its demo app.
@@ -538,24 +537,10 @@ targets += [
 ]
 
 // Appended separately for the same type-checker-budget reason as the block
-// above.
+// above. (TaskManagerApp lived here as an example; it moved to the desktop's
+// apps/TaskManagerApp, booting through runStarlingApp — same code, either
+// backend.)
 targets += [
-    // An Activity-Monitor-style system monitor over /proc: live CPU, memory,
-    // disk and network tiles plus a sortable process table. Depends on CGtk3
-    // for the g_timeout_add that drives its once-a-second sampling.
-    .executableTarget(
-        name: "TaskManagerApp",
-        dependencies: [
-            "Flutter",
-            "ExampleHost",
-            "FlutterSwiftBridge",
-            "CupertinoIcons",
-            "CGtk3",
-        ],
-        path: "Examples/TaskManagerApp",
-        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
-        linkerSettings: engineLinkSettings
-    ),
     // System GStreamer (core + appsink) via pkg-config, for the YouTube
     // example's software video path. Lives in Examples/ because only the
     // example apps use it — Sources/ stays SDK-only.

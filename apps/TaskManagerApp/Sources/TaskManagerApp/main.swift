@@ -4,22 +4,19 @@
 // Task Manager — an Activity-Monitor-style system monitor as a FlutterSwift
 // app: live CPU / memory / disk / network overview tiles with sparklines, and
 // a sortable table of running processes with select-and-terminate. All data
-// comes from /proc (SystemStats.swift); a GLib timeout on the GTK main loop —
-// the same thread the framework runs the UI on — dispatches .tick to the BLoC
-// once a second.
+// comes from /proc (SystemStats.swift); startPeriodicTimer dispatches .tick
+// to the BLoC once a second on whichever loop the host runs the UI on.
 //
-//   swift run -c release TaskManagerApp
+// Host-neutral (runStarlingApp): the shell spawns it as a DMA-BUF child; a
+// GTK-linked build of the same sources runs it windowed.
 
 #if os(Linux)
-import CGtk3
 import CupertinoIcons
-import ExampleHost
 import Flutter
 import FlutterSwiftBridge
 import Foundation
 import Observation
 
-// File-scope so the C timeout callback below can reach it without a capture.
 let taskManagerBloc = TaskManagerBloc()
 
 // MARK: - Palette and table metrics
@@ -406,16 +403,14 @@ class _TaskManagerPageState: State<StatefulWidget> {
 
 // MARK: - Run
 
-// Sample once a second. The timeout fires on the GTK main loop — the thread
-// the framework runs the UI on — so the BLoC mutates state right where the
-// rebuild happens. Registered before the loop starts; it first fires once
-// the window is up and the tree is mounted.
-_ = g_timeout_add(1000, { _ in
+// Sample once a second, on whatever loop the host runs the UI on — the BLoC
+// mutates state right where the rebuild happens. Registered before the loop
+// starts; it first fires once the tree is mounted.
+startPeriodicTimer(seconds: 1) {
     taskManagerBloc.add(.tick)
-    return 1  // G_SOURCE_CONTINUE
-}, nil)
+}
 
-runExampleApp(title: "Task Manager", width: 960, height: 700) {
+runStarlingApp(title: "Task Manager", width: 960, height: 700) {
     MacosApp(
         theme: MacosThemeData(brightness: .light),
         home: TaskManagerPage(),
