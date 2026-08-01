@@ -33,8 +33,9 @@ duplicate each.
 `Examples/`: `FlutterDemoApp` (see *The demo app* below), the ported samples
 `CounterApp`, `StartupNamerApp`, `TodosApp` and `KalenderApp`, their shared
 `ExampleHost` plumbing, and `Kalender` — a port of the [kalender] calendar
-package (day/week/month views, event controllers, the overlap and multi-day
-layout delegates) that backs `KalenderApp` and remains a library product.
+package (day/week/month views driven by a single calendar BLoC, plus the
+overlap and multi-day layout delegates) that backs `KalenderApp` and remains
+a library product.
 They are targets of this same package, so `swift run -c release <AppName>`
 works from the repo root unchanged.
 

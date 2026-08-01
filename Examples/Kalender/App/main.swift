@@ -4,7 +4,7 @@
 // Kalender — the demo of the kalender calendar package
 // (github.com/werner-scholtz/kalender), ported to this framework: a calendar
 // with Day / Week / Month views, page navigation, seeded events, tap-to-select
-// and tap-to-create.
+// and tap-to-create — all driven through a single KalenderBloc.
 //
 //   swift run -c release KalenderApp
 
@@ -14,11 +14,12 @@ import Flutter
 import FlutterSwiftBridge
 import Foundation
 import Kalender
+import Observation
 
 // MARK: - Event
 
-/// The demo's event type: kalender's example subclasses `CalendarEvent` the
-/// same way to attach a title and color.
+/// The demo's event type: a `CalendarEvent` subclass carrying a title and a
+/// color for the tiles.
 final class Event: CalendarEvent {
     let title: String
     let color: Color
@@ -47,11 +48,21 @@ final class Event: CalendarEvent {
     }
 }
 
+// MARK: - Bloc
+
+/// The demo's bloc: the library's `KalenderBloc` with one template method
+/// overridden so tap-created events carry the demo's payload.
+final class DemoCalendarBloc: KalenderBloc {
+    override func makeEvent(for dateTimeRange: Kalender.DateTimeRange) -> CalendarEvent {
+        Event(dateTimeRange: dateTimeRange, title: "New Event", color: Color(0xFF607D8B))
+    }
+}
+
 // MARK: - Seed data
 
 /// A handful of events around "now", so every view has something to show:
-/// the shape kalender's example seeds (meetings today, a pair of overlapping
-/// events, and a multi-day span in the header lane).
+/// meetings today, a pair of overlapping events for the side-by-side layout,
+/// and a multi-day span for the header lane.
 func seedEvents() -> [CalendarEvent] {
     let today = Date().startOfDay
 
@@ -83,8 +94,7 @@ func seedEvents() -> [CalendarEvent] {
 
 // MARK: - Tiles
 
-/// The event tile: a rounded box in the event's color with its title, the
-/// look of kalender's example tile builder.
+/// The event tile: a rounded box in the event's color with its title.
 func eventTileBuilder(_ event: CalendarEvent, _ tileRange: Kalender.DateTimeRange) -> Widget {
     let title = (event as? Event)?.title ?? "Event"
     let color = (event as? Event)?.color ?? Color(0xFF2196F3)
@@ -158,86 +168,61 @@ class KalenderHomePage: StatefulWidget {
 }
 
 class _KalenderHomePageState: State<StatefulWidget> {
-    private let _eventsController = DefaultEventsController()
-    private let _calendarController = CalendarController()
+    let bloc = DemoCalendarBloc(
+        viewConfigurations: [
+            MultiDayViewConfiguration.singleDay(),
+            MultiDayViewConfiguration.week(),
+            MonthViewConfiguration.singleMonth(),
+        ],
+        initialViewIndex: 1, // Week
+        events: seedEvents()
+    )
 
-    /// The available views, kalender's example lineup.
-    private let _viewConfigurations: [Kalender.ViewConfiguration] = [
-        MultiDayViewConfiguration.singleDay(),
-        MultiDayViewConfiguration.week(),
-        MonthViewConfiguration.singleMonth(),
-    ]
-    private var _selectedIndex = 1 // Week
-
-    override func initState() {
-        super.initState()
-        _eventsController.addEvents(seedEvents())
+    override func build(_ context: any BuildContext) -> Widget {
+        return withObservationTracking {
+            _buildContent(context)
+        } onChange: { [weak self] in
+            guard let self, self.mounted else { return }
+            self.setState {}
+        }
     }
 
-    private var _callbacks: CalendarCallbacks {
-        CalendarCallbacks(
-            onEventTapped: { event in
-                let title = (event as? Event)?.title ?? event.id
-                print("[Kalender] tapped: \(title)")
-            },
-            onEventCreate: { event in
-                Event(
-                    id: event.id,
-                    dateTimeRange: event.dateTimeRange,
-                    title: "New Event",
-                    color: Color(0xFF607D8B)
-                )
-            },
-            onEventCreated: { event in
-                print("[Kalender] created: \(event.dateTimeRange)")
-            },
-            onPageChanged: { range in
-                print("[Kalender] page: \(range)")
-            }
+    private func _buildContent(_ context: any BuildContext) -> Widget {
+        return ColoredBox(
+            color: Color(0xFFFAFAFA),
+            child: Column(crossAxisAlignment: .stretch, children: [
+                _buildToolbar(),
+                Expanded(child: _buildCalendar()),
+            ])
         )
     }
 
     private func _buildToolbar() -> Widget {
+        let s = bloc.state
         var children: [Widget] = []
 
         // View switcher.
-        for (index, configuration) in _viewConfigurations.enumerated() {
+        for (index, configuration) in s.viewConfigurations.enumerated() {
             children.append(ToolbarButton(
                 configuration.name,
-                isActive: index == _selectedIndex,
-                onPressed: { [weak self] in
-                    self?.setState { self?._selectedIndex = index }
-                }
-            ))
+                isActive: index == s.selectedViewIndex
+            ) { [self] in bloc.add(.switchView(index: index)) })
             children.append(SizedBox(width: 6, height: 1))
         }
 
-        children.append(Expanded(child: KalListenableBuilder(
-            listenable: _calendarController.visibleDateTimeRange,
-            builder: { [weak self] _ in
-                guard let self, let range = self._calendarController.visibleDateTimeRange.value else {
-                    return SizedBox(width: 1, height: 1)
-                }
-                return Center(child: Text(
-                    monthYearName(range.dominantMonthDate),
-                    style: TextStyle(color: Color(0xDD000000), fontSize: 15, fontWeight: .w500),
-                    maxLines: 1
-                ))
-            }
-        )))
+        // Title.
+        children.append(Expanded(child: Center(child: Text(
+            monthYearName(s.visibleDateTimeRange.dominantMonthDate),
+            style: TextStyle(color: Color(0xDD000000), fontSize: 15, fontWeight: .w500),
+            maxLines: 1
+        ))))
 
         // Navigation.
-        children.append(ToolbarButton("<") { [weak self] in
-            self?._calendarController.animateToPreviousPage()
-        })
+        children.append(ToolbarButton("<") { [self] in bloc.add(.previousPage) })
         children.append(SizedBox(width: 6, height: 1))
-        children.append(ToolbarButton("Today") { [weak self] in
-            self?._calendarController.animateToDate(Date())
-        })
+        children.append(ToolbarButton("Today") { [self] in bloc.add(.jumpToToday) })
         children.append(SizedBox(width: 6, height: 1))
-        children.append(ToolbarButton(">") { [weak self] in
-            self?._calendarController.animateToNextPage()
-        })
+        children.append(ToolbarButton(">") { [self] in bloc.add(.nextPage) })
 
         return DecoratedBox(
             decoration: BoxDecoration(
@@ -251,27 +236,15 @@ class _KalenderHomePageState: State<StatefulWidget> {
         )
     }
 
-    override func build(_ context: any BuildContext) -> Widget {
+    private func _buildCalendar() -> Widget {
         let tileComponents = TileComponents(tileBuilder: eventTileBuilder)
-
-        let calendar = CalendarView(
-            eventsController: _eventsController,
-            calendarController: _calendarController,
-            viewConfiguration: _viewConfigurations[_selectedIndex],
-            callbacks: _callbacks,
+        return CalendarView(
+            bloc: bloc,
             header: CalendarHeader(multiDayTileComponents: tileComponents),
             body: CalendarBody(
                 multiDayTileComponents: tileComponents,
                 monthTileComponents: tileComponents
             )
-        )
-
-        return ColoredBox(
-            color: Color(0xFFFAFAFA),
-            child: Column(crossAxisAlignment: .stretch, children: [
-                _buildToolbar(),
-                Expanded(child: calendar),
-            ])
         )
     }
 }

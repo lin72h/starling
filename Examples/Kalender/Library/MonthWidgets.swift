@@ -5,8 +5,9 @@
 // carrying day-number headers, a multi-day event lane (single-day events
 // included), and "+n" overflow markers where a day has more events than fit.
 //
-// Ported from: kalender/lib/src/widgets/month/month_body.dart,
-// month_header.dart, components/month_grid.dart, month_day_header.dart
+// Every read comes from `bloc.state`, every interaction dispatches a
+// `KalenderEvent`; the observation roots in CalendarView.swift rebuild these
+// widgets whenever the state changes.
 
 import Flutter
 import FlutterSwiftBridge
@@ -22,14 +23,13 @@ public class MonthHeader: StatelessWidget {
 
     public override func build(_ context: any BuildContext) -> Widget {
         let provider = CalendarProvider.of(context)
-        guard let viewController = provider.calendarController.viewController as? MonthViewController else {
-            assertionFailure("The CalendarController's ViewController needs to be a MonthViewController")
+        let state = provider.bloc.state
+        guard state.viewConfiguration is MonthViewConfiguration else {
+            assertionFailure("MonthHeader needs a MonthViewConfiguration")
             return SizedBox(width: 0, height: 0)
         }
 
-        let visibleRange = viewController.pageIndexCalculator
-            .dateTimeRangeFromIndex(viewController.currentPage.value)
-        let firstWeek = Array(visibleRange.dates().prefix(KalWeekday.daysPerWeek))
+        let firstWeek = Array(state.visibleDateTimeRange.dates().prefix(KalWeekday.daysPerWeek))
 
         return DecoratedBox(
             decoration: BoxDecoration(
@@ -69,33 +69,17 @@ public class MonthBody: StatelessWidget {
 
     public override func build(_ context: any BuildContext) -> Widget {
         let provider = CalendarProvider.of(context)
-        guard let viewController = provider.calendarController.viewController as? MonthViewController else {
-            assertionFailure("The CalendarController's ViewController needs to be a MonthViewController")
+        let bloc = provider.bloc
+        let state = bloc.state
+        guard state.viewConfiguration is MonthViewConfiguration else {
+            assertionFailure("MonthBody needs a MonthViewConfiguration")
             return SizedBox(width: 0, height: 0)
         }
 
-        return KalListenableBuilder(
-            listenables: [
-                viewController.currentPage,
-                provider.eventsController,
-                provider.calendarController.selectedEvent,
-            ],
-            builder: { [self] context in
-                self._buildBody(context, provider: provider, viewController: viewController)
-            }
-        )
-    }
-
-    private func _buildBody(
-        _ context: any BuildContext,
-        provider: CalendarProvider,
-        viewController: MonthViewController
-    ) -> Widget {
-        let calculator = viewController.pageIndexCalculator as! MonthIndexCalculator
-        let page = viewController.currentPage.value
-        let visibleRange = calculator.dateTimeRangeFromIndex(page)
+        let calculator = state.viewConfiguration.pageIndexCalculator as! MonthIndexCalculator
+        let visibleRange = state.visibleDateTimeRange
         let numberOfRows = calculator.numberOfRowsForRange(visibleRange)
-        let focusedMonthStart = calculator.monthStartFromIndex(page)
+        let focusedMonthStart = calculator.monthStartFromIndex(state.currentPage)
 
         var weekRows: [Widget] = []
         for row in 0..<numberOfRows {
@@ -104,7 +88,8 @@ public class MonthBody: StatelessWidget {
             weekRows.append(Expanded(child: _buildWeekRow(
                 weekRange: weekRange,
                 focusedMonthStart: focusedMonthStart,
-                provider: provider
+                bloc: bloc,
+                components: provider.components
             )))
         }
 
@@ -114,20 +99,19 @@ public class MonthBody: StatelessWidget {
     private func _buildWeekRow(
         weekRange: DateTimeRange,
         focusedMonthStart: Date,
-        provider: CalendarProvider
+        bloc: KalenderBloc,
+        components: CalendarComponents
     ) -> Widget {
-        let components = provider.components
+        let state = bloc.state
         let dates = weekRange.dates()
         let gridSide = BorderSide(
             color: components.monthGridStyle.color,
             width: components.monthGridStyle.thickness
         )
 
-        // The background layer: grid lines and the tap targets.
-        let interaction = provider.interaction
-        let callbacks = provider.callbacks
-        let eventsController = provider.eventsController
-        let controller = provider.calendarController
+        // The background layer: grid lines and the tap targets. Tapping an
+        // empty day deselects and, when the bloc allows it, creates an
+        // all-day event.
         var cells: [Widget] = []
         for (index, date) in dates.enumerated() {
             cells.append(Expanded(child: DecoratedBox(
@@ -137,18 +121,7 @@ public class MonthBody: StatelessWidget {
                         : Border(top: gridSide, left: gridSide)
                 ),
                 child: GestureDetector(
-                    onTap: {
-                        callbacks?.onTapped?(date)
-                        controller.deselectEvent()
-
-                        guard interaction.allowEventCreation else { return }
-                        let newEvent = CalendarEvent(
-                            dateTimeRange: DateTimeRange(start: date.startOfDay, end: date.endOfDay)
-                        )
-                        guard let toAdd = callbacks?.onEventCreate?(newEvent) else { return }
-                        eventsController.addEvent(toAdd)
-                        callbacks?.onEventCreated?(toAdd)
-                    },
+                    onTap: { bloc.add(.tapDay(date)) },
                     behavior: .opaque,
                     child: SizedBox(expand: ())
                 )
@@ -169,10 +142,8 @@ public class MonthBody: StatelessWidget {
         let maxRows = configuration.maximumNumberOfVerticalEvents ?? MonthBody.defaultMaxRows
         var laneAndOverflow: [Widget] = []
         if configuration.showTiles {
-            let events = eventsController.eventsFromDateTimeRange(
+            let events = state.eventsIn(
                 weekRange,
-                multiDayRule: provider.calendarController.viewController?.viewConfiguration.multiDayRule
-                    ?? defaultMultiDayRule,
                 includeMultiDayEvents: true,
                 includeDayEvents: configuration.allowSingleDayEvents
             )
@@ -184,7 +155,7 @@ public class MonthBody: StatelessWidget {
 
             if !visibleEvents.isEmpty {
                 let tiles: [Widget] = visibleEvents.map { event in
-                    let isSelected = controller.selectedEventId == event.id
+                    let isSelected = state.selectedEventId == event.id
                     var tile: Widget = tileComponents.tileBuilder(event, weekRange)
                     if isSelected {
                         // Inset so the ring stays visible over an opaque tile.
@@ -197,10 +168,7 @@ public class MonthBody: StatelessWidget {
                         )
                     }
                     return LayoutId(id: event.id, child: GestureDetector(
-                        onTap: {
-                            controller.selectEvent(event, internal: true)
-                            callbacks?.onEventTapped?(event)
-                        },
+                        onTap: { bloc.add(.selectEvent(id: event.id)) },
                         child: Padding(
                             padding: EdgeInsets(left: 1, top: 0, right: 4, bottom: 2),
                             child: tile
