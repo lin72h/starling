@@ -218,6 +218,15 @@ uint32_t dmabuf_import_as_gl_texture(void* egl_display, int fd,
 /// Rebind an EGLImage to an existing GL texture.
 void dmabuf_rebind_gl_texture(uint32_t tex, void* egl_image);
 
+/// Upload CPU RGBA pixels into a GL texture (creating it when |tex| is 0).
+/// The CPU-pixel counterpart of dmabuf_import_as_gl_texture, for content
+/// decoded in ordinary memory — e.g. video frames read from a pipe.
+/// Rows must be tightly packed (stride == width * 4). Requires a current
+/// GL context (call on the raster thread). Returns the texture name, or 0
+/// on failure.
+uint32_t dmabuf_upload_rgba_texture(uint32_t tex, int width, int height,
+                                     const uint8_t* pixels);
+
 // ─── GPU texture copy (compositor buffer independence) ──────────────────
 
 /// GPU-copy an EGLImage-backed source texture to an independent destination

@@ -115,6 +115,7 @@ public final class GpuRendererState: @unchecked Sendable {
 
     struct ExternalTextureEntry {
         var pendingFd: Int32 = -1       // New DMA-BUF fd from main thread
+        var pendingPixels: [UInt8]? = nil  // OR new CPU RGBA frame (exclusive)
         var width: Int32 = 0
         var height: Int32 = 0
         var stride: Int32 = 0
@@ -174,6 +175,44 @@ public final class GpuRendererState: @unchecked Sendable {
         entry.dirty = true
         _texEntries[id] = entry
         _texLock.unlock()
+
+        // Without this the engine composites its CACHED resolve of the
+        // texture and never calls populate again — the fd path historically
+        // got away with it by rebinding EGLImages under the same GL texture
+        // name, which only works after a first pull that happened to see a
+        // frame. Mark properly so every update is pulled.
+        if let eng = engine {
+            FlutterEngineMarkExternalTextureFrameAvailable(eng, id)
+        }
+    }
+
+    /// Called from main thread: store a CPU RGBA frame for the raster thread
+    /// to upload — the pixel counterpart of updateExternalTexture(fd:), for
+    /// content decoded into ordinary memory (e.g. video frames off a pipe).
+    /// Rows must be tightly packed; the array is consumed (moved, not
+    /// copied) so hand over a buffer you are done with.
+    public func updateExternalTexturePixels(_ id: Int64, pixels: [UInt8],
+                                             width: Int32, height: Int32) {
+        guard pixels.count == Int(width) * Int(height) * 4 else { return }
+        _texLock.lock()
+        guard var entry = _texEntries[id] else {
+            _texLock.unlock()
+            return
+        }
+        if entry.pendingFd >= 0 {
+            Glibc.close(entry.pendingFd)
+            entry.pendingFd = -1
+        }
+        entry.pendingPixels = pixels
+        entry.width = width
+        entry.height = height
+        entry.dirty = true
+        _texEntries[id] = entry
+        _texLock.unlock()
+
+        if let eng = engine {
+            FlutterEngineMarkExternalTextureFrameAvailable(eng, id)
+        }
     }
 
     /// Called from raster thread (via gl_external_texture_frame_callback).
@@ -185,18 +224,40 @@ public final class GpuRendererState: @unchecked Sendable {
             return false
         }
         let fd = entry.pendingFd
+        let pixels = entry.pendingPixels
         let dirty = entry.dirty
         let w = entry.width, h = entry.height
         let st = entry.stride
         let fourcc = entry.fourcc, mod = entry.modifier
         if dirty {
             entry.pendingFd = -1
+            entry.pendingPixels = nil
             entry.dirty = false
             _texEntries[id] = entry
         }
         _texLock.unlock()
 
-        if dirty && fd >= 0 {
+        if dirty, let px = pixels {
+            // CPU path: upload replaces whatever EGLImage-backed texture was
+            // there — a texture flips between sources cleanly because the
+            // upload orphans the previous storage.
+            if let oldImg = entry.eglImage {
+                dmabuf_destroy_egl_image(eglDisplay, oldImg)
+                entry.eglImage = nil
+            }
+            let tex = px.withUnsafeBufferPointer {
+                dmabuf_upload_rgba_texture(entry.glTexName, w, h, $0.baseAddress)
+            }
+            if tex != 0 {
+                entry.glTexName = tex
+                entry.width = w
+                entry.height = h
+                _texLock.lock()
+                _texEntries[id]?.glTexName = tex
+                _texEntries[id]?.eglImage = nil
+                _texLock.unlock()
+            }
+        } else if dirty && fd >= 0 {
             if let oldImg = entry.eglImage {
                 dmabuf_destroy_egl_image(eglDisplay, oldImg)
             }
