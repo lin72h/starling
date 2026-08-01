@@ -3,16 +3,16 @@
 #   1. the `engine` symlink at the repo root -> a starling-engine checkout's
 #      engine/ directory. Everything here reaches the engine through this link:
 #      bridge headers, libflutter_engine.so / libflutter_linux_drm.so, icudtl.dat.
-#   2. the `sdk` symlink at the repo root -> a flutter-swift checkout. The
+#   2. the `sdk` symlink at the repo root -> a starling-sdk checkout. The
 #      Flutter->Swift framework lives in its own repo now; the shell and every
 #      app depend on it as `path: "../../sdk"`, so the link is what makes those
 #      manifests resolve without hardcoding a layout.
 #   3. the Swift toolchain's libxml2 compat symlink, needed on Ubuntu 26.04.
 #
-#   ./bootstrap.sh [path-to-starling-engine-checkout] [path-to-flutter-swift-checkout]
+#   ./bootstrap.sh [path-to-starling-engine-checkout] [path-to-starling-sdk-checkout]
 #
 # Defaults: $STARLING_ENGINE else ../starling-engine, and $STARLING_SDK else
-# ../flutter-swift.
+# ../starling-sdk.
 set -euo pipefail
 cd "$(dirname "$0")"
 ENG="${1:-${STARLING_ENGINE:-../starling-engine}}"
@@ -23,10 +23,10 @@ ENG="${1:-${STARLING_ENGINE:-../starling-engine}}"
 ln -sfn "$ENG/engine" engine
 echo "engine -> $(readlink engine)"
 
-SDK="${2:-${STARLING_SDK:-../flutter-swift}}"
+SDK="${2:-${STARLING_SDK:-../starling-sdk}}"
 [ -f "$SDK/Package.swift" ] || {
-    echo "error: no flutter-swift checkout at '$SDK' (expected <path>/Package.swift)" >&2
-    echo "       git clone https://github.com/starling-build/flutter-swift" >&2
+    echo "error: no starling-sdk checkout at '$SDK' (expected <path>/Package.swift)" >&2
+    echo "       git clone https://github.com/starling-build/starling-sdk" >&2
     exit 1
 }
 ln -sfn "$SDK" sdk

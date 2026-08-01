@@ -227,16 +227,16 @@ The Flutter→Swift framework is its own repo. Clone it beside this one:
 
 ```bash
 cd ~/dev/starling-build
-git clone https://github.com/starling-build/flutter-swift.git
+git clone https://github.com/starling-build/starling-sdk.git
 git clone https://github.com/starling-build/starling.git
 cd starling
 ./bootstrap.sh                  # engine -> ../starling-engine/engine
-                                # sdk    -> ../flutter-swift
+                                # sdk    -> ../starling-sdk
 ```
 
 Every engine and framework reference in this repo goes through those two
 symlinks; pass paths to `bootstrap.sh` to use checkouts elsewhere
-(`./bootstrap.sh <engine> <flutter-swift>`, or `$STARLING_ENGINE` /
+(`./bootstrap.sh <engine> <starling-sdk>`, or `$STARLING_ENGINE` /
 `$STARLING_SDK`).
 
 ### 2.4 Build the shell and the apps

@@ -189,7 +189,7 @@ from a second one. Neither is public, so the pre-import history is not
 reachable — everything since is in this repo's log.
 
 The framework port has since moved out again, to
-[flutter-swift](https://github.com/starling-build/flutter-swift), with the
+[starling-sdk](https://github.com/starling-build/starling-sdk), with the
 `sdk/` history that led to it. It is a derivative of Flutter and keeps Flutter's
 licence. The C++ half lives in
 [starling-engine](https://github.com/starling-build/starling-engine), a fork of
