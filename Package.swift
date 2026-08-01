@@ -257,10 +257,10 @@ products += [
     .executable(name: "CounterApp", targets: ["CounterApp"]),
     .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
     .executable(name: "TodosApp", targets: ["TodosApp"]),
-    // The kalender calendar package (day/week/month views), ported as a
+    // The calendar package (a kalender port: day/week/month views) as a
     // library plus its demo app.
-    .library(name: "Kalender", targets: ["Kalender"]),
-    .executable(name: "KalenderApp", targets: ["KalenderApp"]),
+    .library(name: "CalendarKit", targets: ["CalendarKit"]),
+    .executable(name: "CalendarApp", targets: ["CalendarApp"]),
     // One shared dylib carrying the whole framework stack (plus the C shim
     // modules apps import directly). Apps that link this single product get
     // binaries with only their own code — the packaged desktop ships one
@@ -532,34 +532,36 @@ targets += [
     ),
 ]
 
-// The kalender port, appended separately for the same type-checker-budget
+// The calendar port, appended separately for the same type-checker-budget
 // reason as the block above.
 targets += [
-    // The kalender calendar package (werner-scholtz/kalender), ported: event
-    // and calendar controllers, view configurations, the event-overlap and
-    // multi-day layout delegates, and the day/week/month views. It lives in
-    // Examples/ with the app it serves — a ported third-party package, not
-    // part of the SDK — but stays a library product so it can be depended on.
+    // The calendar package (a port of werner-scholtz/kalender): the calendar
+    // BLoC, view configurations, the event-overlap and multi-day layout
+    // delegates, and the day/week/month views. It lives in Examples/ with the
+    // app it serves — a ported third-party package, not part of the SDK — but
+    // stays a library product so it can be depended on. Named CalendarKit
+    // because a module literally named Calendar would fight Foundation's
+    // Calendar type at every use site.
     .target(
-        name: "Kalender",
+        name: "CalendarKit",
         dependencies: [
             "Flutter",
             "FlutterSwiftBridge",
         ],
-        path: "Examples/Kalender/Library",
+        path: "Examples/Calendar/Library",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
     ),
-    // kalender's demo: a week view with a view switcher, ported.
+    // The calendar package's demo: a week view with a view switcher.
     .executableTarget(
-        name: "KalenderApp",
+        name: "CalendarApp",
         dependencies: [
             "Flutter",
-            "Kalender",
+            "CalendarKit",
             "ExampleHost",
             "FlutterSwiftBridge",
             "CupertinoIcons",
         ],
-        path: "Examples/Kalender/App",
+        path: "Examples/Calendar/App",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),

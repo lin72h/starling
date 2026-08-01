@@ -35,7 +35,7 @@ public class TimeLine: StatelessWidget {
 
     public override func build(_ context: any BuildContext) -> Widget {
         let textStyle = style.textStyle
-            ?? TextStyle(color: KalenderColors.onSurfaceVariant, fontSize: 10)
+            ?? TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 10)
         let startMinutes = timeOfDayRange.start.totalMinutes
 
         var children: [Widget] = []
@@ -113,26 +113,26 @@ public class DayHeader: StatelessWidget {
     public override func build(_ context: any BuildContext) -> Widget {
         let isToday = date.isToday
         let nameStyle = style.textStyle
-            ?? TextStyle(color: KalenderColors.onSurfaceVariant, fontSize: 11)
+            ?? TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 11)
         let numberStyle = style.numberTextStyle
             ?? TextStyle(
-                color: isToday ? KalenderColors.onPrimary : KalenderColors.onSurface,
+                color: isToday ? CalendarColors.onPrimary : CalendarColors.onSurface,
                 fontSize: 16
             )
 
         let number: Widget = isToday
             ? DecoratedBox(
-                decoration: BoxDecoration(color: KalenderColors.primary, shape: .circle),
+                decoration: BoxDecoration(color: CalendarColors.primary, shape: .circle),
                 child: SizedBox(
                     width: 28,
                     height: 28,
-                    child: Center(child: Text("\(date.kalDay)", style: numberStyle))
+                    child: Center(child: Text("\(date.calDay)", style: numberStyle))
                 )
             )
             : SizedBox(
                 width: 28,
                 height: 28,
-                child: Center(child: Text("\(date.kalDay)", style: numberStyle))
+                child: Center(child: Text("\(date.calDay)", style: numberStyle))
             )
 
         return Padding(
@@ -161,7 +161,7 @@ public class WeekDayHeader: StatelessWidget {
 
     public override func build(_ context: any BuildContext) -> Widget {
         let textStyle = style.textStyle
-            ?? TextStyle(color: KalenderColors.onSurfaceVariant, fontSize: 11)
+            ?? TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 11)
         return Padding(
             padding: EdgeInsets(vertical: 4),
             child: Center(child: Text(weekdayNameShort(date), style: textStyle))
@@ -193,23 +193,23 @@ public class MonthDayHeader: StatelessWidget {
     public override func build(_ context: any BuildContext) -> Widget {
         let isToday = date.isToday
         let color: Color = isToday
-            ? KalenderColors.onPrimary
-            : (isInFocusedMonth ? KalenderColors.onSurface : KalenderColors.onSurfaceVariant)
+            ? CalendarColors.onPrimary
+            : (isInFocusedMonth ? CalendarColors.onSurface : CalendarColors.onSurfaceVariant)
         let textStyle = style.textStyle ?? TextStyle(color: color, fontSize: 12)
 
         let number: Widget = isToday
             ? DecoratedBox(
-                decoration: BoxDecoration(color: KalenderColors.primary, shape: .circle),
+                decoration: BoxDecoration(color: CalendarColors.primary, shape: .circle),
                 child: SizedBox(
                     width: 22,
                     height: 22,
-                    child: Center(child: Text("\(date.kalDay)", style: textStyle))
+                    child: Center(child: Text("\(date.calDay)", style: textStyle))
                 )
             )
             : SizedBox(
                 width: 22,
                 height: 22,
-                child: Center(child: Text("\(date.kalDay)", style: textStyle))
+                child: Center(child: Text("\(date.calDay)", style: textStyle))
             )
 
         return Padding(padding: EdgeInsets(vertical: 2), child: Center(child: number))

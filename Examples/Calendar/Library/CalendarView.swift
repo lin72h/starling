@@ -19,17 +19,17 @@ import Observation
 
 // MARK: - CalendarView
 
-/// A calendar: give it a `KalenderBloc` and a header/body pair (usually
+/// A calendar: give it a `CalendarBloc` and a header/body pair (usually
 /// `CalendarHeader()` and `CalendarBody()`).
 public class CalendarView: StatelessWidget {
-    public let bloc: KalenderBloc
+    public let bloc: CalendarBloc
     public let components: CalendarComponents
     public let header: Widget?
     public let body: Widget?
 
     public init(
         key: (any Key)? = nil,
-        bloc: KalenderBloc,
+        bloc: CalendarBloc,
         components: CalendarComponents = CalendarComponents(),
         header: Widget? = nil,
         body: Widget? = nil

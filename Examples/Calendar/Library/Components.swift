@@ -17,7 +17,7 @@ import Foundation
 // MARK: - Palette
 
 /// The default colors of the kalender port's components.
-public enum KalenderColors {
+public enum CalendarColors {
     public static let onSurface = Color(0xDD000000)          // black87
     public static let onSurfaceVariant = Color(0x8A000000)   // black54
     public static let outline = Color(0x1F000000)            // black12
@@ -67,7 +67,7 @@ public final class TileComponents {
 public func defaultTileBuilder(_ event: CalendarEvent, _ tileRange: DateTimeRange) -> Widget {
     DecoratedBox(
         decoration: BoxDecoration(
-            color: KalenderColors.primaryContainer,
+            color: CalendarColors.primaryContainer,
             borderRadius: BorderRadius.circular(4)
         ),
         child: SizedBox(expand: ())
@@ -92,7 +92,7 @@ public struct HourLinesStyle {
     public let color: Color
     public let thickness: Double
 
-    public init(color: Color = KalenderColors.outline, thickness: Double = 1) {
+    public init(color: Color = CalendarColors.outline, thickness: Double = 1) {
         self.color = color
         self.thickness = thickness
     }
@@ -103,7 +103,7 @@ public struct DaySeparatorStyle {
     public let color: Color
     public let width: Double
 
-    public init(color: Color = KalenderColors.outline, width: Double = 1) {
+    public init(color: Color = CalendarColors.outline, width: Double = 1) {
         self.color = color
         self.width = width
     }
@@ -143,7 +143,7 @@ public struct MonthGridStyle {
     public let color: Color
     public let thickness: Double
 
-    public init(color: Color = KalenderColors.outline, thickness: Double = 1) {
+    public init(color: Color = CalendarColors.outline, thickness: Double = 1) {
         self.color = color
         self.thickness = thickness
     }
@@ -156,7 +156,7 @@ public struct TimeIndicatorStyle {
     public let circleRadius: Double
 
     public init(
-        color: Color = KalenderColors.timeIndicator,
+        color: Color = CalendarColors.timeIndicator,
         thickness: Double = 2,
         circleRadius: Double = 4
     ) {
@@ -206,8 +206,8 @@ public final class CalendarComponents {
 
 /// Short weekday name ("Mon") for a date, from the current locale.
 public func weekdayNameShort(_ date: Date) -> String {
-    let symbols = kalCalendar.shortWeekdaySymbols // Sunday-first
-    let index = kalCalendar.component(.weekday, from: date) - 1
+    let symbols = calendarSystem.shortWeekdaySymbols // Sunday-first
+    let index = calendarSystem.component(.weekday, from: date) - 1
     if symbols.indices.contains(index) { return symbols[index] }
     return ""
 }
@@ -215,7 +215,7 @@ public func weekdayNameShort(_ date: Date) -> String {
 /// Month-and-year title ("July 2026") for a date, from the current locale.
 public func monthYearName(_ date: Date) -> String {
     let formatter = DateFormatter()
-    formatter.calendar = kalCalendar
+    formatter.calendar = calendarSystem
     formatter.dateFormat = "LLLL yyyy"
     return formatter.string(from: date)
 }
@@ -223,7 +223,7 @@ public func monthYearName(_ date: Date) -> String {
 /// Hour label for the timeline gutter ("7 AM" / "07:00" per locale).
 public func hourLabel(_ hour: Int) -> String {
     let formatter = DateFormatter()
-    formatter.calendar = kalCalendar
+    formatter.calendar = calendarSystem
     formatter.locale = Locale.current
     formatter.setLocalizedDateFormatFromTemplate("j")
     var components = DateComponents()
@@ -231,6 +231,6 @@ public func hourLabel(_ hour: Int) -> String {
     components.month = 1
     components.day = 1
     components.hour = hour
-    guard let date = kalCalendar.date(from: components) else { return "\(hour)" }
+    guard let date = calendarSystem.date(from: components) else { return "\(hour)" }
     return formatter.string(from: date)
 }

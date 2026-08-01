@@ -4,16 +4,16 @@
 // Kalender — the demo of the kalender calendar package
 // (github.com/werner-scholtz/kalender), ported to this framework: a calendar
 // with Day / Week / Month views, page navigation, seeded events, tap-to-select
-// and tap-to-create — all driven through a single KalenderBloc.
+// and tap-to-create — all driven through a single CalendarBloc.
 //
-//   swift run -c release KalenderApp
+//   swift run -c release CalendarApp
 
 #if os(Linux)
 import ExampleHost
 import Flutter
 import FlutterSwiftBridge
 import Foundation
-import Kalender
+import CalendarKit
 import Observation
 
 // MARK: - Event
@@ -26,7 +26,7 @@ final class Event: CalendarEvent {
 
     init(
         id: String? = nil,
-        dateTimeRange: Kalender.DateTimeRange,
+        dateTimeRange: CalendarKit.DateTimeRange,
         title: String,
         color: Color = Color(0xFF2196F3)
     ) {
@@ -36,7 +36,7 @@ final class Event: CalendarEvent {
     }
 
     override func copyWith(
-        dateTimeRange: Kalender.DateTimeRange? = nil,
+        dateTimeRange: CalendarKit.DateTimeRange? = nil,
         interaction: EventInteraction? = nil
     ) -> CalendarEvent {
         Event(
@@ -50,11 +50,13 @@ final class Event: CalendarEvent {
 
 // MARK: - Bloc
 
-/// The demo's bloc: the library's `KalenderBloc` with one template method
+/// The demo's bloc: the library's `CalendarBloc` with one template method
 /// overridden so tap-created events carry the demo's payload.
-final class DemoCalendarBloc: KalenderBloc {
-    override func makeEvent(for dateTimeRange: Kalender.DateTimeRange) -> CalendarEvent {
-        Event(dateTimeRange: dateTimeRange, title: "New Event", color: Color(0xFF607D8B))
+final class DemoCalendarBloc: CalendarBloc {
+    override func makeEvent(for dateTimeRange: CalendarKit.DateTimeRange) -> CalendarEvent {
+        // Qualified: inside a CalendarBloc subclass, bare `Event` is the
+        // nested CalendarBloc.Event dispatch enum, not the app's model type.
+        CalendarApp.Event(dateTimeRange: dateTimeRange, title: "New Event", color: Color(0xFF607D8B))
     }
 }
 
@@ -66,9 +68,9 @@ final class DemoCalendarBloc: KalenderBloc {
 func seedEvents() -> [CalendarEvent] {
     let today = Date().startOfDay
 
-    func at(_ dayOffset: Int, _ hour: Int, _ minute: Int = 0, lasting minutes: Int) -> Kalender.DateTimeRange {
+    func at(_ dayOffset: Int, _ hour: Int, _ minute: Int = 0, lasting minutes: Int) -> CalendarKit.DateTimeRange {
         let start = today.addingDays(dayOffset).addingMinutes(hour * 60 + minute)
-        return Kalender.DateTimeRange(start: start, end: start.addingMinutes(minutes))
+        return CalendarKit.DateTimeRange(start: start, end: start.addingMinutes(minutes))
     }
 
     return [
@@ -82,7 +84,7 @@ func seedEvents() -> [CalendarEvent] {
         Event(dateTimeRange: at(-1, 16, lasting: 30), title: "Coffee chat", color: Color(0xFF8E24AA)),
         // A multi-day event for the header lane and the month view.
         Event(
-            dateTimeRange: Kalender.DateTimeRange(
+            dateTimeRange: CalendarKit.DateTimeRange(
                 start: today.addingDays(1),
                 end: today.addingDays(4)
             ),
@@ -95,7 +97,7 @@ func seedEvents() -> [CalendarEvent] {
 // MARK: - Tiles
 
 /// The event tile: a rounded box in the event's color with its title.
-func eventTileBuilder(_ event: CalendarEvent, _ tileRange: Kalender.DateTimeRange) -> Widget {
+func eventTileBuilder(_ event: CalendarEvent, _ tileRange: CalendarKit.DateTimeRange) -> Widget {
     let title = (event as? Event)?.title ?? "Event"
     let color = (event as? Event)?.color ?? Color(0xFF2196F3)
     return DecoratedBox(
@@ -161,13 +163,13 @@ class ToolbarButton: StatelessWidget {
 
 // MARK: - App
 
-class KalenderHomePage: StatefulWidget {
+class CalendarHomePage: StatefulWidget {
     override func createState() -> State<StatefulWidget> {
-        return _KalenderHomePageState()
+        return _CalendarHomePageState()
     }
 }
 
-class _KalenderHomePageState: State<StatefulWidget> {
+class _CalendarHomePageState: State<StatefulWidget> {
     let bloc = DemoCalendarBloc(
         viewConfigurations: [
             MultiDayViewConfiguration.singleDay(),
@@ -249,8 +251,8 @@ class _KalenderHomePageState: State<StatefulWidget> {
     }
 }
 
-runExampleApp(title: "Kalender", width: 960, height: 720) {
-    Directionality(textDirection: .ltr, child: KalenderHomePage())
+runExampleApp(title: "Calendar", width: 960, height: 720) {
+    Directionality(textDirection: .ltr, child: CalendarHomePage())
 }
 
 #else

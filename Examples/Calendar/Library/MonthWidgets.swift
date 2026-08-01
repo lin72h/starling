@@ -6,7 +6,7 @@
 // included), and "+n" overflow markers where a day has more events than fit.
 //
 // Every read comes from `bloc.state`, every interaction dispatches a
-// `KalenderEvent`; the observation roots in CalendarView.swift rebuild these
+// `CalendarBloc.Event`; the observation roots in CalendarView.swift rebuild these
 // widgets whenever the state changes.
 
 import Flutter
@@ -29,12 +29,12 @@ public class MonthHeader: StatelessWidget {
             return SizedBox(width: 0, height: 0)
         }
 
-        let firstWeek = Array(state.visibleDateTimeRange.dates().prefix(KalWeekday.daysPerWeek))
+        let firstWeek = Array(state.visibleDateTimeRange.dates().prefix(Weekday.daysPerWeek))
 
         return DecoratedBox(
             decoration: BoxDecoration(
-                color: KalenderColors.surface,
-                border: Border(bottom: BorderSide(color: KalenderColors.outline))
+                color: CalendarColors.surface,
+                border: Border(bottom: BorderSide(color: CalendarColors.outline))
             ),
             child: Row(children: firstWeek.map { date in
                 Expanded(child: WeekDayHeader(date: date, style: provider.components.weekDayHeaderStyle))
@@ -83,8 +83,8 @@ public class MonthBody: StatelessWidget {
 
         var weekRows: [Widget] = []
         for row in 0..<numberOfRows {
-            let start = visibleRange.start.addingDays(row * KalWeekday.daysPerWeek)
-            let weekRange = DateTimeRange(start: start, end: start.addingDays(KalWeekday.daysPerWeek))
+            let start = visibleRange.start.addingDays(row * Weekday.daysPerWeek)
+            let weekRange = DateTimeRange(start: start, end: start.addingDays(Weekday.daysPerWeek))
             weekRows.append(Expanded(child: _buildWeekRow(
                 weekRange: weekRange,
                 focusedMonthStart: focusedMonthStart,
@@ -99,7 +99,7 @@ public class MonthBody: StatelessWidget {
     private func _buildWeekRow(
         weekRange: DateTimeRange,
         focusedMonthStart: Date,
-        bloc: KalenderBloc,
+        bloc: CalendarBloc,
         components: CalendarComponents
     ) -> Widget {
         let state = bloc.state
@@ -132,8 +132,8 @@ public class MonthBody: StatelessWidget {
         let dayHeaders = Row(children: dates.map { date in
             Expanded(child: MonthDayHeader(
                 date: date,
-                isInFocusedMonth: date.kalMonth == focusedMonthStart.kalMonth
-                    && date.kalYear == focusedMonthStart.kalYear,
+                isInFocusedMonth: date.calMonth == focusedMonthStart.calMonth
+                    && date.calYear == focusedMonthStart.calYear,
                 style: components.monthDayHeaderStyle
             ))
         })
@@ -161,7 +161,7 @@ public class MonthBody: StatelessWidget {
                         // Inset so the ring stays visible over an opaque tile.
                         tile = DecoratedBox(
                             decoration: BoxDecoration(
-                                border: Border.all(color: KalenderColors.selection, width: 2),
+                                border: Border.all(color: CalendarColors.selection, width: 2),
                                 borderRadius: BorderRadius.circular(6)
                             ),
                             child: Padding(padding: EdgeInsets(all: 2), child: tile)
@@ -190,7 +190,7 @@ public class MonthBody: StatelessWidget {
             if frame.totalNumberOfRows > maxRows {
                 var overflowCells: [Widget] = []
                 var hasOverflow = false
-                for column in 0..<KalWeekday.daysPerWeek {
+                for column in 0..<Weekday.daysPerWeek {
                     let hiddenCount = frame.layoutInfo
                         .filter { $0.columns.contains(column) && $0.row >= maxRows }
                         .count
@@ -200,7 +200,7 @@ public class MonthBody: StatelessWidget {
                             padding: EdgeInsets(horizontal: 4),
                             child: Text(
                                 "+\(hiddenCount)",
-                                style: TextStyle(color: KalenderColors.onSurfaceVariant, fontSize: 10),
+                                style: TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 10),
                                 maxLines: 1
                             )
                         )))

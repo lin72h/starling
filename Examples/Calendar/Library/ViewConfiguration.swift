@@ -16,7 +16,7 @@ import Foundation
 public let defaultTileHeight = 24.0
 public let defaultNewEventDuration: TimeInterval = 30 * 60
 public let defaultShowMultiDayEvents = false
-public let defaultFirstDayOfWeek = KalWeekday.monday
+public let defaultFirstDayOfWeek = Weekday.monday
 public let defaultShowEventTiles = true
 public let defaultInitialTimeOfDay = TimeOfDay(hour: 0, minute: 0)
 public let defaultHeightPerMinute = 0.7
@@ -92,7 +92,7 @@ public final class MultiDayViewConfiguration: ViewConfiguration {
     /// The slice of the day the body displays.
     public let timeOfDayRange: TimeOfDayRange
 
-    /// The first day of the week: `KalWeekday.monday`, `.saturday` or `.sunday`.
+    /// The first day of the week: `Weekday.monday`, `.saturday` or `.sunday`.
     public let firstDayOfWeek: Int
 
     /// The number of days a page displays.
@@ -118,7 +118,7 @@ public final class MultiDayViewConfiguration: ViewConfiguration {
     ) {
         assert(
             firstDayOfWeek >= 1 && firstDayOfWeek <= 7,
-            "First day of week must be a valid week day number (use KalWeekday.monday, etc.)"
+            "First day of week must be a valid week day number (use Weekday.monday, etc.)"
         )
         self.type = type
         self.timeOfDayRange = timeOfDayRange
@@ -200,7 +200,7 @@ public final class MultiDayViewConfiguration: ViewConfiguration {
             multiDayRule: multiDayRule,
             timeOfDayRange: timeOfDayRange ?? .allDay(),
             numberOfDays: 5,
-            firstDayOfWeek: KalWeekday.monday,
+            firstDayOfWeek: Weekday.monday,
             pageIndexCalculator: .workWeek(displayRange ?? kDefaultRange()),
             type: .workWeek,
             initialTimeOfDay: initialTimeOfDay,

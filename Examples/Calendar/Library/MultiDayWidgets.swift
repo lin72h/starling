@@ -6,7 +6,7 @@
 // with hour lines, event tiles and the "now" indicator.
 //
 // Every read comes from `bloc.state`, every interaction dispatches a
-// `KalenderEvent`; the observation roots in CalendarView.swift rebuild these
+// `CalendarBloc.Event`; the observation roots in CalendarView.swift rebuild these
 // widgets whenever the state changes.
 
 import Flutter
@@ -91,8 +91,8 @@ public class MultiDayHeader: StatelessWidget {
 
         return DecoratedBox(
             decoration: BoxDecoration(
-                color: KalenderColors.surface,
-                border: Border(bottom: BorderSide(color: KalenderColors.outline))
+                color: CalendarColors.surface,
+                border: Border(bottom: BorderSide(color: CalendarColors.outline))
             ),
             child: Row(crossAxisAlignment: .end, children: [
                 SizedBox(width: timelineWidth, height: 1),
@@ -178,7 +178,7 @@ public class MultiDayBody: StatelessWidget {
         date: Date,
         viewConfiguration: MultiDayViewConfiguration,
         pageHeight: Double,
-        bloc: KalenderBloc,
+        bloc: CalendarBloc,
         components: CalendarComponents
     ) -> Widget {
         let timeOfDayRange = viewConfiguration.timeOfDayRange
@@ -266,7 +266,7 @@ public class MultiDayBody: StatelessWidget {
     private func _buildDayEvents(
         date: Date,
         viewConfiguration: MultiDayViewConfiguration,
-        bloc: KalenderBloc
+        bloc: CalendarBloc
     ) -> Widget {
         let state = bloc.state
         let dayRange = DateTimeRange(start: date.startOfDay, end: date.endOfDay)
@@ -303,7 +303,7 @@ public class MultiDayBody: StatelessWidget {
                 // paints under its child, and an opaque tile would cover it.
                 tile = DecoratedBox(
                     decoration: BoxDecoration(
-                        border: Border.all(color: KalenderColors.selection, width: 2),
+                        border: Border.all(color: CalendarColors.selection, width: 2),
                         borderRadius: BorderRadius.circular(6)
                     ),
                     child: Padding(padding: EdgeInsets(all: 2), child: tile)

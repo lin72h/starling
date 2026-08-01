@@ -15,10 +15,10 @@ import Flutter
 import Foundation
 import Observation
 
-// MARK: - Kalender State
+// MARK: - Calendar State
 
 /// The single source of truth for the calendar UI.
-public struct KalenderState {
+public struct CalendarState {
     // Views
     /// The views the calendar can display (e.g. day, week, month).
     public var viewConfigurations: [ViewConfiguration]
@@ -81,42 +81,47 @@ public struct KalenderState {
     }
 }
 
-// MARK: - Kalender Events
+// MARK: - Calendar Events
 
-public enum KalenderEvent {
-    // Event store
-    case addEvent(CalendarEvent)
-    case addEvents([CalendarEvent])
-    case updateEvent(id: String, dateTimeRange: DateTimeRange)
-    case removeEvent(id: String)
-    case clearEvents
+extension CalendarBloc {
+    /// The events the UI dispatches — `CalendarBloc.Event`, nested because
+    /// the top-level name `CalendarEvent` belongs to the model type.
+    public enum Event {
+        // Event store
+        case addEvent(CalendarEvent)
+        case addEvents([CalendarEvent])
+        case updateEvent(id: String, dateTimeRange: DateTimeRange)
+        case removeEvent(id: String)
+        case clearEvents
 
-    // Selection
-    case selectEvent(id: String)
-    case deselectEvent
+        // Selection
+        case selectEvent(id: String)
+        case deselectEvent
 
-    // Navigation
-    case nextPage
-    case previousPage
-    case jumpToDate(Date)
-    case jumpToToday
+        // Navigation
+        case nextPage
+        case previousPage
+        case jumpToDate(Date)
+        case jumpToToday
 
-    // Views
-    case switchView(index: Int)
+        // Views
+        case switchView(index: Int)
 
-    // Taps on empty calendar area: deselect, and create when allowed —
-    // a timed event in a multi-day body slot, an all-day event on a month day.
-    case tapTimeSlot(Date)
-    case tapDay(Date)
+        // Taps on empty calendar area: deselect, and create when allowed —
+        // a timed event in a multi-day body slot, an all-day event on a
+        // month day.
+        case tapTimeSlot(Date)
+        case tapDay(Date)
+    }
 }
 
-// MARK: - Kalender BLoC
+// MARK: - Calendar BLoC
 
 @Observable
-open class KalenderBloc: @unchecked Sendable {
+open class CalendarBloc: @unchecked Sendable {
 
     /// The single source of truth for the UI.
-    public private(set) var state: KalenderState
+    public private(set) var state: CalendarState
 
     /// The vertical scroll controller shared by the multi-day bodies. Owned
     /// here so the scroll position survives page turns and view switches
@@ -130,9 +135,9 @@ open class KalenderBloc: @unchecked Sendable {
         events: [CalendarEvent] = [],
         allowEventCreation: Bool = true
     ) {
-        precondition(!viewConfigurations.isEmpty, "KalenderBloc needs at least one view configuration")
+        precondition(!viewConfigurations.isEmpty, "CalendarBloc needs at least one view configuration")
         let index = min(max(initialViewIndex, 0), viewConfigurations.count - 1)
-        var state = KalenderState(
+        var state = CalendarState(
             viewConfigurations: viewConfigurations,
             selectedViewIndex: index,
             events: events
@@ -167,7 +172,7 @@ open class KalenderBloc: @unchecked Sendable {
     }
 
     /// The only way the UI talks to the BLoC.
-    public func add(_ event: KalenderEvent) {
+    public func add(_ event: Event) {
         switch event {
         case .addEvent(let event):
             state.events.append(event)

@@ -31,10 +31,10 @@ duplicate each.
 
 `Sources/` carries only these SDK targets. Everything app-related lives under
 `Examples/`: `FlutterDemoApp` (see *The demo app* below), the ported samples
-`CounterApp`, `StartupNamerApp`, `TodosApp` and `KalenderApp`, their shared
-`ExampleHost` plumbing, and `Kalender` — a port of the [kalender] calendar
+`CounterApp`, `StartupNamerApp`, `TodosApp` and `CalendarApp`, their shared
+`ExampleHost` plumbing, and `CalendarKit` — a port of the [kalender] calendar
 package (day/week/month views driven by a single calendar BLoC, plus the
-overlap and multi-day layout delegates) that backs `KalenderApp` and remains
+overlap and multi-day layout delegates) that backs `CalendarApp` and remains
 a library product.
 They are targets of this same package, so `swift run -c release <AppName>`
 works from the repo root unchanged.

@@ -12,11 +12,11 @@ import Foundation
 /// What the calendar widgets read from their surrounding `CalendarView`:
 /// the bloc they dispatch to and the components they style with.
 public class CalendarProvider: InheritedWidget {
-    public let bloc: KalenderBloc
+    public let bloc: CalendarBloc
     public let components: CalendarComponents
 
     public init(
-        bloc: KalenderBloc,
+        bloc: CalendarBloc,
         components: CalendarComponents,
         child: Widget
     ) {

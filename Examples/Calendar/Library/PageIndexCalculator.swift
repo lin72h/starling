@@ -27,7 +27,7 @@ open class PageIndexCalculator: Hashable {
     }
 
     public static func workWeek(_ dateTimeRange: DateTimeRange) -> PageIndexCalculator {
-        WeekIndexCalculator(dateTimeRange: dateTimeRange, firstDayOfWeek: KalWeekday.monday, daysToDisplay: 5)
+        WeekIndexCalculator(dateTimeRange: dateTimeRange, firstDayOfWeek: Weekday.monday, daysToDisplay: 5)
     }
 
     public static func custom(_ dateTimeRange: DateTimeRange, _ numberOfDays: Int) -> PageIndexCalculator {
@@ -80,8 +80,8 @@ open class PageIndexCalculator: Hashable {
 /// The default four-year navigation range, `[now - 2 years, now + 2 years)`.
 public func kDefaultRange() -> DateTimeRange {
     let now = Date()
-    let start = kalCalendar.date(from: DateComponents(year: now.kalYear - 2, month: 1, day: 1))!
-    let end = kalCalendar.date(from: DateComponents(year: now.kalYear + 2, month: 1, day: 1))!
+    let start = calendarSystem.date(from: DateComponents(year: now.calYear - 2, month: 1, day: 1))!
+    let end = calendarSystem.date(from: DateComponents(year: now.calYear + 2, month: 1, day: 1))!
     return DateTimeRange(start: start, end: end)
 }
 
@@ -126,7 +126,7 @@ public final class WeekIndexCalculator: PageIndexCalculator {
     }
 
     public override func dateTimeRangeFromIndex(_ index: Int) -> DateTimeRange {
-        let start = internalRange().start.addingDays(index * KalWeekday.daysPerWeek)
+        let start = internalRange().start.addingDays(index * Weekday.daysPerWeek)
         return DateTimeRange(start: start, end: start.addingDays(daysToDisplay))
     }
 
@@ -134,13 +134,13 @@ public final class WeekIndexCalculator: PageIndexCalculator {
         let startOfWeek = date.startOfDay.startOfWeek(firstDayOfWeek: firstDayOfWeek)
         let range = internalRange()
         if startOfWeek <= range.start { return 0 }
-        let index = startOfWeek.daysSince(range.start) / KalWeekday.daysPerWeek
+        let index = startOfWeek.daysSince(range.start) / Weekday.daysPerWeek
         return min(max(index, 0), numberOfPages() - 1)
     }
 
     public override func numberOfPages() -> Int {
         let range = internalRange()
-        return range.end.daysSince(range.start) / KalWeekday.daysPerWeek
+        return range.end.daysSince(range.start) / Weekday.daysPerWeek
     }
 
     public override func internalRange() -> DateTimeRange {
@@ -227,9 +227,9 @@ public final class MonthIndexCalculator: PageIndexCalculator {
         var start = startOfMonth.startOfWeek(firstDayOfWeek: firstDayOfWeek)
         if start > startOfMonth { start = start.addingDays(-7) }
 
-        var end = start.addingDays(KalWeekday.daysPerWeek * MonthIndexCalculator.numberOfRows)
+        var end = start.addingDays(Weekday.daysPerWeek * MonthIndexCalculator.numberOfRows)
         if end < startOfMonth.endOfMonth {
-            end = start.addingDays(KalWeekday.daysPerWeek * (MonthIndexCalculator.numberOfRows + 1))
+            end = start.addingDays(Weekday.daysPerWeek * (MonthIndexCalculator.numberOfRows + 1))
         }
 
         return DateTimeRange(start: start, end: end)
@@ -242,7 +242,7 @@ public final class MonthIndexCalculator: PageIndexCalculator {
 
     /// The number of week rows on the page showing `range`.
     public func numberOfRowsForRange(_ range: DateTimeRange) -> Int {
-        range.dates().count / KalWeekday.daysPerWeek
+        range.dates().count / Weekday.daysPerWeek
     }
 
     public override func numberOfPages() -> Int {

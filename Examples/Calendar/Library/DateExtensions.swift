@@ -17,7 +17,7 @@
 import Foundation
 
 /// The calendar all kalender date math runs in: Gregorian, local timezone.
-public var kalCalendar: Calendar = {
+public var calendarSystem: Calendar = {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone.current
     return calendar
@@ -36,7 +36,7 @@ func positiveMod(_ a: Int, _ n: Int) -> Int {
 
 /// Dart's `DateTime.monday` ... `DateTime.sunday` (1...7), which kalender's
 /// `firstDayOfWeek` API is expressed in.
-public enum KalWeekday {
+public enum Weekday {
     public static let monday = 1
     public static let tuesday = 2
     public static let wednesday = 3
@@ -52,20 +52,20 @@ public enum KalWeekday {
 extension Date {
     /// The ISO 8601 weekday number (monday = 1 ... sunday = 7), matching
     /// Dart's `DateTime.weekday`.
-    public var kalWeekday: Int {
+    public var calWeekday: Int {
         // Foundation: 1 = Sunday ... 7 = Saturday.
-        let foundationWeekday = kalCalendar.component(.weekday, from: self)
+        let foundationWeekday = calendarSystem.component(.weekday, from: self)
         return positiveMod(foundationWeekday + 5, 7) + 1
     }
 
-    public var kalYear: Int { kalCalendar.component(.year, from: self) }
-    public var kalMonth: Int { kalCalendar.component(.month, from: self) }
-    public var kalDay: Int { kalCalendar.component(.day, from: self) }
-    public var kalHour: Int { kalCalendar.component(.hour, from: self) }
-    public var kalMinute: Int { kalCalendar.component(.minute, from: self) }
+    public var calYear: Int { calendarSystem.component(.year, from: self) }
+    public var calMonth: Int { calendarSystem.component(.month, from: self) }
+    public var calDay: Int { calendarSystem.component(.day, from: self) }
+    public var calHour: Int { calendarSystem.component(.hour, from: self) }
+    public var calMinute: Int { calendarSystem.component(.minute, from: self) }
 
     /// Midnight at the start of this date's calendar day.
-    public var startOfDay: Date { kalCalendar.startOfDay(for: self) }
+    public var startOfDay: Date { calendarSystem.startOfDay(for: self) }
 
     /// Midnight of the *next* day — kalender's `endOfDay` is an exclusive
     /// upper bound, not 23:59.
@@ -76,48 +76,48 @@ extension Date {
 
     /// The first day of this date's month, at midnight.
     public var startOfMonth: Date {
-        let components = kalCalendar.dateComponents([.year, .month], from: self)
-        return kalCalendar.date(from: components)!
+        let components = calendarSystem.dateComponents([.year, .month], from: self)
+        return calendarSystem.date(from: components)!
     }
 
     /// The first day of the *next* month (exclusive upper bound).
     public var endOfMonth: Date {
-        kalCalendar.date(byAdding: .month, value: 1, to: startOfMonth)!
+        calendarSystem.date(byAdding: .month, value: 1, to: startOfMonth)!
     }
 
     /// Midnight of the first day of this date's week.
-    public func startOfWeek(firstDayOfWeek: Int = KalWeekday.monday) -> Date {
-        let daysToSubtract = positiveMod(kalWeekday - firstDayOfWeek, 7)
+    public func startOfWeek(firstDayOfWeek: Int = Weekday.monday) -> Date {
+        let daysToSubtract = positiveMod(calWeekday - firstDayOfWeek, 7)
         return startOfDay.addingDays(-daysToSubtract)
     }
 
     /// Midnight of the day after the last day of this date's week (exclusive).
-    public func endOfWeek(firstDayOfWeek: Int = KalWeekday.monday) -> Date {
-        let daysToAdd = positiveMod(firstDayOfWeek - kalWeekday - 1, 7)
+    public func endOfWeek(firstDayOfWeek: Int = Weekday.monday) -> Date {
+        let daysToAdd = positiveMod(firstDayOfWeek - calWeekday - 1, 7)
         return startOfDay.addingDays(daysToAdd + 1)
     }
 
     /// Calendar-day arithmetic (DST-safe, unlike adding 86400-second chunks).
     public func addingDays(_ days: Int) -> Date {
-        kalCalendar.date(byAdding: .day, value: days, to: self)!
+        calendarSystem.date(byAdding: .day, value: days, to: self)!
     }
 
     public func addingMonths(_ months: Int) -> Date {
-        kalCalendar.date(byAdding: .month, value: months, to: self)!
+        calendarSystem.date(byAdding: .month, value: months, to: self)!
     }
 
     public func addingMinutes(_ minutes: Int) -> Date {
-        kalCalendar.date(byAdding: .minute, value: minutes, to: self)!
+        calendarSystem.date(byAdding: .minute, value: minutes, to: self)!
     }
 
     /// Whether two instants fall on the same calendar day.
     public func isSameDay(_ other: Date) -> Bool {
-        kalCalendar.isDate(self, inSameDayAs: other)
+        calendarSystem.isDate(self, inSameDayAs: other)
     }
 
     /// Whole calendar days from `other` to self (positive when self is later).
     public func daysSince(_ other: Date) -> Int {
-        kalCalendar.dateComponents([.day], from: other.startOfDay, to: startOfDay).day ?? 0
+        calendarSystem.dateComponents([.day], from: other.startOfDay, to: startOfDay).day ?? 0
     }
 
     /// Whether this date is "today" on the local wall clock.
@@ -193,8 +193,8 @@ public struct DateTimeRange: Hashable, CustomStringConvertible {
     ///
     /// Ported from: internal_date_time_range.dart `monthDifference`
     public var monthDifference: Int {
-        var months = (abs(start.kalYear - end.kalYear) - 1) * 12
-        months += end.kalMonth + (12 - start.kalMonth)
+        var months = (abs(start.calYear - end.calYear) - 1) * 12
+        months += end.calMonth + (12 - start.calMonth)
         return months
     }
 
@@ -227,8 +227,8 @@ public struct TimeOfDay: Hashable, Comparable {
     }
 
     public init(fromDateTime date: Date) {
-        self.hour = date.kalHour
-        self.minute = date.kalMinute
+        self.hour = date.calHour
+        self.minute = date.calMinute
     }
 
     /// Minutes past midnight.
@@ -242,7 +242,7 @@ public struct TimeOfDay: Hashable, Comparable {
     ///
     /// Ported from: time_of_day.dart `toInternalDateTime`
     public func toDateTime(_ date: Date) -> Date {
-        kalCalendar.date(
+        calendarSystem.date(
             bySettingHour: hour, minute: minute, second: 0, of: date.startOfDay
         ) ?? date.startOfDay
     }
