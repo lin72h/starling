@@ -24,6 +24,7 @@ here.
 import glob
 import json
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -166,6 +167,80 @@ class Session:
             self.sock.close()
         except OSError:
             pass
+
+
+def session_busctl(*args: str) -> str:
+    """busctl against the session's own bus, as the session user — a session
+    bus refuses other uids, and the tier runs as root."""
+    bus = os.path.dirname(broker_path()) + "/bus"
+    cmd = ["busctl", f"--address=unix:path={bus}"] + list(args)
+    user = os.environ.get("SUDO_USER")
+    if os.geteuid() == 0 and user:
+        cmd = ["sudo", "-u", user] + cmd
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"busctl {args[0]} failed: {r.stderr.strip()}"
+    return r.stdout.strip()
+
+
+def proc_running(name: str) -> bool:
+    """pgrep -x, for first-party apps. The registry's `process` flag matches
+    /proc exe paths against records' Bins= — and first-party records have
+    none (they are not store-removable, which is what that flag guards), so
+    it reads False for them even while they run."""
+    return subprocess.run(["pgrep", "-x", name],
+                          capture_output=True).returncode == 0
+
+
+def session_home() -> str:
+    """The session user's home — where the shell persists its config."""
+    user = os.environ.get("SUDO_USER")
+    if user and os.geteuid() == 0:
+        return pwd.getpwnam(user).pw_dir
+    return os.path.expanduser("~")
+
+
+# ── driving Settings' panes ──────────────────────────────────────────────────
+#
+# Checks that need a Settings control use an agent-owned window and its
+# semantic tree — the same tree the agent tooling ships on, so a control
+# that stops being reachable there is itself a finding. The window lives in
+# the agent space, invisible on the user desktop: these checks assert state
+# changes, never pixels.
+
+def settings_window() -> tuple:
+    s = Session(name="pane-driver")
+    win = s.ok("launch", app="settings")["win"]
+    wait_for(lambda: len(tree_nodes(s, win)) > 5, "Settings UI to build")
+    return s, win
+
+
+def tree_nodes(s, win) -> list:
+    r = s.call("semantic_tree", win=win)
+    return r.get("nodes", []) if r.get("ok") else []
+
+
+def tap_node_for(nodes: list, label: str):
+    """The first tappable node at-or-after the node whose label starts with
+    `label`. A nav item or row is tappable itself; a switch's tap node is
+    unlabeled and follows its row's text."""
+    seen = False
+    for n in nodes:
+        node_label = n.get("label") or ""
+        if not seen and node_label.startswith(label):
+            seen = True
+            if "tap" in (n.get("actions") or []):
+                return n.get("node")
+            continue
+        if seen and "tap" in (n.get("actions") or []):
+            return n.get("node")
+    return None
+
+
+def tap_label(s, win, label: str) -> None:
+    nid = tap_node_for(tree_nodes(s, win), label)
+    assert nid is not None, f"no tappable node for {label!r} in the tree"
+    s.ok("perform_action", win=win, node=nid, action="tap")
+    time.sleep(1)
 
 
 def apps() -> dict[str, dict]:
@@ -695,18 +770,10 @@ def check_notifications() -> None:
     bus = os.path.dirname(broker_path()) + "/bus"
     if not os.path.exists(bus):
         raise Skip("no session bus socket beside the broker")
-    user = os.environ.get("SUDO_USER")
-
     def busctl(*args: str) -> str:
-        cmd = ["busctl", f"--address=unix:path={bus}", "call",
-               "org.freedesktop.Notifications",
-               "/org/freedesktop/Notifications",
-               "org.freedesktop.Notifications"] + list(args)
-        if os.geteuid() == 0 and user:
-            cmd = ["sudo", "-u", user] + cmd
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        assert r.returncode == 0, f"busctl failed: {r.stderr.strip()}"
-        return r.stdout.strip()
+        return session_busctl("call", "org.freedesktop.Notifications",
+                              "/org/freedesktop/Notifications",
+                              "org.freedesktop.Notifications", *args)
 
     def state() -> dict:
         return ask("notification_state")
@@ -786,6 +853,161 @@ def check_battery() -> None:
     wait_for(lambda: not ask("battery_state")["present"],
              "the icon to go away with the module", timeout=15)
     log("icon left with the module")
+
+
+@check("bus: the shell owns its two well-known names")
+def check_bus_names() -> None:
+    """One line of coverage for a whole failure class. The session bus once
+    died silently (a root-owned log file killed its redirect) and the shell
+    ran busless for weeks — every file dialog broken, nothing failing loudly.
+    Unowned names mean that; owned-by-someone-else means an activation race
+    the launchers' masking should have prevented."""
+    bus = os.path.dirname(broker_path()) + "/bus"
+    if not os.path.exists(bus):
+        raise Skip("no session bus socket beside the broker")
+    shell_pid = int(subprocess.check_output(
+        ["pgrep", "-x", "DesktopShellApp"]).split()[0])
+    for name in ("org.freedesktop.portal.Desktop",
+                 "org.freedesktop.Notifications"):
+        out = session_busctl("status", name)
+        pid = next((int(l.split("=", 1)[1]) for l in out.splitlines()
+                    if l.startswith("PID=")), None)
+        assert pid == shell_pid, \
+            f"{name} is owned by pid {pid}, not the shell ({shell_pid})"
+    log("both names answer to the shell's own pid")
+
+
+@check("portal: OpenFile launches the shell's picker")
+def check_portal_chooser() -> None:
+    """The FileChooser path end to end minus the human: a bus call must
+    launch FileExplorerApp --picker as a composited child. This is the
+    interface every Chromium/Electron/GTK file dialog rides."""
+    # Earlier checks (the agents pair) can leave a Files process behind;
+    # the probe needs the namespace to itself, so clear it rather than skip.
+    if proc_running("FileExplorerApp"):
+        quit_app("FileExplorerApp")
+        wait_for(lambda: not proc_running("FileExplorerApp"),
+                 "a leftover Files process to exit")
+    out = session_busctl("call", "org.freedesktop.portal.Desktop",
+                         "/org/freedesktop/portal/desktop",
+                         "org.freedesktop.portal.FileChooser", "OpenFile",
+                         "ssa{sv}", "", "Functional Test", "0")
+    assert out.startswith("o "), f"OpenFile returned no request handle: {out}"
+    try:
+        wait_for(lambda: proc_running("FileExplorerApp"),
+                 "the picker helper to start")
+        log("picker launched from the bus call")
+    finally:
+        quit_app("FileExplorerApp")
+    wait_for(lambda: not proc_running("FileExplorerApp"), "the picker to exit")
+
+
+@check("tiling: the Settings toggle retiles a live desktop and nothing dies")
+def check_tiling_toggle() -> None:
+    """Guards the crash class that shipped: flipping tiling resizes every
+    user window's renderer mid-flight, which once corrupted child heaps
+    (the reassemble-off-the-UI-thread bug). Both apps surviving both flips
+    IS the assertion; the persisted file proves the flips happened."""
+    layout = Path(session_home()) / ".config/starling/window-layout"
+    def persisted() -> str:
+        try:
+            return layout.read_text().strip()
+        except OSError:
+            return "floating"
+    original = persisted()
+
+    assert not apps()["files"]["window"], "Files already running; quit it first"
+    drive("move 300 300", "dock files", "click")
+    wait_for(lambda: apps()["files"]["window"], "a user window to tile")
+    s, win = settings_window()
+    try:
+        tap_label(s, win, "Appearance")
+        flipped = "floating" if original == "tiling" else "tiling"
+        tap_label(s, win, "Tiling Windows")
+        wait_for(lambda: persisted() == flipped, "the layout choice to persist")
+        time.sleep(2)   # let the retile resize land on the child renderer
+        assert apps()["files"]["window"], "Files vanished in the retile"
+        assert proc_running("SettingsApp"), "Settings died in the retile"
+        tap_label(s, win, "Tiling Windows")
+        wait_for(lambda: persisted() == original, "the layout to flip back")
+        time.sleep(2)
+        assert apps()["files"]["window"], "Files vanished restoring floating"
+        assert proc_running("SettingsApp"), "Settings died restoring floating"
+        log("two live resizes per app, no casualties")
+    finally:
+        s.close()
+        quit_app("SettingsApp", "FileExplorerApp")
+    wait_for(lambda: not apps()["files"]["window"], "Files to close")
+
+
+@check("datetime: the pane sets the system timezone when the session may")
+def check_datetime_pane() -> None:
+    """Drives the region→city picker and asks timedatectl whether it took.
+    Seat-active sessions are authorised silently (allow_active) — the VM
+    gate is the only place that's true, so everywhere else this documents
+    the refusal as a Skip rather than pretending."""
+    def zone() -> str:
+        out = subprocess.check_output(["timedatectl", "show"], text=True)
+        return next((l.split("=", 1)[1] for l in out.splitlines()
+                     if l.startswith("Timezone=")), "")
+    original = zone()
+    target = ("Australia", "Sydney", "Australia/Sydney")
+    if original == target[2]:
+        target = ("Pacific", "Auckland", "Pacific/Auckland")
+
+    s, win = settings_window()
+    try:
+        tap_label(s, win, "Date & Time")
+        tap_label(s, win, "Time Zone")
+        tap_label(s, win, target[0])
+        tap_label(s, win, target[1])
+        time.sleep(2)
+        now = zone()
+        if now == original:
+            raise Skip("polkit refused — the session is not seat-active "
+                       "(the VM gate is where this proves out)")
+        assert now == target[2], f"picked {target[2]}, system says {now}"
+        log(f"timezone followed the picker: {original} → {now}")
+    finally:
+        s.close()
+        quit_app("SettingsApp")
+        if zone() != original:
+            subprocess.run(["timedatectl", "set-timezone", original],
+                           capture_output=True)
+
+
+@check("settings: every pane opens, and the version is the package's truth")
+def check_settings_walk() -> None:
+    """Opens all nine panes in one sitting — each one's build() runs, so a
+    pane that crashes the app cannot ship — and checks the General pane's
+    version against the VERSION stamp the shell actually runs from, read
+    out of the shell's own environment. \"dev build\" with no stamp is a
+    pass: that is the truth this pane exists to tell."""
+    shell_pid = int(subprocess.check_output(
+        ["pgrep", "-x", "DesktopShellApp"]).split()[0])
+    environ = Path(f"/proc/{shell_pid}/environ").read_bytes().split(b"\0")
+    data_dir = next((e.split(b"=", 1)[1].decode() for e in environ
+                     if e.startswith(b"STARLING_DATA_DIR=")),
+                    "/usr/share/starling")
+    try:
+        expected = (Path(data_dir) / "VERSION").read_text().strip()
+    except OSError:
+        expected = "dev build"
+
+    s, win = settings_window()
+    try:
+        for pane in ("Network", "Displays", "Sound", "Date & Time",
+                     "Default Apps", "Appearance", "Power", "About",
+                     "General"):
+            tap_label(s, win, pane)
+            assert proc_running("SettingsApp"), f"Settings died opening {pane}"
+        labels = [n.get("label") or "" for n in tree_nodes(s, win)]
+        assert f"Version {expected}" in labels, \
+            f"General shows none of 'Version {expected}': {[l for l in labels if 'ersion' in l]}"
+        log(f"nine panes, no casualties, version reads '{expected}'")
+    finally:
+        s.close()
+        quit_app("SettingsApp")
 
 
 CHECKS = [v for v in dict(globals()).values()
