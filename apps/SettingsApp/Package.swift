@@ -42,6 +42,8 @@ let package = Package(
         .package(name: "StarlingNet", path: "../../network"),
         // The sysfs battery layer, shared with the shell's popup.
         .package(name: "StarlingPower", path: "../../power"),
+        // The wpctl layer — PipeWire wrapped once.
+        .package(name: "StarlingAudio", path: "../../audio"),
     ],
     targets: [
         {
@@ -55,6 +57,7 @@ let package = Package(
                     .product(name: "CupertinoIcons", package: "FlutterSwift"),
                     .product(name: "StarlingNet", package: "StarlingNet"),
                     .product(name: "StarlingPower", package: "StarlingPower"),
+                    .product(name: "StarlingAudio", package: "StarlingAudio"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
@@ -78,6 +81,7 @@ let package = Package(
                     .product(name: "FlutterShared", package: "FlutterSwift"),
                     .product(name: "StarlingNet", package: "StarlingNet"),
                     .product(name: "StarlingPower", package: "StarlingPower"),
+                    .product(name: "StarlingAudio", package: "StarlingAudio"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),

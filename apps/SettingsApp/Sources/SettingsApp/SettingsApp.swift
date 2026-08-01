@@ -127,13 +127,16 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     self._sidebarItem(index: 2, icon: CupertinoIcons.desktopcomputer,
                                                       tile: Color(0xFF4880C8), label: "Displays", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 3, icon: CupertinoIcons.paintbrush_fill,
+                                    self._sidebarItem(index: 3, icon: CupertinoIcons.speaker_2_fill,
+                                                      tile: Color(0xFFC9884E), label: "Sound", selected: s.selectedIndex),
+                                    SizedBox(height: 2),
+                                    self._sidebarItem(index: 4, icon: CupertinoIcons.paintbrush_fill,
                                                       tile: Color(0xFF8A70CE), label: "Appearance", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 4, icon: CupertinoIcons.battery_100,
+                                    self._sidebarItem(index: 5, icon: CupertinoIcons.battery_100,
                                                       tile: Color(0xFF63A56E), label: "Power", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 5, icon: CupertinoIcons.info_circle_fill,
+                                    self._sidebarItem(index: 6, icon: CupertinoIcons.info_circle_fill,
                                                       tile: Color(0xFF4FA4B4), label: "About", selected: s.selectedIndex),
                                 ]
                             )
@@ -237,9 +240,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 0: return "General"
         case 1: return "Network"
         case 2: return "Displays"
-        case 3: return "Appearance"
-        case 4: return "Power"
-        case 5: return "About"
+        case 3: return "Sound"
+        case 4: return "Appearance"
+        case 5: return "Power"
+        case 6: return "About"
         default: return "Settings"
         }
     }
@@ -249,9 +253,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 0: return _buildGeneralPage()
         case 1: return _buildNetworkPage(context)
         case 2: return _buildDisplayPage()
-        case 3: return _buildAppearancePage()
-        case 4: return _buildPowerPage()
-        case 5: return _buildAboutPage()
+        case 3: return _buildSoundPage()
+        case 4: return _buildAppearancePage()
+        case 5: return _buildPowerPage()
+        case 6: return _buildAboutPage()
         default: return SizedBox(shrink: ())
         }
     }
@@ -682,6 +687,98 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             ))
         }
         return out
+    }
+
+    // MARK: - Sound Page
+
+    private func _buildSoundPage() -> Widget {
+        let a = bloc.state.audio
+        var children: [Widget] = []
+        if !a.available {
+            children.append(_sectionHeader("Sound"))
+            children.append(SizedBox(height: 12))
+            children.append(_macosGroupBox([
+                _settingsRow("Sound system", "Not running"),
+            ]))
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                "PipeWire is not answering — there is nothing to control.",
+                style: TextStyle(color: pal.textTertiary, fontSize: 11)
+            ))
+        } else {
+            children.append(_sectionHeader("Output Volume"))
+            children.append(SizedBox(height: 12))
+            children.append(_macosGroupBox([
+                Padding(
+                    padding: EdgeInsets(horizontal: 16, vertical: 10),
+                    child: Row(children: [
+                        MacosIcon(icon: CupertinoIcons.speaker_1_fill,
+                                  color: pal.textSecondary, size: 14),
+                        SizedBox(width: 10),
+                        Expanded(
+                            child: Slider(
+                                value: min(a.volume, 1.0) * 100,
+                                onChanged: { [self] (val: Double) in
+                                    bloc.add(.changeVolume(val / 100))
+                                },
+                                min: 0, max: 100
+                            )
+                        ),
+                        SizedBox(width: 10),
+                        MacosIcon(icon: CupertinoIcons.speaker_3_fill,
+                                  color: pal.textSecondary, size: 14),
+                        SizedBox(width: 12),
+                        Text("\(Int((min(a.volume, 1.0) * 100).rounded()))%",
+                             style: TextStyle(color: pal.textSecondary, fontSize: 12)),
+                    ])
+                ),
+                _divider(),
+                _settingsRowWithTrailing(
+                    "Mute", "Silence the current output",
+                    MacosSwitch(
+                        value: a.muted,
+                        onChanged: { [self] (val: Bool) in bloc.add(.toggleMute(val)) }
+                    )
+                ),
+            ]))
+            children.append(SizedBox(height: 20))
+            children.append(_sectionHeader("Output Device"))
+            children.append(SizedBox(height: 12))
+            if a.sinks.isEmpty {
+                children.append(_macosGroupBox([
+                    _settingsRow("Output", "No devices"),
+                ]))
+                children.append(SizedBox(height: 8))
+                children.append(Text(
+                    "PipeWire reports no output hardware. The volume above still "
+                    + "applies to whatever sink is routing.",
+                    style: TextStyle(color: pal.textTertiary, fontSize: 11)
+                ))
+            } else {
+                var rows: [Widget] = []
+                for (i, sink) in a.sinks.enumerated() {
+                    if i > 0 { rows.append(_divider()) }
+                    rows.append(GestureDetector(
+                        onTap: { [self] in bloc.add(.selectSink(sink.id)) },
+                        child: _settingsRowWithTrailing(
+                            sink.name,
+                            sink.isDefault ? "Current output" : "Tap to switch",
+                            sink.isDefault
+                                ? MacosIcon(icon: CupertinoIcons.checkmark_circle_fill,
+                                            color: Color(0xFF4880C8), size: 16)
+                                : SizedBox(width: 16, height: 16)
+                        )
+                    ))
+                }
+                children.append(_macosGroupBox(rows))
+            }
+        }
+        return Padding(
+            padding: EdgeInsets(all: 24),
+            child: SingleChildScrollView(
+                child: Column(crossAxisAlignment: .start, children: children)
+            )
+        )
     }
 
     // MARK: - Power Page

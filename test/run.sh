@@ -68,10 +68,16 @@ step "unit tests: registry"
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Executed [0-9]+ tests|error:|failed") || fails=$((fails + 1))
 
-# power/ is swift-testing, not XCTest — pure Swift, no C++ interop, so it
-# dodges the sdk's swift-testing/26.04 problem described below.
+# power/ and audio/ are swift-testing, not XCTest — pure Swift, no C++
+# interop, so they dodge the sdk's swift-testing/26.04 problem described
+# below.
 step "unit tests: power"
 (cd "$REPO/power" && as_user "$SWIFT" test 2>&1 \
+    | grep -vE "libxml2.so.2: no version information" \
+    | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
+
+step "unit tests: audio"
+(cd "$REPO/audio" && as_user "$SWIFT" test 2>&1 \
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
 

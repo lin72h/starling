@@ -4,6 +4,7 @@
 import Flutter
 import Foundation
 import Observation
+import StarlingAudio
 import StarlingNet
 import StarlingPower
 
@@ -17,8 +18,8 @@ nonisolated(unsafe) var settingsBlocShared: SettingsBloc?
 /// shell's "Network Settings…" popup row uses (--pane=network). An unknown
 /// or absent pane falls through to General.
 func initialPaneIndex() -> Int {
-    let panes = ["general": 0, "network": 1, "displays": 2,
-                 "appearance": 3, "power": 4, "about": 5]
+    let panes = ["general": 0, "network": 1, "displays": 2, "sound": 3,
+                 "appearance": 4, "power": 5, "about": 6]
     for arg in CommandLine.arguments.dropFirst() {
         if arg.hasPrefix("--pane="),
            let idx = panes[String(arg.dropFirst("--pane=".count)).lowercased()] {
@@ -68,6 +69,11 @@ struct SettingsState {
     // Power. Seeded synchronously — a handful of sysfs reads — so the pane
     // never draws a made-up default; refreshed on a 5s tick while visible.
     var battery: BatteryStatus = BatteryReader.read()
+
+    // Sound. Seeded empty (available=false), NOT synchronously: status()
+    // spawns wpctl twice, too heavy for state init on the main thread.
+    // _loadInitialData fills it off-main before the pane can be reached.
+    var audio = AudioStatus()
 }
 
 // MARK: - Settings Events
@@ -103,6 +109,12 @@ enum SettingsEvent {
 
     // Power
     case refreshBattery
+
+    // Sound
+    case refreshAudio
+    case changeVolume(Double)
+    case toggleMute(Bool)
+    case selectSink(Int)
 }
 
 // MARK: - Settings BLoC
@@ -119,9 +131,11 @@ final class SettingsBloc: @unchecked Sendable {
         case .loadInitialData:
             _loadInitialData()
             if state.selectedIndex == Self.powerPaneIndex { _refreshBattery() }
+            if state.selectedIndex == Self.soundPaneIndex { _refreshAudio() }
         case .selectTab(let index):
             state.selectedIndex = index
             if index == Self.powerPaneIndex { _refreshBattery() }
+            if index == Self.soundPaneIndex { _refreshAudio() }
         case .toggleWifi(let enabled):
             _toggleWifi(enabled)
         case .scanNetworks:
@@ -154,11 +168,22 @@ final class SettingsBloc: @unchecked Sendable {
             state.wallpaper = value
         case .refreshBattery:
             _refreshBattery()
+        case .refreshAudio:
+            _refreshAudio()
+        case .changeVolume(let value):
+            state.audio.volume = value
+            _applyVolume(value)
+        case .toggleMute(let value):
+            state.audio.muted = value
+            _applyMute(value)
+        case .selectSink(let id):
+            _selectSink(id)
         }
     }
 
-    /// Sidebar index of the Power pane (see initialPaneIndex's table).
-    static let powerPaneIndex = 4
+    /// Sidebar indices (see initialPaneIndex's table).
+    static let soundPaneIndex = 3
+    static let powerPaneIndex = 5
 
     // MARK: - Event Handlers
 
@@ -175,6 +200,7 @@ final class SettingsBloc: @unchecked Sendable {
             let saved = wifiOn ? WifiManager.savedConnections() : [String]()
             let wired = EthernetManager.statuses()
             #endif
+            let audio = AudioControl.status()
             await MainActor.run { [self] in
                 state.osVersion = os
                 state.kernelVersion = kernel
@@ -186,6 +212,7 @@ final class SettingsBloc: @unchecked Sendable {
                 state.savedConnections = saved
                 state.wiredLinks = wired
                 #endif
+                state.audio = audio
             }
         }
     }
@@ -356,5 +383,53 @@ final class SettingsBloc: @unchecked Sendable {
         DispatchQueue.main.asyncAfter(
             deadline: .now() + 5,
             execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+    }
+
+    // MARK: - Sound
+
+    /// Same shape as the battery: re-read off-main, tick while the pane is
+    /// the one on screen so volume moved elsewhere (a keyboard key, wpctl
+    /// by hand) shows up here.
+    private var _audioTickScheduled = false
+
+    private func _refreshAudio() {
+        Task.detached {
+            let status = AudioControl.status()
+            await MainActor.run { [self] in
+                state.audio = status
+                _scheduleAudioTick()
+            }
+        }
+    }
+
+    private func _scheduleAudioTick() {
+        guard state.selectedIndex == Self.soundPaneIndex,
+              !_audioTickScheduled else { return }
+        _audioTickScheduled = true
+        let work: () -> Void = { [weak self] in
+            guard let self else { return }
+            self._audioTickScheduled = false
+            guard self.state.selectedIndex == Self.soundPaneIndex else { return }
+            self.add(.refreshAudio)
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 5,
+            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+    }
+
+    private func _applyVolume(_ volume: Double) {
+        Task.detached { AudioControl.setVolume(volume) }
+    }
+
+    private func _applyMute(_ muted: Bool) {
+        Task.detached { AudioControl.setMuted(muted) }
+    }
+
+    private func _selectSink(_ id: Int) {
+        Task.detached {
+            AudioControl.setDefaultSink(id: id)
+            let status = AudioControl.status()
+            await MainActor.run { [self] in state.audio = status }
+        }
     }
 }
