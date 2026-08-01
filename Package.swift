@@ -546,7 +546,7 @@ targets += [
             "Flutter",
             "FlutterSwiftBridge",
         ],
-        path: "Examples/Kalender",
+        path: "Examples/Kalender/Library",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
     ),
     // kalender's demo: a week view with a view switcher, ported.
@@ -559,7 +559,7 @@ targets += [
             "FlutterSwiftBridge",
             "CupertinoIcons",
         ],
-        path: "Examples/KalenderApp",
+        path: "Examples/Kalender/App",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
