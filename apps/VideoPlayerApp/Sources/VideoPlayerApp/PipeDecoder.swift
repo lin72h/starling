@@ -83,14 +83,17 @@ final class PipeDecoder: @unchecked Sendable {
     private var stopped = false
 
     /// Spawn ffmpeg decoding `path` from `start` seconds, RGBA on stdout,
-    /// realtime paced. Frames are read with `readFrame`.
+    /// as fast as the pipe drains — the READER paces playback. Not `-re`:
+    /// -ss lands on the previous keyframe and decodes forward to the
+    /// target, and -re throttles that pre-roll to realtime too, so a seek
+    /// landing 7s past a keyframe showed its first frame 7 real seconds
+    /// later — indistinguishable from seeking not working at all.
     init?(path: String, start: Double, info: VideoInfo) {
         guard let ffmpeg = FfmpegPaths.find("ffmpeg") else { return nil }
         startPosition = max(0, start)
         process.executableURL = URL(fileURLWithPath: ffmpeg)
         process.arguments = [
             "-hide_banner", "-loglevel", "error",
-            "-re",
             "-ss", String(format: "%.3f", startPosition),
             "-i", path,
             "-f", "rawvideo", "-pix_fmt", "rgba", "-an",

@@ -142,10 +142,27 @@ class _VideoPlayerState: State<StatefulWidget> {
         // main-queue hops that only touch it after the generation check —
         // the same unsafeBitCast coercion the shell uses for its timers.
         let readerBody: () -> Void = { [weak self] in
+            // The reader paces playback (ffmpeg decodes as fast as we read;
+            // see PipeDecoder on why -re is wrong here): one frame per
+            // interval against a start-anchored clock, so decode jitter
+            // doesn't accumulate. The first frame goes out immediately —
+            // it's the one a seek is waiting to show.
+            var startedAt = timespec()
+            clock_gettime(CLOCK_MONOTONIC, &startedAt)
+            let t0 = Double(startedAt.tv_sec) + Double(startedAt.tv_nsec) / 1e9
             var framesRead = 0
             while true {
                 var frame = [UInt8](repeating: 0, count: vw * vh * 4)
                 guard dec.readFrame(into: &frame) else { break }
+                if framesRead > 0 {
+                    var now = timespec()
+                    clock_gettime(CLOCK_MONOTONIC, &now)
+                    let elapsed = Double(now.tv_sec) + Double(now.tv_nsec) / 1e9 - t0
+                    let due = Double(framesRead) / fps
+                    if due > elapsed {
+                        usleep(useconds_t((due - elapsed) * 1_000_000))
+                    }
+                }
                 framesRead += 1
                 let thisFrame = framesRead  // by value — deliver runs later
                 let pos = dec.startPosition + Double(framesRead) / fps
