@@ -42,18 +42,15 @@ public class CalendarView: StatelessWidget {
     }
 
     public override func build(_ context: any BuildContext) -> Widget {
-        var columnChildren: [Widget] = []
-        if let header {
-            columnChildren.append(header)
-        }
-        if let body {
-            columnChildren.append(Expanded(child: body))
-        }
-
         return CalendarProvider(
             bloc: bloc,
             components: components,
-            child: Column(crossAxisAlignment: .stretch, children: columnChildren)
+            child: Column(crossAxisAlignment: .stretch) {
+                header
+                if let body {
+                    Expanded { body }
+                }
+            }
         )
     }
 }

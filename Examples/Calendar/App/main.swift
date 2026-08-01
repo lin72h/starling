@@ -104,19 +104,18 @@ func eventTileBuilder(_ event: CalendarEvent, _ tileRange: CalendarKit.DateTimeR
         decoration: BoxDecoration(
             color: color,
             borderRadius: BorderRadius.circular(4)
-        ),
-        child: Padding(
-            padding: EdgeInsets(left: 4, top: 2, right: 4, bottom: 2),
-            child: Align(
-                alignment: Alignment.topLeft,
-                child: Text(
+        )
+    ) {
+        Padding(padding: EdgeInsets(left: 4, top: 2, right: 4, bottom: 2)) {
+            Align(alignment: Alignment.topLeft) {
+                Text(
                     title,
                     style: TextStyle(color: Color(0xFFFFFFFF), fontSize: 11),
                     maxLines: 1
                 )
-            )
-        )
-    )
+            }
+        }
+    }
 }
 
 // MARK: - Toolbar chrome
@@ -144,10 +143,10 @@ class ToolbarButton: StatelessWidget {
                     color: isActive ? Color(0xFF2196F3) : Color(0xFFFFFFFF),
                     border: Border.all(color: isActive ? Color(0xFF2196F3) : Color(0x33000000)),
                     borderRadius: BorderRadius.circular(4)
-                ),
-                child: Padding(
-                    padding: EdgeInsets(left: 10, top: 5, right: 10, bottom: 5),
-                    child: Text(
+                )
+            ) {
+                Padding(padding: EdgeInsets(left: 10, top: 5, right: 10, bottom: 5)) {
+                    Text(
                         label,
                         style: TextStyle(
                             color: isActive ? Color(0xFFFFFFFF) : Color(0xDD000000),
@@ -155,8 +154,8 @@ class ToolbarButton: StatelessWidget {
                         ),
                         maxLines: 1
                     )
-                )
-            )
+                }
+            }
         )
     }
 }
@@ -190,52 +189,54 @@ class _CalendarHomePageState: State<StatefulWidget> {
     }
 
     private func _buildContent(_ context: any BuildContext) -> Widget {
-        return ColoredBox(
-            color: Color(0xFFFAFAFA),
-            child: Column(crossAxisAlignment: .stretch, children: [
-                _buildToolbar(),
-                Expanded(child: _buildCalendar()),
-            ])
-        )
+        return ColoredBox(color: Color(0xFFFAFAFA)) {
+            Column(crossAxisAlignment: .stretch) {
+                _buildToolbar()
+                Expanded { _buildCalendar() }
+            }
+        }
     }
 
     private func _buildToolbar() -> Widget {
         let s = bloc.state
-        var children: [Widget] = []
-
-        // View switcher.
-        for (index, configuration) in s.viewConfigurations.enumerated() {
-            children.append(ToolbarButton(
-                configuration.name,
-                isActive: index == s.selectedViewIndex
-            ) { [self] in bloc.add(.switchView(index: index)) })
-            children.append(SizedBox(width: 6, height: 1))
-        }
-
-        // Title.
-        children.append(Expanded(child: Center(child: Text(
-            monthYearName(s.visibleDateTimeRange.dominantMonthDate),
-            style: TextStyle(color: Color(0xDD000000), fontSize: 15, fontWeight: .w500),
-            maxLines: 1
-        ))))
-
-        // Navigation.
-        children.append(ToolbarButton("<") { [self] in bloc.add(.previousPage) })
-        children.append(SizedBox(width: 6, height: 1))
-        children.append(ToolbarButton("Today") { [self] in bloc.add(.jumpToToday) })
-        children.append(SizedBox(width: 6, height: 1))
-        children.append(ToolbarButton(">") { [self] in bloc.add(.nextPage) })
 
         return DecoratedBox(
             decoration: BoxDecoration(
                 color: Color(0xFFFFFFFF),
                 border: Border(bottom: BorderSide(color: Color(0x1F000000)))
-            ),
-            child: Padding(
-                padding: EdgeInsets(left: 10, top: 8, right: 10, bottom: 8),
-                child: Row(crossAxisAlignment: .center, children: children)
             )
-        )
+        ) {
+            Padding(padding: EdgeInsets(left: 10, top: 8, right: 10, bottom: 8)) {
+                Row(crossAxisAlignment: .center) {
+                    // View switcher.
+                    for (index, configuration) in s.viewConfigurations.enumerated() {
+                        ToolbarButton(
+                            configuration.name,
+                            isActive: index == s.selectedViewIndex
+                        ) { [self] in bloc.add(.switchView(index: index)) }
+                        SizedBox(width: 6, height: 1)
+                    }
+
+                    // Title.
+                    Expanded {
+                        Center {
+                            Text(
+                                monthYearName(s.visibleDateTimeRange.dominantMonthDate),
+                                style: TextStyle(color: Color(0xDD000000), fontSize: 15, fontWeight: .w500),
+                                maxLines: 1
+                            )
+                        }
+                    }
+
+                    // Navigation.
+                    ToolbarButton("<") { [self] in bloc.add(.previousPage) }
+                    SizedBox(width: 6, height: 1)
+                    ToolbarButton("Today") { [self] in bloc.add(.jumpToToday) }
+                    SizedBox(width: 6, height: 1)
+                    ToolbarButton(">") { [self] in bloc.add(.nextPage) }
+                }
+            }
+        }
     }
 
     private func _buildCalendar() -> Widget {

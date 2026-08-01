@@ -44,65 +44,70 @@ public class MultiDayHeader: StatelessWidget {
         let visibleRange = state.visibleDateTimeRange
         let visibleDates = visibleRange.dates()
 
-        // Day headers, one per column.
-        let headerCells: [Widget] = visibleDates.map { date in
-            Expanded(child: DayHeader(date: date, style: components.dayHeaderStyle))
-        }
-
-        // The multi-day event lane.
-        var laneChildren: [Widget] = []
-        if configuration.showTiles {
-            let events = state.eventsIn(
-                visibleRange,
-                includeMultiDayEvents: true,
-                includeDayEvents: configuration.allowSingleDayEvents
-            )
-            let frame = defaultMultiDayFrameGenerator(
-                visibleDateTimeRange: visibleRange,
-                events: events
-            )
-            let (visibleEvents, layoutInfo) = frame.visibleEvents(configuration.maximumNumberOfVerticalEvents)
-
-            if !visibleEvents.isEmpty {
-                let tiles: [Widget] = visibleEvents.map { event in
-                    LayoutId(id: event.id, child: GestureDetector(
-                        onTap: { bloc.add(.selectEvent(id: event.id)) },
-                        child: Padding(
-                            padding: EdgeInsets(left: 0, top: 0, right: 3, bottom: 2),
-                            child: tileComponents.tileBuilder(event, visibleRange)
-                        )
-                    ))
-                }
-                laneChildren.append(CustomMultiChildLayout(
-                    delegate: MultiDayLayout(
-                        dateTimeRange: visibleRange,
-                        layoutInfo: layoutInfo,
-                        numberOfRows: layoutInfo.map { $0.row + 1 }.max() ?? 0,
-                        tileHeight: configuration.tileHeight
-                    ),
-                    children: tiles
-                ))
-            }
-        }
-
-        let timelineWidth = components.timelineStyle.width
-        var columnChildren: [Widget] = [Row(children: headerCells)]
-        columnChildren.append(contentsOf: laneChildren)
-
         return DecoratedBox(
             decoration: BoxDecoration(
                 color: CalendarColors.surface,
                 border: Border(bottom: BorderSide(color: CalendarColors.outline))
+            )
+        ) {
+            Row(crossAxisAlignment: .end) {
+                SizedBox(width: components.timelineStyle.width, height: 1)
+                Expanded {
+                    Padding(padding: EdgeInsets(bottom: 2)) {
+                        Column(crossAxisAlignment: .stretch) {
+                            // Day headers, one per column.
+                            Row {
+                                for date in visibleDates {
+                                    Expanded { DayHeader(date: date, style: components.dayHeaderStyle) }
+                                }
+                            }
+                            // The multi-day event lane.
+                            if configuration.showTiles {
+                                _buildLane(visibleRange: visibleRange, state: state, bloc: bloc)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The multi-day lane, or nil when there is nothing to lay out.
+    private func _buildLane(
+        visibleRange: DateTimeRange,
+        state: CalendarState,
+        bloc: CalendarBloc
+    ) -> Widget? {
+        let events = state.eventsIn(
+            visibleRange,
+            includeMultiDayEvents: true,
+            includeDayEvents: configuration.allowSingleDayEvents
+        )
+        let frame = defaultMultiDayFrameGenerator(
+            visibleDateTimeRange: visibleRange,
+            events: events
+        )
+        let (visibleEvents, layoutInfo) = frame.visibleEvents(configuration.maximumNumberOfVerticalEvents)
+        if visibleEvents.isEmpty { return nil }
+
+        // Data-driven children keyed for the layout delegate — the ported
+        // array form is the natural fit here, not a builder block.
+        let tiles: [Widget] = visibleEvents.map { event in
+            LayoutId(id: event.id, child: GestureDetector(
+                onTap: { bloc.add(.selectEvent(id: event.id)) },
+                child: Padding(padding: EdgeInsets(left: 0, top: 0, right: 3, bottom: 2)) {
+                    tileComponents.tileBuilder(event, visibleRange)
+                }
+            ))
+        }
+        return CustomMultiChildLayout(
+            delegate: MultiDayLayout(
+                dateTimeRange: visibleRange,
+                layoutInfo: layoutInfo,
+                numberOfRows: layoutInfo.map { $0.row + 1 }.max() ?? 0,
+                tileHeight: configuration.tileHeight
             ),
-            child: Row(crossAxisAlignment: .end, children: [
-                SizedBox(width: timelineWidth, height: 1),
-                Expanded(
-                    child: Padding(
-                        padding: EdgeInsets(bottom: 2),
-                        child: Column(crossAxisAlignment: .stretch, children: columnChildren)
-                    )
-                ),
-            ])
+            children: tiles
         )
     }
 }
@@ -141,35 +146,34 @@ public class MultiDayBody: StatelessWidget {
         let pageHeight = Double(timeOfDayRange.durationInMinutes) * heightPerMinute
         let visibleDates = state.visibleDateTimeRange.dates()
 
-        var dayColumns: [Widget] = []
-        for date in visibleDates {
-            dayColumns.append(Expanded(child: _buildDayColumn(
-                date: date,
-                viewConfiguration: viewConfiguration,
-                pageHeight: pageHeight,
-                bloc: bloc,
-                components: components
-            )))
-        }
-
-        return SingleChildScrollView(
-            controller: bloc.scrollController,
-            child: SizedBox(
-                height: pageHeight,
-                child: Row(crossAxisAlignment: .stretch, children: [
-                    SizedBox(
-                        width: components.timelineStyle.width,
-                        height: pageHeight,
-                        child: TimeLine(
+        return SingleChildScrollView(controller: bloc.scrollController) {
+            SizedBox(height: pageHeight) {
+                Row(crossAxisAlignment: .stretch) {
+                    SizedBox(width: components.timelineStyle.width, height: pageHeight) {
+                        TimeLine(
                             timeOfDayRange: timeOfDayRange,
                             heightPerMinute: heightPerMinute,
                             style: components.timelineStyle
                         )
-                    ),
-                    Expanded(child: Row(crossAxisAlignment: .stretch, children: dayColumns)),
-                ])
-            )
-        )
+                    }
+                    Expanded {
+                        Row(crossAxisAlignment: .stretch) {
+                            for date in visibleDates {
+                                Expanded {
+                                    _buildDayColumn(
+                                        date: date,
+                                        viewConfiguration: viewConfiguration,
+                                        pageHeight: pageHeight,
+                                        bloc: bloc,
+                                        components: components
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// One day column: separator + hour lines behind, tap layer, event tiles,
@@ -183,83 +187,74 @@ public class MultiDayBody: StatelessWidget {
     ) -> Widget {
         let timeOfDayRange = viewConfiguration.timeOfDayRange
         let heightPerMinute = bloc.state.heightPerMinute
-
-        var stackChildren: [Widget] = []
-
-        // The day separator: every column draws its left edge (the timeline
-        // gutter ends in the first one's).
-        stackChildren.append(Positioned(
-            fill: (),
-            child: DecoratedBox(
-                decoration: BoxDecoration(
-                    border: Border(left: BorderSide(
-                        color: components.daySeparatorStyle.color,
-                        width: components.daySeparatorStyle.width
-                    ))
-                ),
-                child: SizedBox(expand: ())
-            )
-        ))
-
-        // Hour lines behind the events.
-        stackChildren.append(Positioned(
-            fill: (),
-            child: HourLines(
-                timeOfDayRange: timeOfDayRange,
-                heightPerMinute: heightPerMinute,
-                style: components.hourLinesStyle
-            )
-        ))
-
-        // The tap layer: tapping an empty slot deselects and, when the bloc
-        // allows it, creates an event at the tapped (snapped) time.
         let snapMinutes = configuration.snapIntervalMinutes
-        stackChildren.append(Positioned(
-            fill: (),
-            child: GestureDetector(
-                onTapUp: { details in
-                    let dayStart = timeOfDayRange.start.toDateTime(date)
-                    let minutes = details.localPosition.dy / heightPerMinute
-                    let snapped = snapMinutes > 0
-                        ? Int(minutes / Double(snapMinutes)) * snapMinutes
-                        : Int(minutes)
-                    bloc.add(.tapTimeSlot(dayStart.addingMinutes(snapped)))
-                },
-                behavior: .opaque,
-                child: SizedBox(expand: ())
-            )
-        ))
 
-        // The event tiles.
-        stackChildren.append(Positioned(
-            fill: (),
-            left: configuration.horizontalPadding.left,
-            right: configuration.horizontalPadding.right,
-            child: _buildDayEvents(
-                date: date,
-                viewConfiguration: viewConfiguration,
-                bloc: bloc
-            )
-        ))
+        return Stack(clipBehavior: .none) {
+            // The day separator: every column draws its left edge (the
+            // timeline gutter ends in the first one's).
+            Positioned(left: 0, top: 0, right: 0, bottom: 0) {
+                DecoratedBox(
+                    decoration: BoxDecoration(
+                        border: Border(left: BorderSide(
+                            color: components.daySeparatorStyle.color,
+                            width: components.daySeparatorStyle.width
+                        ))
+                    )
+                ) { SizedBox(expand: ()) }
+            }
 
-        // The "now" line.
-        if date.isToday {
-            let now = Date()
-            let dayStart = timeOfDayRange.start.toDateTime(date)
-            let offset = now.timeIntervalSince(dayStart) / 60.0 * heightPerMinute
-            let radius = components.timeIndicatorStyle.circleRadius
-            if offset >= 0 && offset <= pageHeight {
-                stackChildren.append(Positioned(
-                    left: 0,
-                    top: offset - radius,
-                    right: 0,
-                    height: radius * 2,
-                    child: TimeIndicator(style: components.timeIndicatorStyle)
-                ))
+            // Hour lines behind the events.
+            Positioned(left: 0, top: 0, right: 0, bottom: 0) {
+                HourLines(
+                    timeOfDayRange: timeOfDayRange,
+                    heightPerMinute: heightPerMinute,
+                    style: components.hourLinesStyle
+                )
+            }
+
+            // The tap layer: tapping an empty slot deselects and, when the
+            // bloc allows it, creates an event at the tapped (snapped) time.
+            Positioned(left: 0, top: 0, right: 0, bottom: 0) {
+                GestureDetector(
+                    onTapUp: { details in
+                        let dayStart = timeOfDayRange.start.toDateTime(date)
+                        let minutes = details.localPosition.dy / heightPerMinute
+                        let snapped = snapMinutes > 0
+                            ? Int(minutes / Double(snapMinutes)) * snapMinutes
+                            : Int(minutes)
+                        bloc.add(.tapTimeSlot(dayStart.addingMinutes(snapped)))
+                    },
+                    behavior: .opaque,
+                    child: SizedBox(expand: ())
+                )
+            }
+
+            // The event tiles.
+            Positioned(
+                left: configuration.horizontalPadding.left,
+                top: 0,
+                right: configuration.horizontalPadding.right,
+                bottom: 0
+            ) {
+                _buildDayEvents(
+                    date: date,
+                    viewConfiguration: viewConfiguration,
+                    bloc: bloc
+                )
+            }
+
+            // The "now" line.
+            if date.isToday {
+                let dayStart = timeOfDayRange.start.toDateTime(date)
+                let offset = Date().timeIntervalSince(dayStart) / 60.0 * heightPerMinute
+                let radius = components.timeIndicatorStyle.circleRadius
+                if offset >= 0 && offset <= pageHeight {
+                    Positioned(left: 0, top: offset - radius, right: 0, height: radius * 2) {
+                        TimeIndicator(style: components.timeIndicatorStyle)
+                    }
+                }
             }
         }
-
-        return Stack(clipBehavior: .none, children: stackChildren)
     }
 
     /// The `CustomMultiChildLayout` of a day's event tiles.
@@ -296,18 +291,19 @@ public class MultiDayBody: StatelessWidget {
         )
 
         let tiles: [Widget] = sorted.enumerated().map { index, event in
-            let isSelected = state.selectedEventId == event.id
-            var tile: Widget = tileComponents.tileBuilder(event, dayRange)
-            if isSelected {
+            let base = tileComponents.tileBuilder(event, dayRange)
+            let tile: Widget
+            if state.selectedEventId == event.id {
                 // The tile is inset so the ring stays visible: a decoration
                 // paints under its child, and an opaque tile would cover it.
                 tile = DecoratedBox(
                     decoration: BoxDecoration(
                         border: Border.all(color: CalendarColors.selection, width: 2),
                         borderRadius: BorderRadius.circular(6)
-                    ),
-                    child: Padding(padding: EdgeInsets(all: 2), child: tile)
-                )
+                    )
+                ) { Padding(padding: EdgeInsets(all: 2)) { base } }
+            } else {
+                tile = base
             }
             return LayoutId(id: index, child: GestureDetector(
                 onTap: { bloc.add(.selectEvent(id: event.id)) },

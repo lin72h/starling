@@ -38,20 +38,14 @@ public class TimeLine: StatelessWidget {
             ?? TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 10)
         let startMinutes = timeOfDayRange.start.totalMinutes
 
-        var children: [Widget] = []
-        let lastHour = timeOfDayRange.end.hour
-        var hour = timeOfDayRange.start.hour + 1
-        while hour <= lastHour {
-            let y = Double(hour * 60 - startMinutes) * heightPerMinute
-            children.append(Positioned(
-                top: y - 7,
-                right: 6,
-                child: Text(hourLabel(hour), style: textStyle, maxLines: 1)
-            ))
-            hour += 1
+        return Stack(clipBehavior: .none) {
+            for hour in (timeOfDayRange.start.hour + 1)...timeOfDayRange.end.hour {
+                let y = Double(hour * 60 - startMinutes) * heightPerMinute
+                Positioned(top: y - 7, right: 6) {
+                    Text(hourLabel(hour), style: textStyle, maxLines: 1)
+                }
+            }
         }
-
-        return Stack(clipBehavior: .none, children: children)
     }
 }
 
@@ -79,20 +73,14 @@ public class HourLines: StatelessWidget {
 
     public override func build(_ context: any BuildContext) -> Widget {
         let startMinutes = timeOfDayRange.start.totalMinutes
-        var children: [Widget] = []
-        var hour = timeOfDayRange.start.hour + 1
-        while hour <= timeOfDayRange.end.hour {
-            let y = Double(hour * 60 - startMinutes) * heightPerMinute
-            children.append(Positioned(
-                left: 0,
-                top: y - style.thickness / 2,
-                right: 0,
-                height: style.thickness,
-                child: ColoredBox(color: style.color, child: SizedBox(expand: ()))
-            ))
-            hour += 1
+        return Stack {
+            for hour in (timeOfDayRange.start.hour + 1)...timeOfDayRange.end.hour {
+                let y = Double(hour * 60 - startMinutes) * heightPerMinute
+                Positioned(left: 0, top: y - style.thickness / 2, right: 0, height: style.thickness) {
+                    ColoredBox(color: style.color) { SizedBox(expand: ()) }
+                }
+            }
         }
-        return Stack(children: children)
     }
 }
 
@@ -120,29 +108,23 @@ public class DayHeader: StatelessWidget {
                 fontSize: 16
             )
 
-        let number: Widget = isToday
-            ? DecoratedBox(
-                decoration: BoxDecoration(color: CalendarColors.primary, shape: .circle),
-                child: SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: Center(child: Text("\(date.calDay)", style: numberStyle))
-                )
-            )
-            : SizedBox(
-                width: 28,
-                height: 28,
-                child: Center(child: Text("\(date.calDay)", style: numberStyle))
-            )
+        let number = SizedBox(width: 28, height: 28) {
+            Center { Text("\(date.calDay)", style: numberStyle) }
+        }
 
-        return Padding(
-            padding: EdgeInsets(vertical: 4),
-            child: Column(mainAxisAlignment: .center, children: [
-                Text(weekdayNameShort(date), style: nameStyle),
-                SizedBox(width: 1, height: 2),
-                number,
-            ])
-        )
+        return Padding(padding: EdgeInsets(vertical: 4)) {
+            Column(mainAxisAlignment: .center) {
+                Text(weekdayNameShort(date), style: nameStyle)
+                SizedBox(width: 1, height: 2)
+                if isToday {
+                    DecoratedBox(
+                        decoration: BoxDecoration(color: CalendarColors.primary, shape: .circle)
+                    ) { number }
+                } else {
+                    number
+                }
+            }
+        }
     }
 }
 
@@ -162,10 +144,9 @@ public class WeekDayHeader: StatelessWidget {
     public override func build(_ context: any BuildContext) -> Widget {
         let textStyle = style.textStyle
             ?? TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 11)
-        return Padding(
-            padding: EdgeInsets(vertical: 4),
-            child: Center(child: Text(weekdayNameShort(date), style: textStyle))
-        )
+        return Padding(padding: EdgeInsets(vertical: 4)) {
+            Center { Text(weekdayNameShort(date), style: textStyle) }
+        }
     }
 }
 
@@ -197,22 +178,21 @@ public class MonthDayHeader: StatelessWidget {
             : (isInFocusedMonth ? CalendarColors.onSurface : CalendarColors.onSurfaceVariant)
         let textStyle = style.textStyle ?? TextStyle(color: color, fontSize: 12)
 
-        let number: Widget = isToday
-            ? DecoratedBox(
-                decoration: BoxDecoration(color: CalendarColors.primary, shape: .circle),
-                child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: Center(child: Text("\(date.calDay)", style: textStyle))
-                )
-            )
-            : SizedBox(
-                width: 22,
-                height: 22,
-                child: Center(child: Text("\(date.calDay)", style: textStyle))
-            )
+        let number = SizedBox(width: 22, height: 22) {
+            Center { Text("\(date.calDay)", style: textStyle) }
+        }
 
-        return Padding(padding: EdgeInsets(vertical: 2), child: Center(child: number))
+        return Padding(padding: EdgeInsets(vertical: 2)) {
+            Center {
+                if isToday {
+                    DecoratedBox(
+                        decoration: BoxDecoration(color: CalendarColors.primary, shape: .circle)
+                    ) { number }
+                } else {
+                    number
+                }
+            }
+        }
     }
 }
 
@@ -229,24 +209,25 @@ public class TimeIndicator: StatelessWidget {
     }
 
     public override func build(_ context: any BuildContext) -> Widget {
-        Stack(clipBehavior: .none, children: [
+        Stack(clipBehavior: .none) {
             Positioned(
                 left: 0,
                 top: style.circleRadius - style.thickness / 2,
                 right: 0,
-                height: style.thickness,
-                child: ColoredBox(color: style.color, child: SizedBox(expand: ()))
-            ),
+                height: style.thickness
+            ) {
+                ColoredBox(color: style.color) { SizedBox(expand: ()) }
+            }
             Positioned(
                 left: -style.circleRadius,
                 top: 0,
                 width: style.circleRadius * 2,
-                height: style.circleRadius * 2,
-                child: DecoratedBox(
-                    decoration: BoxDecoration(color: style.color, shape: .circle),
-                    child: SizedBox(expand: ())
-                )
-            ),
-        ])
+                height: style.circleRadius * 2
+            ) {
+                DecoratedBox(
+                    decoration: BoxDecoration(color: style.color, shape: .circle)
+                ) { SizedBox(expand: ()) }
+            }
+        }
     }
 }

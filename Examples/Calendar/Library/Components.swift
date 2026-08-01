@@ -69,9 +69,8 @@ public func defaultTileBuilder(_ event: CalendarEvent, _ tileRange: DateTimeRang
         decoration: BoxDecoration(
             color: CalendarColors.primaryContainer,
             borderRadius: BorderRadius.circular(4)
-        ),
-        child: SizedBox(expand: ())
-    )
+        )
+    ) { SizedBox(expand: ()) }
 }
 
 // MARK: - Component styles

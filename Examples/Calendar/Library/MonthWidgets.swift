@@ -35,11 +35,16 @@ public class MonthHeader: StatelessWidget {
             decoration: BoxDecoration(
                 color: CalendarColors.surface,
                 border: Border(bottom: BorderSide(color: CalendarColors.outline))
-            ),
-            child: Row(children: firstWeek.map { date in
-                Expanded(child: WeekDayHeader(date: date, style: provider.components.weekDayHeaderStyle))
-            })
-        )
+            )
+        ) {
+            Row {
+                for date in firstWeek {
+                    Expanded {
+                        WeekDayHeader(date: date, style: provider.components.weekDayHeaderStyle)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -81,19 +86,20 @@ public class MonthBody: StatelessWidget {
         let numberOfRows = calculator.numberOfRowsForRange(visibleRange)
         let focusedMonthStart = calculator.monthStartFromIndex(state.currentPage)
 
-        var weekRows: [Widget] = []
-        for row in 0..<numberOfRows {
-            let start = visibleRange.start.addingDays(row * Weekday.daysPerWeek)
-            let weekRange = DateTimeRange(start: start, end: start.addingDays(Weekday.daysPerWeek))
-            weekRows.append(Expanded(child: _buildWeekRow(
-                weekRange: weekRange,
-                focusedMonthStart: focusedMonthStart,
-                bloc: bloc,
-                components: provider.components
-            )))
+        return Column(crossAxisAlignment: .stretch) {
+            for row in 0..<numberOfRows {
+                let start = visibleRange.start.addingDays(row * Weekday.daysPerWeek)
+                let weekRange = DateTimeRange(start: start, end: start.addingDays(Weekday.daysPerWeek))
+                Expanded {
+                    _buildWeekRow(
+                        weekRange: weekRange,
+                        focusedMonthStart: focusedMonthStart,
+                        bloc: bloc,
+                        components: provider.components
+                    )
+                }
+            }
         }
-
-        return Column(crossAxisAlignment: .stretch, children: weekRows)
     }
 
     private func _buildWeekRow(
@@ -108,126 +114,145 @@ public class MonthBody: StatelessWidget {
             color: components.monthGridStyle.color,
             width: components.monthGridStyle.thickness
         )
-
-        // The background layer: grid lines and the tap targets. Tapping an
-        // empty day deselects and, when the bloc allows it, creates an
-        // all-day event.
-        var cells: [Widget] = []
-        for (index, date) in dates.enumerated() {
-            cells.append(Expanded(child: DecoratedBox(
-                decoration: BoxDecoration(
-                    border: index == 0
-                        ? Border(top: gridSide)
-                        : Border(top: gridSide, left: gridSide)
-                ),
-                child: GestureDetector(
-                    onTap: { bloc.add(.tapDay(date)) },
-                    behavior: .opaque,
-                    child: SizedBox(expand: ())
-                )
-            )))
-        }
-
-        // The day-number strip.
-        let dayHeaders = Row(children: dates.map { date in
-            Expanded(child: MonthDayHeader(
-                date: date,
-                isInFocusedMonth: date.calMonth == focusedMonthStart.calMonth
-                    && date.calYear == focusedMonthStart.calYear,
-                style: components.monthDayHeaderStyle
-            ))
-        })
-
-        // The event lane.
         let maxRows = configuration.maximumNumberOfVerticalEvents ?? MonthBody.defaultMaxRows
-        var laneAndOverflow: [Widget] = []
-        if configuration.showTiles {
-            let events = state.eventsIn(
-                weekRange,
-                includeMultiDayEvents: true,
-                includeDayEvents: configuration.allowSingleDayEvents
-            )
-            let frame = defaultMultiDayFrameGenerator(
-                visibleDateTimeRange: weekRange,
-                events: events
-            )
-            let (visibleEvents, layoutInfo) = frame.visibleEvents(maxRows)
 
-            if !visibleEvents.isEmpty {
-                let tiles: [Widget] = visibleEvents.map { event in
-                    let isSelected = state.selectedEventId == event.id
-                    var tile: Widget = tileComponents.tileBuilder(event, weekRange)
-                    if isSelected {
-                        // Inset so the ring stays visible over an opaque tile.
-                        tile = DecoratedBox(
-                            decoration: BoxDecoration(
-                                border: Border.all(color: CalendarColors.selection, width: 2),
-                                borderRadius: BorderRadius.circular(6)
-                            ),
-                            child: Padding(padding: EdgeInsets(all: 2), child: tile)
-                        )
+        // The lane's layout frame, shared by the tiles and the "+n" markers.
+        let frame: MultiDayLayoutFrame? = configuration.showTiles
+            ? defaultMultiDayFrameGenerator(
+                visibleDateTimeRange: weekRange,
+                events: state.eventsIn(
+                    weekRange,
+                    includeMultiDayEvents: true,
+                    includeDayEvents: configuration.allowSingleDayEvents
+                )
+            )
+            : nil
+
+        return Stack {
+            // The background layer: grid lines and the tap targets. Tapping
+            // an empty day deselects and, when the bloc allows it, creates
+            // an all-day event.
+            Positioned(left: 0, top: 0, right: 0, bottom: 0) {
+                Row(crossAxisAlignment: .stretch) {
+                    for (index, date) in dates.enumerated() {
+                        Expanded {
+                            DecoratedBox(
+                                decoration: BoxDecoration(
+                                    border: index == 0
+                                        ? Border(top: gridSide)
+                                        : Border(top: gridSide, left: gridSide)
+                                )
+                            ) {
+                                GestureDetector(
+                                    onTap: { bloc.add(.tapDay(date)) },
+                                    behavior: .opaque,
+                                    child: SizedBox(expand: ())
+                                )
+                            }
+                        }
                     }
-                    return LayoutId(id: event.id, child: GestureDetector(
-                        onTap: { bloc.add(.selectEvent(id: event.id)) },
-                        child: Padding(
-                            padding: EdgeInsets(left: 1, top: 0, right: 4, bottom: 2),
-                            child: tile
-                        )
-                    ))
                 }
-                laneAndOverflow.append(CustomMultiChildLayout(
-                    delegate: MultiDayLayout(
-                        dateTimeRange: weekRange,
-                        layoutInfo: layoutInfo,
-                        numberOfRows: layoutInfo.map { $0.row + 1 }.max() ?? 0,
-                        tileHeight: configuration.tileHeight
-                    ),
-                    children: tiles
-                ))
             }
 
-            // "+n" markers where a column overflows the row cap.
-            if frame.totalNumberOfRows > maxRows {
-                var overflowCells: [Widget] = []
-                var hasOverflow = false
-                for column in 0..<Weekday.daysPerWeek {
-                    let hiddenCount = frame.layoutInfo
-                        .filter { $0.columns.contains(column) && $0.row >= maxRows }
-                        .count
-                    if hiddenCount > 0 {
-                        hasOverflow = true
-                        overflowCells.append(Expanded(child: Padding(
-                            padding: EdgeInsets(horizontal: 4),
-                            child: Text(
-                                "+\(hiddenCount)",
-                                style: TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 10),
-                                maxLines: 1
-                            )
-                        )))
-                    } else {
-                        overflowCells.append(Expanded(child: SizedBox(width: 1, height: 1)))
+            // The content layer: day numbers, the event lane, "+n" markers.
+            Positioned(left: 0, top: 0, right: 0, bottom: 0) {
+                Column(crossAxisAlignment: .stretch) {
+                    SizedBox(height: MonthBody.dayHeaderHeight) {
+                        Row {
+                            for date in dates {
+                                Expanded {
+                                    MonthDayHeader(
+                                        date: date,
+                                        isInFocusedMonth: date.calMonth == focusedMonthStart.calMonth
+                                            && date.calYear == focusedMonthStart.calYear,
+                                        style: components.monthDayHeaderStyle
+                                    )
+                                }
+                            }
+                        }
                     }
-                }
-                if hasOverflow {
-                    laneAndOverflow.append(SizedBox(
-                        height: MonthBody.overflowHeight,
-                        child: Row(children: overflowCells)
-                    ))
+                    if let frame {
+                        _buildLane(frame: frame, weekRange: weekRange, maxRows: maxRows, bloc: bloc)
+                        if frame.totalNumberOfRows > maxRows {
+                            _buildOverflowStrip(frame: frame, maxRows: maxRows)
+                        }
+                    }
                 }
             }
         }
+    }
 
-        var contentChildren: [Widget] = [
-            SizedBox(height: MonthBody.dayHeaderHeight, child: dayHeaders)
-        ]
-        contentChildren.append(contentsOf: laneAndOverflow)
+    /// The week's event lane, or nil when there is nothing to lay out.
+    private func _buildLane(
+        frame: MultiDayLayoutFrame,
+        weekRange: DateTimeRange,
+        maxRows: Int,
+        bloc: CalendarBloc
+    ) -> Widget? {
+        let state = bloc.state
+        let (visibleEvents, layoutInfo) = frame.visibleEvents(maxRows)
+        if visibleEvents.isEmpty { return nil }
 
-        return Stack(children: [
-            Positioned(fill: (), child: Row(crossAxisAlignment: .stretch, children: cells)),
-            Positioned(
-                fill: (),
-                child: Column(crossAxisAlignment: .stretch, children: contentChildren)
+        // Data-driven children keyed for the layout delegate — the ported
+        // array form is the natural fit here, not a builder block.
+        let tiles: [Widget] = visibleEvents.map { event in
+            let base = tileComponents.tileBuilder(event, weekRange)
+            let tile: Widget
+            if state.selectedEventId == event.id {
+                // Inset so the ring stays visible over an opaque tile.
+                tile = DecoratedBox(
+                    decoration: BoxDecoration(
+                        border: Border.all(color: CalendarColors.selection, width: 2),
+                        borderRadius: BorderRadius.circular(6)
+                    )
+                ) { Padding(padding: EdgeInsets(all: 2)) { base } }
+            } else {
+                tile = base
+            }
+            return LayoutId(id: event.id, child: GestureDetector(
+                onTap: { bloc.add(.selectEvent(id: event.id)) },
+                child: Padding(padding: EdgeInsets(left: 1, top: 0, right: 4, bottom: 2)) {
+                    tile
+                }
+            ))
+        }
+        return CustomMultiChildLayout(
+            delegate: MultiDayLayout(
+                dateTimeRange: weekRange,
+                layoutInfo: layoutInfo,
+                numberOfRows: layoutInfo.map { $0.row + 1 }.max() ?? 0,
+                tileHeight: configuration.tileHeight
             ),
-        ])
+            children: tiles
+        )
+    }
+
+    /// The "+n" markers where a column overflows the row cap, or nil when no
+    /// column does.
+    private func _buildOverflowStrip(frame: MultiDayLayoutFrame, maxRows: Int) -> Widget? {
+        let hiddenCounts = (0..<Weekday.daysPerWeek).map { column in
+            frame.layoutInfo.filter { $0.columns.contains(column) && $0.row >= maxRows }.count
+        }
+        if hiddenCounts.allSatisfy({ $0 == 0 }) { return nil }
+
+        return SizedBox(height: MonthBody.overflowHeight) {
+            Row {
+                for hiddenCount in hiddenCounts {
+                    if hiddenCount > 0 {
+                        Expanded {
+                            Padding(padding: EdgeInsets(horizontal: 4)) {
+                                Text(
+                                    "+\(hiddenCount)",
+                                    style: TextStyle(color: CalendarColors.onSurfaceVariant, fontSize: 10),
+                                    maxLines: 1
+                                )
+                            }
+                        }
+                    } else {
+                        Expanded { SizedBox(width: 1, height: 1) }
+                    }
+                }
+            }
+        }
     }
 }
