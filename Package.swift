@@ -260,6 +260,7 @@ products += [
     .executable(name: "CounterApp", targets: ["CounterApp"]),
     .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
     .executable(name: "TodosApp", targets: ["TodosApp"]),
+    .executable(name: "TaskManagerApp", targets: ["TaskManagerApp"]),
     // The calendar package (a kalender port: day/week/month views) as a
     // library plus its demo app.
     .library(name: "CalendarKit", targets: ["CalendarKit"]),
@@ -530,6 +531,27 @@ targets += [
             "CupertinoIcons",
         ],
         path: "Examples/TodosApp",
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
+    ),
+]
+
+// Appended separately for the same type-checker-budget reason as the block
+// above.
+targets += [
+    // An Activity-Monitor-style system monitor over /proc: live CPU, memory,
+    // disk and network tiles plus a sortable process table. Depends on CGtk3
+    // for the g_timeout_add that drives its once-a-second sampling.
+    .executableTarget(
+        name: "TaskManagerApp",
+        dependencies: [
+            "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+            "CGtk3",
+        ],
+        path: "Examples/TaskManagerApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
