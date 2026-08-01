@@ -4211,10 +4211,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                      : shellTheme.fgTertiary, size: 14),
             SizedBox(width: 10),
             Expanded(
-                child: Slider(
+                child: MacosSlider(
                     value: value,
                     onChanged: { v in if enabled { onChanged(v) } },
-                    min: 0, max: 100
+                    min: 0, max: 100,
+                    color: shellTheme.accent
                 )
             ),
             SizedBox(width: 10),

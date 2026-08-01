@@ -110,6 +110,17 @@ which renders every Android app into one window.
 
 ## Standing directions
 
+- **macOS style by default, everywhere the user can see.** The desktop is
+  macOS-shaped; UI goes through the `Macos*` controls, `CupertinoIcons`
+  glyphs, and the shell's own glass/tile patterns — never FluentUI in the
+  shell or a new app surface. The framework ships both families, so the
+  Fluent name is often the one that autocompletes (`Slider`, `MenuFlyout`)
+  and until recently `MacosSlider` was a display-only stub, which is how
+  Fluent sliders leaked into the control center. If the `Macos*` control you
+  need is missing or a stub, implement it in `sdk/` rather than reaching for
+  the Fluent one. Known Fluent remnants to convert, not extend: the desktop
+  context menus (`MenuFlyout`), and the Settings / ImageViewer / BlueScreen
+  app shells (`FluentApp`).
 - **Wayland only.** Do not read, modify, or reference `X11Server/` or X11 launch
   paths unless explicitly asked.
 - **No security hardening on the app runtime** (`build/app-run.sh` is an app
