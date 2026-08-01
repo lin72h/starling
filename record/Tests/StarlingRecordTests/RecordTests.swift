@@ -74,6 +74,37 @@ import Testing
             environment: ["STARLING_FFMPEG": "/no/such/binary",
                           "PATH": "/usr/bin"]) == nil)
     }
+
+    @Test func hardwareArgumentsUseVaapi() {
+        let hw = HardwareEncoder(device: "/dev/dri/renderD128",
+                                 videoFilter: "hwupload,scale_vaapi=format=nv12")
+        let args = FfmpegEncoder.arguments(width: 3840, height: 2160,
+                                           fps: 30, outputPath: "/tmp/o.mp4",
+                                           hardware: hw)
+        #expect(args.contains("h264_vaapi"))
+        #expect(args.contains("vaapi=va:/dev/dri/renderD128"))
+        #expect(!args.contains("libx264"))
+        // The even-dimension crop must run before the hardware upload.
+        #expect(args.contains(
+            "crop=trunc(iw/2)*2:trunc(ih/2)*2,hwupload,scale_vaapi=format=nv12"))
+    }
+
+    @Test func downscalePolicy() {
+        // Hardware encodes any screen at full resolution; software x264
+        // above ~1080p worth of pixels froze a 4K desktop — half size.
+        #expect(FfmpegEncoder.downscaleShift(width: 3840, height: 2160,
+                                             hardware: true) == 0)
+        #expect(FfmpegEncoder.downscaleShift(width: 3840, height: 2160,
+                                             hardware: false) == 1)
+        #expect(FfmpegEncoder.downscaleShift(width: 1920, height: 1080,
+                                             hardware: false) == 0)
+    }
+
+    @Test func vaapiDisabledByEnv() {
+        #expect(FfmpegEncoder.detectHardwareEncoder(
+            ffmpegPath: "/usr/bin/ffmpeg",
+            environment: ["STARLING_NO_VAAPI": "1"]) == nil)
+    }
 }
 
 @Suite struct Encoding {
@@ -104,6 +135,28 @@ import Testing
         let size = (try? FileManager.default
             .attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
         #expect((size ?? 0) > 500)
+    }
+
+    /// The same tiny clip through the real VAAPI path, on machines that
+    /// have one (the probe is the gate — a VM with no encoder skips).
+    @Test func tinyClipEncodesOnHardware() throws {
+        guard let ffmpeg = FfmpegEncoder.findFfmpeg(),
+              let hw = FfmpegEncoder.detectHardwareEncoder(ffmpegPath: ffmpeg)
+        else { return }
+        let out = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("record-hw-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        let enc = try FfmpegEncoder(width: 256, height: 256, fps: 30,
+                                    outputURL: out, ffmpegPath: ffmpeg,
+                                    hardware: hw)
+        var frame = [UInt8](repeating: 0x80, count: 256 * 256 * 4)
+        for i in stride(from: 3, to: frame.count, by: 4) { frame[i] = 0xFF }
+        for _ in 0..<10 {
+            let ok = frame.withUnsafeBytes { enc.appendFrame($0) }
+            #expect(ok)
+        }
+        #expect(enc.finish(), "vaapi encode failed: \(enc.errorOutput)")
     }
 
     @Test func wrongSizeFrameRejected() throws {

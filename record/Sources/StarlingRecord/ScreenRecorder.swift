@@ -39,6 +39,22 @@ public enum RecordingPaths {
     }
 }
 
+// MARK: - Hardware encoding
+
+/// A VAAPI H.264 encode path that has actually passed a test frame: the
+/// render node plus the upload/convert filter chain that worked on it.
+/// Detection is a real (tiny) encode, not a capability query — drivers
+/// advertise entrypoints they then fail to open.
+public struct HardwareEncoder: Equatable, Sendable {
+    public let device: String       // /dev/dri/renderD128
+    public let videoFilter: String  // upload/convert chain, worked on probe
+
+    public init(device: String, videoFilter: String) {
+        self.device = device
+        self.videoFilter = videoFilter
+    }
+}
+
 // MARK: - Encoder
 
 /// One recording session: ffmpeg spawned at start, raw RGBA frames written
@@ -82,31 +98,102 @@ public final class FfmpegEncoder {
         return nil
     }
 
+    /// Probe for a working VAAPI H.264 path: every render node, two filter
+    /// chains each — GPU-side format conversion first (scale_vaapi, near
+    /// zero CPU), CPU-side swscale as the fallback. A candidate passes by
+    /// encoding a real test clip, so a pass means the whole pipeline
+    /// (device, upload, convert, encoder) opens. ~200ms when the first
+    /// candidate works; run it off the main thread and cache the result.
+    public static func detectHardwareEncoder(
+        ffmpegPath: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> HardwareEncoder? {
+        if environment["STARLING_NO_VAAPI"] == "1" { return nil }
+        let devices: [String]
+        if let dev = environment["STARLING_VAAPI_DEVICE"], !dev.isEmpty {
+            devices = [dev]
+        } else {
+            devices = ((try? FileManager.default
+                .contentsOfDirectory(atPath: "/dev/dri")) ?? [])
+                .filter { $0.hasPrefix("renderD") }.sorted()
+                .map { "/dev/dri/" + $0 }
+        }
+        for device in devices {
+            for vf in ["hwupload,scale_vaapi=format=nv12",
+                       "format=nv12,hwupload"] {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: ffmpegPath)
+                p.arguments = [
+                    "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi",
+                    "-i", "color=black:size=256x256:rate=30:duration=0.2",
+                    "-init_hw_device", "vaapi=va:\(device)",
+                    "-filter_hw_device", "va",
+                    "-vf", vf,
+                    "-c:v", "h264_vaapi", "-qp", "24",
+                    "-f", "null", "-",
+                ]
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                p.standardInput = FileHandle.nullDevice
+                guard (try? p.run()) != nil else { return nil }
+                p.waitUntilExit()
+                if p.terminationStatus == 0 {
+                    return HardwareEncoder(device: device, videoFilter: vf)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Capture downscale for a screen. Hardware encodes full resolution;
+    /// software x264 above ~1080p worth of pixels is what froze a 4K
+    /// desktop solid, so it captures at half size instead.
+    public static func downscaleShift(width: Int, height: Int,
+                                      hardware: Bool) -> Int {
+        if hardware { return 0 }
+        return width * height > 2_400_000 ? 1 : 0
+    }
+
     /// The full ffmpeg invocation, exposed for the tests: raw RGBA on
-    /// stdin at a declared constant rate, H.264 out. The crop drops at
-    /// most one row/column — libx264's yuv420p needs even dimensions and
-    /// panels are not obliged to provide them.
+    /// stdin at a declared constant rate, H.264 out — through VAAPI when a
+    /// probed path is handed in, libx264 otherwise. The crop drops at most
+    /// one row/column — 4:2:0 needs even dimensions and panels are not
+    /// obliged to provide them.
     public static func arguments(width: Int, height: Int, fps: Int,
-                                 outputPath: String) -> [String] {
-        [
+                                 outputPath: String,
+                                 hardware: HardwareEncoder? = nil) -> [String] {
+        var args = [
             "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo",
             "-pixel_format", "rgba",
             "-video_size", "\(width)x\(height)",
             "-framerate", "\(fps)",
             "-i", "pipe:0",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
-            "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-y", outputPath,
         ]
+        if let hw = hardware {
+            args += [
+                "-init_hw_device", "vaapi=va:\(hw.device)",
+                "-filter_hw_device", "va",
+                "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2,\(hw.videoFilter)",
+                "-c:v", "h264_vaapi",
+                "-qp", "24",
+            ]
+        } else {
+            args += [
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-pix_fmt", "yuv420p",
+            ]
+        }
+        args += ["-movflags", "+faststart", "-y", outputPath]
+        return args
     }
 
     public init(width: Int, height: Int, fps: Int, outputURL: URL,
-                ffmpegPath: String) throws {
+                ffmpegPath: String, hardware: HardwareEncoder? = nil) throws {
         self.width = width
         self.height = height
         self.fps = fps
@@ -124,7 +211,8 @@ public final class FfmpegEncoder {
         process.executableURL = URL(fileURLWithPath: ffmpegPath)
         process.arguments = Self.arguments(width: width, height: height,
                                            fps: fps,
-                                           outputPath: outputURL.path)
+                                           outputPath: outputURL.path,
+                                           hardware: hardware)
         process.standardInput = stdinPipe
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe

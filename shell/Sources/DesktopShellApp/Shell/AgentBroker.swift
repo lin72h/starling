@@ -488,7 +488,13 @@ final class AgentBroker: @unchecked Sendable {
                        "recording": rec?.isRecording ?? false,
                        "elapsed_s": rec?.elapsedSeconds ?? 0,
                        "indicator": ["x": indicator.x, "y": indicator.y],
-                       "last_file": rec?.lastSavedPath ?? ""])
+                       "last_file": rec?.lastSavedPath ?? "",
+                       // The session's own claim about what it captures —
+                       // tests compare the file against THIS, not against a
+                       // re-derivation of the downscale policy.
+                       "capture_w": rec?.captureWidth ?? 0,
+                       "capture_h": rec?.captureHeight ?? 0,
+                       "hardware": rec?.usingHardware ?? false])
             return
         }
 

@@ -1096,12 +1096,23 @@ def check_recording() -> None:
         assert probe.returncode == 0, f"ffprobe rejects {path}: {probe.stderr}"
         codec, w, h = probe.stdout.strip().split(",")[:3]
         assert codec == "h264", f"expected h264, got {codec}"
-        # Full-resolution capture: the video is the physical screen, give or
-        # take the even-dimension crop.
+        # The file must match the shell's own claim about the session
+        # (full-res through VAAPI, half-res through the x264 fallback on
+        # big screens — the claim is the policy's output, the file is the
+        # ground truth, and this is the two of them agreeing). ±1 for the
+        # even-dimension crop.
+        r = rec()
+        assert abs(int(w) - r["capture_w"]) <= 1 \
+            and abs(int(h) - r["capture_h"]) <= 1, \
+            f"recorded {w}x{h}, shell claims {r['capture_w']}x{r['capture_h']}"
+        # And the claim itself must be the screen or exactly half of it.
         pw, ph = ask("screen")["physical"]
-        assert abs(int(w) - pw) <= 1 and abs(int(h) - ph) <= 1, \
-            f"recorded {w}x{h}, screen is {pw:.0f}x{ph:.0f}"
-        log(f"{codec} {w}x{h}, {os.path.getsize(path)} bytes")
+        assert any(abs(r["capture_w"] - pw / d) <= 1
+                   and abs(r["capture_h"] - ph / d) <= 1 for d in (1, 2)), \
+            f"capture {r['capture_w']}x{r['capture_h']} is neither " \
+            f"{pw:.0f}x{ph:.0f} nor half of it"
+        enc = "vaapi" if r["hardware"] else "x264"
+        log(f"{codec} {w}x{h} via {enc}, {os.path.getsize(path)} bytes")
     finally:
         # The tier must not grow the session user's Videos on every run.
         with contextlib.suppress(OSError):

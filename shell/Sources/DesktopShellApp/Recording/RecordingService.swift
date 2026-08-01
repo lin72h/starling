@@ -42,6 +42,44 @@ final class RecordingService {
     /// Checked once — packages don't come and go under a live session.
     lazy var available: Bool = FfmpegEncoder.findFfmpeg() != nil
 
+    // VAAPI probe result — a real test encode, run once. Warmed in the
+    // background at init so the first Record tap doesn't pay the ~200ms;
+    // the lock makes a too-early tap wait for it instead of racing it.
+    private let hwLock = NSLock()
+    private var hwProbed = false
+    private var hwEncoder: HardwareEncoder?
+
+    init() {
+        let warm: () -> Void = { [weak self] in
+            _ = self?.resolveHardwareEncoder()
+        }
+        queue.async(execute: unsafeBitCast(warm, to: (@Sendable () -> Void).self))
+    }
+
+    private func resolveHardwareEncoder() -> HardwareEncoder? {
+        hwLock.lock()
+        defer { hwLock.unlock() }
+        if !hwProbed {
+            if let ffmpeg = FfmpegEncoder.findFfmpeg() {
+                hwEncoder = FfmpegEncoder.detectHardwareEncoder(ffmpegPath: ffmpeg)
+            }
+            hwProbed = true
+            if hwEncoder == nil {
+                let msg = "[Recording] no VAAPI encoder — software x264, "
+                    + "large screens capture at half size\n"
+                _ = msg.withCString { write(2, $0, strlen($0)) }
+            }
+        }
+        return hwEncoder
+    }
+
+    /// What the last (or current) session captures at, and through which
+    /// encoder — the broker reports these so tests assert the file against
+    /// the shell's own claim rather than re-deriving the policy.
+    private(set) var captureWidth = 0
+    private(set) var captureHeight = 0
+    private(set) var usingHardware = false
+
     var isRecording: Bool { state == .starting || state == .recording }
     /// The frame-tick pump must run while this holds (see class comment).
     var needsFramePump: Bool { state != .idle }
@@ -96,12 +134,22 @@ final class RecordingService {
         let h = Int(fl_drm_view_get_height(view))
         guard w > 0, h > 0 else { return }
 
+        // Hardware encodes the full screen for free; software x264 at 4K
+        // starved a real desktop into unresponsiveness, so it captures at
+        // half size (the engine downscales on the GPU, not us).
+        let hw = resolveHardwareEncoder()
+        let shift = FfmpegEncoder.downscaleShift(width: w, height: h,
+                                                 hardware: hw != nil)
+        let cw = max(1, w >> shift)
+        let ch = max(1, h >> shift)
+
         let dir = RecordingPaths.videosDir(home: LoginUser.home)
         Self.ensureOwnedDir(dir)
         let url = RecordingPaths.outputURL(in: dir, now: Date())
-        guard let enc = try? FfmpegEncoder(width: w, height: h,
+        guard let enc = try? FfmpegEncoder(width: cw, height: ch,
                                            fps: Self.fps, outputURL: url,
-                                           ffmpegPath: ffmpeg) else {
+                                           ffmpegPath: ffmpeg,
+                                           hardware: hw) else {
             onFinished?(nil, "could not start ffmpeg")
             return
         }
@@ -111,9 +159,12 @@ final class RecordingService {
         mailboxLock.unlock()
 
         encoder = enc
+        captureWidth = cw
+        captureHeight = ch
+        usingHardware = hw != nil
         state = .starting
         startedAt = Date()
-        fl_drm_view_recording_start(view, 0)
+        fl_drm_view_recording_start(view, Int32(shift))
         startPacer(deadline: Date().addingTimeInterval(3))
         onChange?()
     }
