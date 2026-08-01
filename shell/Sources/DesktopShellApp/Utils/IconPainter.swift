@@ -25,6 +25,7 @@ enum IconType {
     case calculator  // calculator body with display + key grid
     case store       // App Store "A" built from three strokes in a circle
     case photos      // framed landscape: sun + mountains (image viewer)
+    case video       // play triangle in a circle (video player)
 }
 
 // MARK: - IconPainter
@@ -83,10 +84,32 @@ class IconPainter: CustomPainter {
             paintStore(canvas, w, h, paint)
         case .photos:
             paintPhotos(canvas, w, h, paint)
+        case .video:
+            paintVideo(canvas, w, h, paint)
         }
     }
 
     // MARK: - Icon Shapes
+
+    /// Play triangle in a circle outline — same construction as the App
+    /// Store mark so the two circle-based glyphs read as siblings.
+    private func paintVideo(_ canvas: any Canvas, _ w: Double, _ h: Double, _ paint: Paint) {
+        let cx = w / 2.0
+        let cy = h / 2.0
+
+        paint.style = .stroke
+        paint.strokeWidth = w * 0.07
+        canvas.drawCircle(Offset(cx, cy), w * 0.42, paint)
+
+        // Play triangle, nudged right for optical centering.
+        paint.style = .fill
+        let tri = Path()
+        tri.moveTo(cx - w * 0.11, cy - h * 0.17)
+        tri.lineTo(cx - w * 0.11, cy + h * 0.17)
+        tri.lineTo(cx + w * 0.20, cy)
+        tri.close()
+        canvas.drawPath(tri, paint)
+    }
 
     /// Framed landscape photo: rounded frame, sun, two mountains.
     private func paintPhotos(_ canvas: any Canvas, _ w: Double, _ h: Double, _ paint: Paint) {

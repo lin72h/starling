@@ -4408,6 +4408,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         case "calculator": return .calculator
         case "store":      return .store
         case "photos":     return .photos
+        case "video":      return .video
         case "chrome":     return .chrome
         case "vscode":     return .vscode
         case "apps":       return .apps
