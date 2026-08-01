@@ -1,6 +1,7 @@
 // MacosProgressIndicator ported from macos_ui/lib/src/indicators/progress_indicators.dart
 
 import FlutterSwiftBridge
+import Foundation
 
 // MARK: - MacosProgressIndicator
 
@@ -91,10 +92,21 @@ public class MacosProgressIndicator: StatelessWidget {
 
 // MARK: - MacosSlider
 
-/// A macOS-style slider control for selecting a value from a range.
-public class MacosSlider: StatelessWidget {
+/// A macOS-style slider: thin rounded track filled to the thumb in the
+/// accent colour, round white thumb. Click jumps, drag tracks — a real
+/// control (the original was display-only, thumb pinned at zero, and
+/// every caller that needed a working slider reached for the Fluent one
+/// in a macOS-styled desktop).
+///
+/// Controlled component: the thumb draws from `value`; `onChanged` fires
+/// continuously during a drag and once for a click, `onChangeStart`/
+/// `onChangeEnd` bracket a gesture for callers that want to commit work
+/// (a seek, a file write) once per gesture rather than per pixel.
+public class MacosSlider: StatefulWidget {
     public let value: Double
     public let onChanged: ((Double) -> Void)?
+    public let onChangeStart: ((Double) -> Void)?
+    public let onChangeEnd: ((Double) -> Void)?
     public let min: Double
     public let max: Double
     public let color: Color?
@@ -103,73 +115,126 @@ public class MacosSlider: StatelessWidget {
         key: (any Key)? = nil,
         value: Double,
         onChanged: ((Double) -> Void)? = nil,
+        onChangeStart: ((Double) -> Void)? = nil,
+        onChangeEnd: ((Double) -> Void)? = nil,
         min: Double = 0.0,
         max: Double = 1.0,
         color: Color? = nil
     ) {
         self.value = value
         self.onChanged = onChanged
+        self.onChangeStart = onChangeStart
+        self.onChangeEnd = onChangeEnd
         self.min = min
         self.max = max
         self.color = color
         super.init(key: key)
     }
 
-    public override func build(_ context: any BuildContext) -> Widget {
+    public override func createState() -> State<StatefulWidget> {
+        return _MacosSliderState()
+    }
+}
+
+private class _MacosSliderState: State<StatefulWidget> {
+    /// Laid-out width from MeasureSize — pointer x → value needs it.
+    private var trackW: Double = 0
+
+    private var w: MacosSlider { widget as! MacosSlider }
+
+    private static let kThumbD = 16.0
+    private static let kTrackH = 4.0
+    private static let kHeight = 20.0
+
+    private func valueAt(_ x: Double) -> Double {
+        let usable = Swift.max(trackW - Self.kThumbD, 1)
+        let f = Swift.min(Swift.max((x - Self.kThumbD / 2) / usable, 0), 1)
+        return w.min + f * (w.max - w.min)
+    }
+
+    private func recordWidth(_ size: Size) {
+        if abs(size.width - trackW) < 0.5 { return }
+        let width = size.width
+        // Fires during layout — hop to the main queue before mutating.
+        let update: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.setState { self.trackW = width }
+        }
+        DispatchQueue.main.async(
+            execute: unsafeBitCast(update, to: (@Sendable () -> Void).self))
+    }
+
+    override func build(_ context: any BuildContext) -> Widget {
         let theme = MacosTheme.of(context)
         let isDark = theme.brightness == .dark
-        let trackColor = color ?? theme.primaryColor
-
-        let fraction = (value - min) / (max - min)
-
+        let trackColor = w.color ?? theme.primaryColor
         let trackBg = isDark
-            ? Color(rgbo: 255, 255, 255, 0.1)
+            ? Color(rgbo: 255, 255, 255, 0.16)
             : Color(rgbo: 0, 0, 0, 0.1)
 
-        let thumbColor = isDark
-            ? Color(rgbo: 152, 152, 157, 1.0)
-            : MacosColors.white
+        let span = w.max - w.min
+        let fraction = span > 0
+            ? Swift.min(Swift.max((w.value - w.min) / span, 0), 1) : 0
+        let usable = Swift.max(trackW - Self.kThumbD, 1)
+        let thumbX = usable * fraction
 
-        return SizedBox(
-            height: 20,
-            child: Stack(
-                alignment: Alignment.centerLeft,
-                children: [
-                    // Track background
-                    SizedBox(
-                        height: 4,
-                        child: DecoratedBox(
-                            decoration: BoxDecoration(
-                                color: trackBg,
-                                borderRadius: BorderRadius.all(Radius(circular: 2))
+        return GestureDetector(
+            onTapUp: { [self] d in
+                let v = valueAt(d.localPosition.dx)
+                w.onChangeStart?(v)
+                w.onChanged?(v)
+                w.onChangeEnd?(v)
+            },
+            onHorizontalDragStart: { [self] d in
+                let v = valueAt(d.localPosition.dx)
+                w.onChangeStart?(v)
+                w.onChanged?(v)
+            },
+            onHorizontalDragUpdate: { [self] d in
+                w.onChanged?(valueAt(d.localPosition.dx))
+            },
+            onHorizontalDragEnd: { [self] _ in
+                w.onChangeEnd?(w.value)
+            },
+            behavior: .opaque,
+            child: MeasureSize(
+                onSize: { [weak self] size in self?.recordWidth(size) },
+                child: SizedBox(
+                    height: Self.kHeight,
+                    child: Stack(children: [
+                        // Track background
+                        Positioned(
+                            left: 0, top: (Self.kHeight - Self.kTrackH) / 2,
+                            right: 0, height: Self.kTrackH,
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    color: trackBg,
+                                    borderRadius: BorderRadius.all(Radius(circular: 2))
+                                )
                             )
-                        )
-                    ),
-                    // Active track
-                    FractionallySizedBox(
-                        widthFactor: Swift.min(Swift.max(fraction, 0), 1),
-                        child: SizedBox(
-                            height: 4,
+                        ),
+                        // Active track
+                        Positioned(
+                            left: 0, top: (Self.kHeight - Self.kTrackH) / 2,
+                            width: Swift.max(thumbX + Self.kThumbD / 2, Self.kTrackH),
+                            height: Self.kTrackH,
                             child: DecoratedBox(
                                 decoration: BoxDecoration(
                                     color: trackColor,
                                     borderRadius: BorderRadius.all(Radius(circular: 2))
                                 )
                             )
-                        )
-                    ),
-                    // Thumb indicator
-                    Positioned(
-                        left: 0, // Simplified -- real implementation needs layout width
-                        child: SizedBox(
-                            width: 16,
-                            height: 16,
+                        ),
+                        // Thumb
+                        Positioned(
+                            left: thumbX, top: (Self.kHeight - Self.kThumbD) / 2,
+                            width: Self.kThumbD, height: Self.kThumbD,
                             child: DecoratedBox(
                                 decoration: BoxDecoration(
-                                    color: thumbColor,
+                                    color: MacosColors.white,
                                     boxShadow: [
                                         BoxShadow(
-                                            color: Color(rgbo: 0, 0, 0, 0.2),
+                                            color: Color(rgbo: 0, 0, 0, 0.25),
                                             offset: Offset(0, 1),
                                             blurRadius: 2
                                         )
@@ -178,8 +243,8 @@ public class MacosSlider: StatelessWidget {
                                 )
                             )
                         )
-                    )
-                ]
+                    ])
+                )
             )
         )
     }
