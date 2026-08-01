@@ -261,6 +261,7 @@ products += [
     .executable(name: "StartupNamerApp", targets: ["StartupNamerApp"]),
     .executable(name: "TodosApp", targets: ["TodosApp"]),
     .executable(name: "TaskManagerApp", targets: ["TaskManagerApp"]),
+    .executable(name: "YouTubeApp", targets: ["YouTubeApp"]),
     // The calendar package (a kalender port: day/week/month views) as a
     // library plus its demo app.
     .library(name: "CalendarKit", targets: ["CalendarKit"]),
@@ -552,6 +553,32 @@ targets += [
             "CGtk3",
         ],
         path: "Examples/TaskManagerApp",
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
+    ),
+    // System GStreamer (core + appsink) via pkg-config, for the YouTube
+    // example's software video path. Lives in Examples/ because only the
+    // example apps use it — Sources/ stays SDK-only.
+    .systemLibrary(
+        name: "CGStreamer",
+        path: "Examples/CGStreamer",
+        pkgConfig: "gstreamer-app-1.0",
+        providers: [.apt(["libgstreamer1.0-dev", "libgstreamer-plugins-base1.0-dev"])]
+    ),
+    // A YouTube player: yt-dlp searches and resolves streams, GStreamer
+    // decodes, and each frame becomes a Skia image drawn by a CustomPaint —
+    // no platform texture involved.
+    .executableTarget(
+        name: "YouTubeApp",
+        dependencies: [
+            "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+            "CGtk3",
+            "CGStreamer",
+        ],
+        path: "Examples/YouTubeApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
         linkerSettings: engineLinkSettings
     ),
