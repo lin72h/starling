@@ -253,14 +253,17 @@ click 1222 32;  sleep 2   # power icon -> menu
 click 967  336; sleep 2   # Shut Down… -> confirm panel
 click 1114 248            # confirm Shut Down
 echo -n "waiting for the guest to power itself off"
-for _ in $(seq 1 20); do
+# 120s, not 60: this pass runs on llvmpipe, and a software-GL session takes
+# its time tearing down — one run shut down correctly but crossed the line
+# after 60s, failing the gate with every click having landed.
+for _ in $(seq 1 40); do
     pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null || break
     echo -n "."
     sleep 3
 done
 echo
 pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null \
-    && fail "the guest is still up 60s after Shut Down was confirmed — the
+    && fail "the guest is still up 120s after Shut Down was confirmed — the
       power menu did not shut the machine down (misplaced clicks fail the
       same way; screenshot the guest with gshot.py to tell which)"
 echo "  ok    the desktop shut itself down through its own power menu"
