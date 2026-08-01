@@ -134,13 +134,16 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     self._sidebarItem(index: 4, icon: CupertinoIcons.clock_fill,
                                                       tile: Color(0xFF5CA0A8), label: "Date & Time", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 5, icon: CupertinoIcons.paintbrush_fill,
+                                    self._sidebarItem(index: 5, icon: CupertinoIcons.square_grid_2x2_fill,
+                                                      tile: Color(0xFF7B8FD0), label: "Default Apps", selected: s.selectedIndex),
+                                    SizedBox(height: 2),
+                                    self._sidebarItem(index: 6, icon: CupertinoIcons.paintbrush_fill,
                                                       tile: Color(0xFF8A70CE), label: "Appearance", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 6, icon: CupertinoIcons.battery_100,
+                                    self._sidebarItem(index: 7, icon: CupertinoIcons.battery_100,
                                                       tile: Color(0xFF63A56E), label: "Power", selected: s.selectedIndex),
                                     SizedBox(height: 2),
-                                    self._sidebarItem(index: 7, icon: CupertinoIcons.info_circle_fill,
+                                    self._sidebarItem(index: 8, icon: CupertinoIcons.info_circle_fill,
                                                       tile: Color(0xFF4FA4B4), label: "About", selected: s.selectedIndex),
                                 ]
                             )
@@ -246,9 +249,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 2: return "Displays"
         case 3: return "Sound"
         case 4: return "Date & Time"
-        case 5: return "Appearance"
-        case 6: return "Power"
-        case 7: return "About"
+        case 5: return "Default Apps"
+        case 6: return "Appearance"
+        case 7: return "Power"
+        case 8: return "About"
         default: return "Settings"
         }
     }
@@ -260,9 +264,10 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         case 2: return _buildDisplayPage()
         case 3: return _buildSoundPage()
         case 4: return _buildDateTimePage()
-        case 5: return _buildAppearancePage()
-        case 6: return _buildPowerPage()
-        case 7: return _buildAboutPage()
+        case 5: return _buildDefaultAppsPage()
+        case 6: return _buildAppearancePage()
+        case 7: return _buildPowerPage()
+        case 8: return _buildAboutPage()
         default: return SizedBox(shrink: ())
         }
     }
@@ -819,6 +824,58 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
             }
         }
         return rows
+    }
+
+    // MARK: - Default Apps Page
+
+    private func _buildDefaultAppsPage() -> Widget {
+        let s = bloc.state
+        var children: [Widget] = [
+            _sectionHeader("Web Browser"),
+            SizedBox(height: 12),
+        ]
+        if s.browserCandidates.isEmpty {
+            children.append(_macosGroupBox([
+                _settingsRow("Browser", "None installed"),
+            ]))
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                "No installed app declares itself a browser. Install one from "
+                + "the App Store and it appears here.",
+                style: TextStyle(color: pal.textTertiary, fontSize: 11)
+            ))
+        } else {
+            var rows: [Widget] = []
+            for (i, candidate) in s.browserCandidates.enumerated() {
+                if i > 0 { rows.append(_divider()) }
+                rows.append(GestureDetector(
+                    onTap: { [self] in bloc.add(.selectBrowser(candidate.id)) },
+                    child: _settingsRowWithTrailing(
+                        candidate.name,
+                        candidate.id == s.defaultBrowser
+                            ? "Opens web links" : "Tap to make default",
+                        candidate.id == s.defaultBrowser
+                            ? MacosIcon(icon: CupertinoIcons.checkmark_circle_fill,
+                                        color: Color(0xFF4880C8), size: 16)
+                            : SizedBox(width: 16, height: 16)
+                    )
+                ))
+            }
+            children.append(_macosGroupBox(rows))
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                "http and https links from every app open here. Deep-link "
+                + "schemes (slack://, zoommtg://, …) always route to their "
+                + "own app — each app's registry record declares its schemes.",
+                style: TextStyle(color: pal.textTertiary, fontSize: 11)
+            ))
+        }
+        return Padding(
+            padding: EdgeInsets(all: 24),
+            child: SingleChildScrollView(
+                child: Column(crossAxisAlignment: .start, children: children)
+            )
+        )
     }
 
     // MARK: - Sound Page

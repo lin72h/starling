@@ -6,6 +6,7 @@ Order=120
 Glyph=externalApp
 Color=4C9CD0
 Exec=telegram
+UrlSchemes=tg
 Install=telegram
 Bins=/opt/telegram/Telegram
 DesktopEntry=telegramdesktop;telegram;org.telegram.desktop

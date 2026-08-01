@@ -6,6 +6,7 @@ Order=100
 Glyph=videoCall
 Color=4E8AD8
 Exec=zoom
+UrlSchemes=zoommtg;zoomus
 Install=zoom
 Bins=/opt/zoom/ZoomLauncher
 DesktopEntry=Zoom;zoom

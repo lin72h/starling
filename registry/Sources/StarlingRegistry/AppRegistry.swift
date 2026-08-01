@@ -254,7 +254,8 @@ public final class AppRegistry: @unchecked Sendable {
             version: rec?.string("Version"),
             installedAt: rec?.int("InstalledAt"),
             installed: recorded || presentOnDisk,
-            appIds: appIds)
+            appIds: appIds,
+            urlSchemes: kf.list("UrlSchemes"))
     }
 
     /// `Window=x,y,w,h` — where a first-party app's window opens.

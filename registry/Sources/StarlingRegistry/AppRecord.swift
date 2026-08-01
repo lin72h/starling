@@ -107,6 +107,14 @@ public struct AppRecord: Sendable {
     /// app: what the host's `.desktop` declared, plus the catalog fallbacks.
     public let appIds: [String]
 
+    /// URL schemes this app handles (`UrlSchemes=slack` — no `://`). The
+    /// xdg-open shim resolves handoffs through these instead of a scheme
+    /// table of its own: the record is the ONE description of the app, and a
+    /// scheme living anywhere else is how tables drift. `http;https` marks a
+    /// browser; the Default Apps pane offers exactly the installed records
+    /// that declare them.
+    public let urlSchemes: [String]
+
     public init(
         id: String, name: String, kind: Kind, order: Int, glyph: String,
         color: UInt32, dockOrder: Int?, category: String, publisher: String,
@@ -116,7 +124,8 @@ public struct AppRecord: Sendable {
         wmClasses: [String], titleMatches: [String], renameWindows: Bool,
         debURL: String?,
         debMarker: String?, desktopFile: String?, iconPath: String?,
-        version: String?, installedAt: Int?, installed: Bool, appIds: [String]
+        version: String?, installedAt: Int?, installed: Bool, appIds: [String],
+        urlSchemes: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -146,6 +155,7 @@ public struct AppRecord: Sendable {
         self.installedAt = installedAt
         self.installed = installed
         self.appIds = appIds
+        self.urlSchemes = urlSchemes
     }
 
     /// True when a window reporting `appId` belongs to this app. Wayland's

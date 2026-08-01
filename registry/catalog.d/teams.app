@@ -6,6 +6,7 @@ Order=130
 Glyph=externalApp
 Color=5F62AA
 Exec=teams
+UrlSchemes=msteams
 Install=teams
 Bins=/opt/teams-for-linux/teams-for-linux
 DesktopEntry=teams-for-linux

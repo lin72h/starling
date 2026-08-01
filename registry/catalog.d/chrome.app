@@ -6,6 +6,7 @@ Order=80
 Glyph=chrome
 Color=F2F3F5
 Exec=chrome
+UrlSchemes=http;https
 Install=chrome
 Bins=/opt/google/chrome/chrome
 DesktopEntry=google-chrome;google-chrome-stable;com.google.Chrome;chromium;chromium-browser

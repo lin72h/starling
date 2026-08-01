@@ -6,6 +6,7 @@ Order=150
 Glyph=externalApp
 Color=44A468
 Exec=spotify
+UrlSchemes=spotify
 Install=spotify
 Bins=/opt/spotify/spotify;/usr/share/spotify/spotify
 DesktopEntry=spotify

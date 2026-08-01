@@ -46,6 +46,8 @@ let package = Package(
         .package(name: "StarlingAudio", path: "../../audio"),
         // The timedatectl layer — systemd-timedated wrapped once.
         .package(name: "StarlingTime", path: "../../time"),
+        // The app registry — Default Apps offers what the records declare.
+        .package(name: "StarlingRegistry", path: "../../registry"),
     ],
     targets: [
         {
@@ -61,6 +63,7 @@ let package = Package(
                     .product(name: "StarlingPower", package: "StarlingPower"),
                     .product(name: "StarlingAudio", package: "StarlingAudio"),
                     .product(name: "StarlingTime", package: "StarlingTime"),
+                    .product(name: "StarlingRegistry", package: "StarlingRegistry"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
@@ -86,6 +89,7 @@ let package = Package(
                     .product(name: "StarlingPower", package: "StarlingPower"),
                     .product(name: "StarlingAudio", package: "StarlingAudio"),
                     .product(name: "StarlingTime", package: "StarlingTime"),
+                    .product(name: "StarlingRegistry", package: "StarlingRegistry"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),

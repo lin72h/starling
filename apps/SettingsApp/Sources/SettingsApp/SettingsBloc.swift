@@ -7,6 +7,7 @@ import Observation
 import StarlingAudio
 import StarlingNet
 import StarlingPower
+import StarlingRegistry
 import StarlingTime
 
 /// Set by _SettingsAppState so the themed root can sync the Dark Mode
@@ -20,7 +21,8 @@ nonisolated(unsafe) var settingsBlocShared: SettingsBloc?
 /// or absent pane falls through to General.
 func initialPaneIndex() -> Int {
     let panes = ["general": 0, "network": 1, "displays": 2, "sound": 3,
-                 "datetime": 4, "appearance": 5, "power": 6, "about": 7]
+                 "datetime": 4, "defaultapps": 5, "appearance": 6,
+                 "power": 7, "about": 8]
     for arg in CommandLine.arguments.dropFirst() {
         if arg.hasPrefix("--pane="),
            let idx = panes[String(arg.dropFirst("--pane=".count)).lowercased()] {
@@ -79,6 +81,15 @@ struct SettingsState {
     // spawns wpctl twice, too heavy for state init on the main thread.
     // _loadInitialData fills it off-main before the pane can be reached.
     var audio = AudioStatus()
+
+    // Default Apps. Candidates are the installed records declaring
+    // UrlSchemes=http — the same filter the xdg-open shim applies, read
+    // from the same registry, so the pane can only offer what the shim
+    // would actually launch.
+    var browserCandidates: [(id: String, name: String)] = []
+    /// The effective default browser id: the configured choice when it is
+    /// still a candidate, else the first candidate — mirroring the shim.
+    var defaultBrowser = ""
 
     // Date & Time. Same contract as audio: seeded empty, filled off-main.
     var time = TimeStatus()
@@ -139,6 +150,10 @@ enum SettingsEvent {
     case toggleNTP(Bool)
     case setTzPicker(open: Bool, region: String?)
     case selectTimezone(String)
+
+    // Default Apps
+    case refreshDefaultApps
+    case selectBrowser(String)
 }
 
 // MARK: - Settings BLoC
@@ -157,11 +172,13 @@ final class SettingsBloc: @unchecked Sendable {
             if state.selectedIndex == Self.powerPaneIndex { _refreshBattery() }
             if state.selectedIndex == Self.soundPaneIndex { _refreshAudio() }
             if state.selectedIndex == Self.dateTimePaneIndex { _refreshTime() }
+            if state.selectedIndex == Self.defaultAppsPaneIndex { _refreshDefaultApps() }
         case .selectTab(let index):
             state.selectedIndex = index
             if index == Self.powerPaneIndex { _refreshBattery() }
             if index == Self.soundPaneIndex { _refreshAudio() }
             if index == Self.dateTimePaneIndex { _refreshTime() }
+            if index == Self.defaultAppsPaneIndex { _refreshDefaultApps() }
         case .toggleWifi(let enabled):
             _toggleWifi(enabled)
         case .scanNetworks:
@@ -225,13 +242,19 @@ final class SettingsBloc: @unchecked Sendable {
             state.tzPickerOpen = false
             state.tzPickerRegion = nil
             _applyTimezone(zone)
+        case .refreshDefaultApps:
+            _refreshDefaultApps()
+        case .selectBrowser(let id):
+            state.defaultBrowser = id
+            _applyBrowser(id)
         }
     }
 
     /// Sidebar indices (see initialPaneIndex's table).
     static let soundPaneIndex = 3
     static let dateTimePaneIndex = 4
-    static let powerPaneIndex = 6
+    static let defaultAppsPaneIndex = 5
+    static let powerPaneIndex = 7
 
     // MARK: - Event Handlers
 
@@ -550,6 +573,52 @@ final class SettingsBloc: @unchecked Sendable {
                 state.timeError = error
                 state.time = status
             }
+        }
+    }
+
+    // MARK: - Default Apps
+
+    /// `browser=<id>` in this file picks among the http-claiming records —
+    /// the xdg-open shim reads the same line from the same path.
+    private static var _defaultAppsFile: String {
+        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+            ?? (NSHomeDirectory() + "/.config")
+        return base + "/starling/default-apps"
+    }
+
+    private func _refreshDefaultApps() {
+        Task.detached {
+            let candidates = AppRegistry.shared.installedApps
+                .filter { $0.urlSchemes.contains("http") }
+                .map { (id: $0.id, name: $0.name) }
+            let configured = (try? String(contentsOfFile: Self._defaultAppsFile,
+                                          encoding: .utf8))?
+                .split(separator: "\n")
+                .first { $0.hasPrefix("browser=") }
+                .map { String($0.dropFirst("browser=".count)) }
+            let effective = candidates.first { $0.id == configured }?.id
+                ?? candidates.first?.id ?? ""
+            await MainActor.run { [self] in
+                state.browserCandidates = candidates
+                state.defaultBrowser = effective
+            }
+        }
+    }
+
+    /// Rewrite only the browser line; anything else in the file (a future
+    /// `editor=`) survives untouched.
+    private func _applyBrowser(_ id: String) {
+        Task.detached {
+            let path = Self._defaultAppsFile
+            var lines = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "")
+                .split(separator: "\n").map(String.init)
+                .filter { !$0.hasPrefix("browser=") }
+            lines.append("browser=\(id)")
+            try? FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true)
+            try? (lines.joined(separator: "\n") + "\n")
+                .write(toFile: path, atomically: true, encoding: .utf8)
         }
     }
 }

@@ -81,6 +81,9 @@ step "unit tests: audio"
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
 
+step "xdg-open routing"
+python3 "$REPO/test/xdg_open_routing.py" || fails=$((fails + 1))
+
 step "unit tests: time"
 (cd "$REPO/time" && as_user "$SWIFT" test 2>&1 \
     | grep -vE "libxml2.so.2: no version information" \

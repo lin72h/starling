@@ -6,6 +6,7 @@ Order=110
 Glyph=externalApp
 Color=6B4E7A
 Exec=slack
+UrlSchemes=slack
 Install=slack
 Bins=/opt/slack/slack;/usr/lib/slack/slack
 DesktopEntry=slack

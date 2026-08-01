@@ -62,6 +62,16 @@ final class AppRegistryTests: XCTestCase {
         XCTAssertEqual(reloaded().map { $0.id }, ["a", "z", "y"])
     }
 
+    /// UrlSchemes= parses as a semicolon list; absent means an empty list,
+    /// and the xdg-open shim's grep and this parse must agree on the format.
+    func testUrlSchemesParseAsList() {
+        writeCatalog("web", "[Starling App]\nId=web\nName=Web\nUrlSchemes=http;https\n")
+        writeCatalog("plain", "[Starling App]\nId=plain\nName=Plain\n")
+        let apps = reloaded()
+        XCTAssertEqual(apps.first { $0.id == "web" }?.urlSchemes, ["http", "https"])
+        XCTAssertEqual(apps.first { $0.id == "plain" }?.urlSchemes, [])
+    }
+
     // MARK: Installed-ness
 
     /// An app-install record is what "the store put it there" means, and it

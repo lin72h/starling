@@ -6,6 +6,7 @@ Order=140
 Glyph=externalApp
 Color=6674DC
 Exec=discord
+UrlSchemes=discord
 Install=discord
 Bins=/usr/bin/discord;/opt/discord/discord;/usr/share/discord/Discord
 DesktopEntry=discord
