@@ -396,6 +396,26 @@ class _YouTubePageState: State<StatefulWidget> {
             : String(format: "%d:%02d", m, s)
     }
 
+    /// The pixels themselves: the dma-buf external texture when the zero-copy
+    /// path is live (letterboxed to the frame's aspect), else the Skia
+    /// painter (which also letterboxes, and covers the pre-first-frame black).
+    private func _buildVideoSurface(
+        _ s: YouTubeAppState, width: Double, height: Double
+    ) -> Widget {
+        guard let textureId = s.textureId, s.frameWidth > 0, s.frameHeight > 0 else {
+            return CustomPaint(painter: FramePainter(
+                image: s.frame, width: s.frameWidth, height: s.frameHeight))
+        }
+        let frameW = Double(s.frameWidth)
+        let frameH = Double(s.frameHeight)
+        let scale = Swift.min(width / frameW, height / frameH)
+        return ColoredBox(color: Color(0xFF000000)) {
+            Center(child: SizedBox(
+                width: frameW * scale, height: frameH * scale,
+                child: TextureWidget(textureId: Int(textureId))))
+        }
+    }
+
     private func _buildPlayer(
         _ s: YouTubeAppState,
         width: Double = YT.playerWidth,
@@ -412,8 +432,7 @@ class _YouTubePageState: State<StatefulWidget> {
                 GestureDetector(
                     onTap: { youTubeBloc.add(.togglePause) },
                     behavior: .opaque,
-                    child: CustomPaint(painter: FramePainter(
-                        image: s.frame, width: s.frameWidth, height: s.frameHeight))
+                    child: _buildVideoSurface(s, width: width, height: height)
                 )
                 if let status = _watchStatusLine(s) { Center(child: status) }
                 Positioned(

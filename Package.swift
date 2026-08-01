@@ -437,8 +437,8 @@ targets += [
     .target(
         name: "FlutterGTKBridge",
         dependencies: staticEngine
-            ? ["CGtk3", "FlutterEngineStatic"]
-            : ["CGtk3"],
+            ? ["CGtk3", "DmaBufBridge", "FlutterEngineStatic"]
+            : ["CGtk3", "DmaBufBridge"],
         linkerSettings: staticEngine
             ? [.linkedLibrary("epoxy")]
             : [
@@ -577,6 +577,8 @@ targets += [
             "CupertinoIcons",
             "CGtk3",
             "CGStreamer",
+            "DmaBufBridge",
+            "FlutterGTK",
         ],
         path: "Examples/YouTubeApp",
         swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],

@@ -33,6 +33,9 @@ struct YouTubeAppState {
     var isFullscreen = false
     var nowPlaying: VideoResult? = nil
     var playerStatus: VideoPlayer.Status = .idle
+    /// The external texture showing the video (the zero-copy path); nil
+    /// until the first frame lands, or always nil on the Skia fallback.
+    var textureId: Int64? = nil
     var frame: Image? = nil
     var frameWidth = 0
     var frameHeight = 0
@@ -61,6 +64,12 @@ final class YouTubeBloc: @unchecked Sendable {
     private(set) var state = YouTubeAppState()
 
     @ObservationIgnored private let player = VideoPlayer()
+    /// The dma-buf texture pool. Created on the first frame, reused across
+    /// videos; nil after a failed attempt (Skia fallback takes over).
+    @ObservationIgnored private var videoTexture: VideoTextureOutput? = nil
+    /// YT_FORCE_SKIA=1 pins the fallback path, for debugging and A/B runs.
+    @ObservationIgnored private var textureUnavailable =
+        ProcessInfo.processInfo.environment["YT_FORCE_SKIA"] != nil
     /// One frame conversion in flight at a time — the pipeline drops what
     /// the display can't keep up with (appsink drop=true).
     @ObservationIgnored private var convertingFrame = false
@@ -185,24 +194,28 @@ final class YouTubeBloc: @unchecked Sendable {
             state.playerStatus = player.status
         }
 
-        if !convertingFrame, let frame = player.poll() {
-            convertingFrame = true
-            Task {
-                let image = await VideoPlayer.makeImage(frame)
-                MainThread.run { [weak self] in
-                    guard let self else { return }
-                    self.convertingFrame = false
-                    guard let image else { return }
-                    if self.state.screen == .watch {
-                        self.retiredFrame?.dispose()
-                        self.retiredFrame = self.state.frame
-                        self.state.frame = image
-                        self.state.frameWidth = frame.width
-                        self.state.frameHeight = frame.height
-                    } else {
-                        image.dispose()
-                    }
+        if textureUnavailable {
+            _tickSkiaFallback()
+        } else if let frame = player.poll() {
+            if videoTexture == nil {
+                videoTexture = VideoTextureOutput()
+                if videoTexture == nil {
+                    print("[YouTube] dma-buf texture unavailable, using Skia path")
+                    textureUnavailable = true
                 }
+            }
+            if let output = videoTexture, output.present(frame) {
+                if state.textureId != output.texture.textureId {
+                    state.textureId = output.texture.textureId
+                    print("[YouTube] presenting via dma-buf texture "
+                        + "\(output.texture.textureId)")
+                }
+                if state.frameWidth != frame.width { state.frameWidth = frame.width }
+                if state.frameHeight != frame.height { state.frameHeight = frame.height }
+            } else if videoTexture != nil {
+                print("[YouTube] dma-buf present failed, using Skia path")
+                videoTexture = nil
+                textureUnavailable = true
             }
         }
 
@@ -214,11 +227,36 @@ final class YouTubeBloc: @unchecked Sendable {
         if abs(position - state.position) > 0.25 { state.position = position }
     }
 
+    /// The Skia path: convert the frame to an Image off-thread and swap it
+    /// into state, retiring the old handle one generation behind.
+    private func _tickSkiaFallback() {
+        guard !convertingFrame, let frame = player.poll() else { return }
+        convertingFrame = true
+        Task {
+            let image = await VideoPlayer.makeImage(frame)
+            MainThread.run { [weak self] in
+                guard let self else { return }
+                self.convertingFrame = false
+                guard let image else { return }
+                if self.state.screen == .watch {
+                    self.retiredFrame?.dispose()
+                    self.retiredFrame = self.state.frame
+                    self.state.frame = image
+                    self.state.frameWidth = frame.width
+                    self.state.frameHeight = frame.height
+                } else {
+                    image.dispose()
+                }
+            }
+        }
+    }
+
     private func _disposeFrames() {
         retiredFrame?.dispose()
         retiredFrame = nil
         state.frame?.dispose()
         state.frame = nil
+        state.textureId = nil
         state.frameWidth = 0
         state.frameHeight = 0
     }

@@ -112,3 +112,9 @@ void flgtk_host_set_fullscreen(FlGtkHost* host, int32_t fullscreen) {
     gtk_window_unfullscreen(host->window);
   }
 }
+
+// For flgtk_dmabuf_texture.c, which needs the engine's texture registrar
+// but keeps the host struct opaque.
+FlView* flgtk_host_get_view(FlGtkHost* host) {
+  return host->view;
+}

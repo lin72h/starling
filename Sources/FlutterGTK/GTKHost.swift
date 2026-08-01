@@ -57,5 +57,40 @@ public final class GTKHost {
     public func setFullscreen(_ fullscreen: Bool) {
         flgtk_host_set_fullscreen(host, fullscreen ? 1 : 0)
     }
+
+    /// Registers a DMA-BUF-backed external texture with the engine, or nil
+    /// if the texture registrar is unavailable.
+    public func makeDmaBufTexture() -> GTKDmaBufTexture? {
+        guard let texture = flgtk_host_create_dmabuf_texture(host) else { return nil }
+        return GTKDmaBufTexture(texture: texture)
+    }
+}
+
+/// An external texture whose frames arrive as dma-buf fds: the raster thread
+/// samples the producer's GPU memory directly (EGLImage import, cached per
+/// buffer identity) — no CPU pixel copies, no per-frame GL uploads. Show it
+/// with `TextureWidget(textureId: Int(texture.textureId))`.
+public final class GTKDmaBufTexture {
+
+    private let texture: OpaquePointer
+    public let textureId: Int64
+
+    fileprivate init(texture: OpaquePointer) {
+        self.texture = texture
+        self.textureId = flgtk_dmabuf_texture_get_id(texture)
+    }
+
+    /// Hands over the next frame. Takes ownership of `fd` — dup(2) a pooled
+    /// buffer's fd before passing it. Callable from any thread.
+    public func update(
+        fd: Int32, width: Int32, height: Int32, stride: Int32,
+        fourcc: UInt32, modifier: UInt64
+    ) {
+        flgtk_dmabuf_texture_update(texture, fd, width, height, stride, fourcc, modifier)
+    }
+
+    deinit {
+        flgtk_dmabuf_texture_destroy(texture)
+    }
 }
 #endif

@@ -42,6 +42,32 @@ void flgtk_host_run(FlGtkHost* host);
 // Fullscreens or restores the window (gtk_window_fullscreen/unfullscreen).
 void flgtk_host_set_fullscreen(FlGtkHost* host, int32_t fullscreen);
 
+// A DMA-BUF-backed external texture: frames arrive as dma-buf fds and the
+// raster thread samples the producer's GPU memory directly (EGLImage import,
+// cached per buffer) — no CPU pixel copies, no per-frame GL uploads. Display
+// it with a TextureWidget carrying the texture's id.
+typedef struct FlGtkDmaBufTexture FlGtkDmaBufTexture;
+
+// Registers a new texture with the engine. NULL if the engine's texture
+// registrar is unavailable.
+FlGtkDmaBufTexture* flgtk_host_create_dmabuf_texture(FlGtkHost* host);
+
+// The id a TextureWidget refers to this texture by.
+int64_t flgtk_dmabuf_texture_get_id(FlGtkDmaBufTexture* texture);
+
+// Hands over the next frame. Takes ownership of `fd` (dup one if the buffer
+// is pooled). Callable from any thread; marks the frame available.
+void flgtk_dmabuf_texture_update(FlGtkDmaBufTexture* texture,
+                                 int fd,
+                                 int32_t width,
+                                 int32_t height,
+                                 int32_t stride,
+                                 uint32_t fourcc,
+                                 uint64_t modifier);
+
+// Unregisters and releases the texture.
+void flgtk_dmabuf_texture_destroy(FlGtkDmaBufTexture* texture);
+
 #ifdef __cplusplus
 }
 #endif
