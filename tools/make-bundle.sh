@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble a self-contained FlutterSwift distribution: the framework source plus
+# Assemble a self-contained Starling SDK distribution: the framework source plus
 # the engine binaries it links against, in one tree.
 #
 #   tools/make-bundle.sh [--debug|--release] [outdir]
@@ -117,7 +117,7 @@ else
 fi
 
 cat > "$DEST/README.md" <<EOF
-# FlutterSwift — $PLATFORM/$ARCH bundle ($CONFIG engine)
+# Starling SDK — $PLATFORM/$ARCH bundle ($CONFIG engine)
 
 The Flutter framework ported to Swift, with the engine binaries it links against.
 No engine checkout or toolchain configuration needed.

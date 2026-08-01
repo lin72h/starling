@@ -1,10 +1,12 @@
-# FlutterSwift
+# Starling SDK
 
 The Flutter framework, ported to Swift. No Dart VM: widgets, rendering, painting,
 gestures and semantics are Swift, driven directly by the Flutter engine's C core
-through a C++ bridge.
+through a C++ bridge. (The SwiftPM package keeps the framework's original name,
+`FlutterSwift`, which is why that name still appears in build output and in
+`package:` references from path consumers.)
 
-This package was extracted from the [Starling desktop][starling], which is its
+This SDK was extracted from the [Starling desktop][starling], which is its
 largest consumer but not its only intended one. It carries the framework and the
 thin platform bindings needed to host an engine — nothing desktop-specific.
 

@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-FlutterSwift: the Flutter framework ported to Swift, driven by the Flutter
-engine's C core. No Dart VM.
+Starling SDK: the Flutter framework ported to Swift, driven by the Flutter
+engine's C core. No Dart VM. (The SwiftPM package name remains `FlutterSwift`.)
 
 ## Layout
 
