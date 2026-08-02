@@ -435,6 +435,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _missionControlOpen = false
     var _mcOpenController: AnimationController?
     var _mcOpenCurve: CurvedAnimation?
+    /// Record-App picker: Mission Control opened to CHOOSE a recording
+    /// target rather than to navigate. The spaces strip and card drags are
+    /// disabled; clicking a card starts recording that window; Esc or the
+    /// backdrop cancels. Set only through _openMissionControl.
+    var _mcPickRecordTarget = false
     /// True while the exposé is animating back to the desktop (controller
     /// running in reverse); the real teardown happens at dismissed.
     var _mcClosing = false
@@ -1768,7 +1773,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     /// Open the Mission Control overview (Ctrl+Up / context menu). The
     /// exposé cards animate from the windows' desktop rects into the grid.
-    func _openMissionControl() {
+    /// With `pickRecordTarget` the same overview opens as the Record-App
+    /// window picker instead (see _mcPickRecordTarget).
+    func _openMissionControl(pickRecordTarget: Bool = false) {
         guard !_missionControlOpen else { return }
         // Mission Control shows desktops; from inside the AI Space, exit to
         // the return space first (the AI Space has no strip thumbnail).
@@ -1781,6 +1788,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
         setState {
             _missionControlOpen = true
+            _mcPickRecordTarget = pickRecordTarget
             contextMenuPosition = nil
             activeStatusBarPopup = nil
             _launcherOpen = false
@@ -1807,6 +1815,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     func _closeMissionControl() {
         setState {
             _missionControlOpen = false
+            _mcPickRecordTarget = false
             _mcClosing = false
             _mcDragWindowId = nil
             _mcDragStart = nil
@@ -1833,6 +1842,38 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             _mcDragMoved = false
         }
         _ = c.reverse()
+    }
+
+    /// The Record-App picker chose `win`: close the overview and start a
+    /// window recording once the cards have flown home. The capture reads
+    /// the window's OWN texture, so the recording's dimensions are the
+    /// content area's (no shell title bar), the picker overlay never
+    /// appears in the footage, and overlap/moves/minimizing stay invisible.
+    func _startWindowRecording(_ win: WindowInfo) {
+        guard let texId = win.textureId else { return }
+        let winId = win.id
+        let label = _record(win.appId)?.name ?? win.title
+        let dpi = currentShellDpi
+        let cw = Int(win.rect.width * dpi)
+        let ch = Int((win.rect.height - DesktopTheme.kTitleBarHeight) * dpi)
+        let wm = windowManager
+        let topDown = win.flipTextureY
+        _closeMissionControlAnimated()
+        // The aliveness check captures the (non-Sendable) window manager;
+        // main-queue-only by construction — the codebase's unsafeBitCast
+        // hop, same as the timers.
+        let begin: () -> Void = {
+            recordingService?.start(
+                texture: Int64(texId), width: cw, height: ch,
+                textureTopDown: topDown,
+                windowAlive: {
+                    wm.windows.contains(where: { $0.id == winId })
+                },
+                windowLabel: label)
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(350),
+            execute: unsafeBitCast(begin, to: (@Sendable () -> Void).self))
     }
 
     /// Carry the focused window to the space at `index` and follow it there
@@ -4314,8 +4355,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     }
                 }
             },
-            // Record App: same session machinery, cropped to the topmost
-            // window and following it. Either tile stops a running session.
+            // Record App: same session machinery, aimed at one window. The
+            // tile opens Mission Control as a picker — every window spread
+            // out as a live card, click one to record it, Esc to cancel.
+            // Either tile stops a running session.
             _ccToggleTile(icon: CupertinoIcons.macwindow,
                           label: recordingService?.isRecording == true
                               ? "Recording" : "Record App",
@@ -4326,37 +4369,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     recordingService?.stop()
                     return
                 }
-                guard let win = windowManager.visibleWindows.last,
-                      let texId = win.textureId else {
+                guard windowManager.visibleWindows.contains(where: { $0.textureId != nil }) else {
                     _postLocalNotification(summary: "Nothing to record",
-                                           body: "Open the app first — Record App captures the frontmost window.")
+                                           body: "Open the app first — Record App captures one window.")
                     return
                 }
-                let winId = win.id
-                let label = _record(win.appId)?.name ?? win.title
-                // The recording reads the window's OWN texture, so its
-                // dimensions are the content area's (no shell title bar).
-                let dpi = currentShellDpi
-                let cw = Int(win.rect.width * dpi)
-                let ch = Int((win.rect.height - DesktopTheme.kTitleBarHeight) * dpi)
-                let wm = windowManager
-                setState { activeStatusBarPopup = nil }
-                // The aliveness check captures the (non-Sendable) window
-                // manager; main-queue-only by construction — the codebase's
-                // unsafeBitCast hop, same as the timers.
-                let topDown = win.flipTextureY
-                let begin: () -> Void = {
-                    recordingService?.start(
-                        texture: Int64(texId), width: cw, height: ch,
-                        textureTopDown: topDown,
-                        windowAlive: {
-                            wm.windows.contains(where: { $0.id == winId })
-                        },
-                        windowLabel: label)
-                }
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + .milliseconds(300),
-                    execute: unsafeBitCast(begin, to: (@Sendable () -> Void).self))
+                _openMissionControl(pickRecordTarget: true)
             },
         ]
         var children: [Widget] = [

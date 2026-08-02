@@ -1120,6 +1120,76 @@ def check_recording() -> None:
             os.unlink(path)
 
 
+@check("recording: Record App picks its window through Mission Control")
+def check_record_app_picker() -> None:
+    """The Record App tile opens Mission Control as a window picker — every
+    window a live exposé card, clicking one records THAT window (its own
+    texture, not a screen crop). Launches the calculator from the dock,
+    picks it through the picker, and checks the session carries the
+    window's label and lands a playable window-sized file."""
+    rec = lambda: ask("recording_state")
+    if not rec()["available"]:
+        raise Skip("no ffmpeg on this machine")
+    assert rec()["state"] == "idle", f"a recording is already {rec()['state']}"
+
+    cc = lambda: ask("control_center_state")
+
+    def open_picker() -> list:
+        drive(f"click {cc()['icon']['x']:.0f} {cc()['icon']['y']:.0f}")
+        wait_for(lambda: cc()["open"], "the panel to open")
+        tiles = {t["id"]: t for t in cc()["tiles"]}
+        drive(f"click {tiles['recordapp']['x']:.0f} {tiles['recordapp']['y']:.0f}")
+        time.sleep(1.2)  # Mission Control's open animation settles
+        return rec()["picker"]
+
+    drive("dock calculator", "click")
+    try:
+        # The window needs a moment to map; each retry collapses whatever
+        # the failed attempt left open (panel or picker) with Esc.
+        targets: list = []
+        deadline = time.time() + 25
+        time.sleep(4)
+        while not targets and time.time() < deadline:
+            drive("key esc")
+            targets = open_picker()
+        assert targets, "the picker never offered a window card"
+        card = next((t for t in targets if "alc" in t["title"]), targets[0])
+        drive(f"click {card['x']:.0f} {card['y']:.0f}")
+        wait_for(lambda: rec()["state"] == "recording",
+                 "the picked window's first frame")
+        label = rec()["window"]  # cleared at idle — read it live
+        assert label, "the session carries no window label"
+        time.sleep(2)
+        drive("key ctrl+shift+r")
+        wait_for(lambda: rec()["state"] == "idle", "the encode to finalize")
+    finally:
+        if rec()["state"] not in ("idle", "stopping"):
+            drive("key ctrl+shift+r")
+        subprocess.run(["pkill", "-x", "CalculatorApp"], capture_output=True)
+
+    path = rec()["last_file"]
+    assert path and "(" in os.path.basename(path), \
+        f"expected a window-labelled file, got {path!r}"
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name,width,height",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True)
+    try:
+        assert probe.returncode == 0, f"ffprobe rejects {path}: {probe.stderr}"
+        codec, w, h = probe.stdout.strip().split(",")[:3]
+        assert codec == "h264", f"expected h264, got {codec}"
+        # A window capture, not a screen crop: far smaller than the screen.
+        pw, ph = ask("screen")["physical"]
+        assert int(w) < pw and int(h) < ph, \
+            f"recorded {w}x{h} does not look like a window on {pw}x{ph}"
+        log(f"picked '{label}', {codec} {w}x{h}, "
+            f"{os.path.getsize(path)} bytes")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
 

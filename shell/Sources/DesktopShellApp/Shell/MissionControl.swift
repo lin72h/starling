@@ -284,6 +284,7 @@ extension _DesktopShellState {
 
         // Exposé cards, animating desktop rect -> grid rect on open (and,
         // during a re-flow, old grid rect -> new grid rect).
+        let picking = _mcPickRecordTarget
         let relaying = !_mcRelayoutFrom.isEmpty || _mcDeparting != nil
         let rv = relaying ? (_mcRelayoutCurve?.value ?? 1.0) : 1.0
         for (win, target) in _mcExposeRects() {
@@ -291,6 +292,33 @@ extension _DesktopShellState {
             let gridRect = _mcLerpRect(_mcRelayoutFrom[winId] ?? target, target, rv)
             let r = _mcLerpRect(win.rect, gridRect, t)
             let dragging = _mcDragMoved && _mcDragWindowId == winId
+            // Picker: a card is a plain tap target that starts recording
+            // its window — no drags, no focus change. Windows without a
+            // recordable texture render dimmed and inert.
+            if picking {
+                let inner = _mcCard(win, context)
+                let card: Widget = win.textureId != nil
+                    ? GestureDetector(
+                          onTap: { [self] in _startWindowRecording(win) },
+                          behavior: .opaque,
+                          child: inner)
+                    : Opacity(opacity: 0.35, child: inner)
+                layers.append(Positioned(
+                    key: ValueKey("mc-\(winId)"),
+                    left: r.left, top: r.top, width: r.width, height: r.height,
+                    child: card
+                ))
+                if settled {
+                    layers.append(Positioned(
+                        left: r.left, top: r.bottom + 6, width: r.width, height: 18,
+                        child: IgnorePointer(child: Center(child: Text(
+                            String(win.title.prefix(32)),
+                            style: TextStyle(color: shellTheme.overlayText, fontSize: 12,
+                                             fontWeight: .w500))))
+                    ))
+                }
+                continue
+            }
             let card: Widget = Listener(
                 onPointerDown: { [self] event in
                     setState {
@@ -378,6 +406,24 @@ extension _DesktopShellState {
             }
         }
 
+        // Picker: the strip's place is taken by the instruction header —
+        // space management has no business in a "choose a window" moment.
+        if picking {
+            layers.append(Positioned(
+                left: 0, top: MC.stripTop + 18, width: screenWidth, height: 70,
+                child: IgnorePointer(child: Column(children: [
+                    Text("Choose a window to record",
+                         style: TextStyle(color: shellTheme.overlayText,
+                                          fontSize: 21, fontWeight: .w600)),
+                    SizedBox(height: 7),
+                    Text("Click a window to start recording — Esc cancels",
+                         style: TextStyle(color: shellTheme.overlayTextDim,
+                                          fontSize: 13, fontWeight: .w400)),
+                ]))
+            ))
+            return Stack(children: layers)
+        }
+
         // Spaces strip: thumbnails, labels, and the "+" tile. The AI Space
         // is not part of the strip.
         for i in 0..<_mcStripCount {
@@ -441,6 +487,18 @@ extension _DesktopShellState {
         }
 
         return Stack(children: layers)
+    }
+
+    /// Record-App picker card centers for the broker: tests click these
+    /// instead of reproducing the grid arithmetic. Empty unless the picker
+    /// is open; only recordable (textured) windows are listed.
+    func recordPickerTargets() -> [(title: String, x: Double, y: Double)] {
+        guard _missionControlOpen, _mcPickRecordTarget else { return [] }
+        return _mcExposeRects()
+            .filter { $0.win.textureId != nil }
+            .map { ($0.win.title,
+                    ($0.rect.left + $0.rect.right) / 2,
+                    ($0.rect.top + $0.rect.bottom) / 2) }
     }
 
     /// Kick the grid re-flow tween: surviving cards lerp old->new grid
