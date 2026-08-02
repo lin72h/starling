@@ -626,12 +626,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if fl_drm_view_capture_active() != 0 { tick = true }
             // Recording rides the same pump: presents carry the engine's
             // start/stop requests AND feed the frame mailbox, so it runs
-            // from the start tap until the engine confirms the stop. A
-            // window recording also re-points its crop here, so the
-            // footage follows the window as it is dragged.
+            // from the start tap until the engine confirms the stop. An
+            // app recording also checks its window still exists here.
             if recordingService?.needsFramePump == true {
                 tick = true
-                recordingService?.refreshWindowCrop()
+                recordingService?.checkWindowAlive()
             }
             #endif
             if tick { self?.setState { self?._frameTick += 1 } }
@@ -4327,26 +4326,33 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     recordingService?.stop()
                     return
                 }
-                guard let win = windowManager.visibleWindows.last else {
+                guard let win = windowManager.visibleWindows.last,
+                      let texId = win.textureId else {
                     _postLocalNotification(summary: "Nothing to record",
                                            body: "Open the app first — Record App captures the frontmost window.")
                     return
                 }
                 let winId = win.id
                 let label = _record(win.appId)?.name ?? win.title
+                // The recording reads the window's OWN texture, so its
+                // dimensions are the content area's (no shell title bar).
+                let dpi = currentShellDpi
+                let cw = Int(win.rect.width * dpi)
+                let ch = Int((win.rect.height - DesktopTheme.kTitleBarHeight) * dpi)
                 let wm = windowManager
                 setState { activeStatusBarPopup = nil }
-                // The rect provider captures the (non-Sendable) window
+                // The aliveness check captures the (non-Sendable) window
                 // manager; main-queue-only by construction — the codebase's
                 // unsafeBitCast hop, same as the timers.
+                let topDown = win.flipTextureY
                 let begin: () -> Void = {
-                    recordingService?.start(windowRect: {
-                        guard let w = wm.windows.first(where: { $0.id == winId }),
-                              !w.isMinimized else { return nil }
-                        let dpi = currentShellDpi
-                        return (Int(w.rect.left * dpi), Int(w.rect.top * dpi),
-                                Int(w.rect.width * dpi), Int(w.rect.height * dpi))
-                    }, windowLabel: label)
+                    recordingService?.start(
+                        texture: Int64(texId), width: cw, height: ch,
+                        textureTopDown: topDown,
+                        windowAlive: {
+                            wm.windows.contains(where: { $0.id == winId })
+                        },
+                        windowLabel: label)
                 }
                 DispatchQueue.main.asyncAfter(
                     deadline: .now() + .milliseconds(300),

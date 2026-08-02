@@ -123,17 +123,21 @@ final class RecordingService {
 
     // MARK: Session control (main thread)
 
-    /// Window recording: returns the tracked window's rect in PHYSICAL px,
-    /// or nil once the window is gone. Read on main by refreshWindowCrop.
-    private var windowRect: (() -> (x: Int, y: Int, w: Int, h: Int)?)? = nil
+    /// Window recording: true while the recorded window still exists (it
+    /// may be minimized or covered — the capture doesn't care). Read on
+    /// main by checkWindowAlive.
+    private var windowAlive: (() -> Bool)? = nil
     /// The recorded window's display name (nil = whole screen).
     private(set) var windowLabel: String? = nil
 
-    /// Record the whole screen, or — with a rect provider — one window:
-    /// the engine crops the composited frame to the rect, which the pump
-    /// re-reads every tick so the recording follows moves. Output size
-    /// freezes at the rect's start size.
-    func start(windowRect: (() -> (x: Int, y: Int, w: Int, h: Int)?)? = nil,
+    /// Record the whole screen, or — with a texture — one app: the engine
+    /// reads the window's OWN composited content (the texture the
+    /// compositor draws), so other windows overlapping it, moves, even
+    /// minimizing never show in the footage. Output size freezes at
+    /// (width, height); the source scales to fit if the window resizes.
+    func start(texture: Int64? = nil, width: Int = 0, height: Int = 0,
+               textureTopDown: Bool = false,
+               windowAlive alive: (() -> Bool)? = nil,
                windowLabel label: String? = nil) {
         guard state == .idle else { return }
         guard let ffmpeg = FfmpegEncoder.findFfmpeg(),
@@ -141,13 +145,8 @@ final class RecordingService {
             onFinished?(nil, "ffmpeg is not installed")
             return
         }
-        let crop = windowRect?()
-        if windowRect != nil && crop == nil {
-            onFinished?(nil, "the window is gone")
-            return
-        }
-        let w = crop?.w ?? Int(fl_drm_view_get_width(view))
-        let h = crop?.h ?? Int(fl_drm_view_get_height(view))
+        let w = texture != nil ? width : Int(fl_drm_view_get_width(view))
+        let h = texture != nil ? height : Int(fl_drm_view_get_height(view))
         guard w > 0, h > 0 else { return }
 
         // Hardware encodes the full screen for free; software x264 at 4K
@@ -178,30 +177,29 @@ final class RecordingService {
         captureWidth = cw
         captureHeight = ch
         usingHardware = hw != nil
-        self.windowRect = windowRect
+        self.windowAlive = alive
         self.windowLabel = label
         state = .starting
         startedAt = Date()
-        fl_drm_view_recording_start_cropped(
-            view, Int32(shift),
-            Int32(crop?.x ?? 0), Int32(crop?.y ?? 0),
-            Int32(crop?.w ?? 0), Int32(crop?.h ?? 0))
+        if let texture {
+            fl_drm_view_recording_start_texture(view, Int32(shift), texture,
+                                                Int32(w), Int32(h),
+                                                textureTopDown ? 1 : 0)
+        } else {
+            fl_drm_view_recording_start(view, Int32(shift))
+        }
         startPacer(deadline: Date().addingTimeInterval(3))
         onChange?()
     }
 
-    /// Called from the shell's frame-tick pump while recording: keep the
-    /// engine's crop on the window as it moves, and end the session (the
-    /// footage so far is saved) when the window goes away.
-    func refreshWindowCrop() {
+    /// Called from the shell's frame-tick pump while recording: end the
+    /// session (the footage so far is saved) when the recorded window
+    /// goes away. Minimized/covered is NOT gone — the capture reads the
+    /// window's own texture.
+    func checkWindowAlive() {
         guard state == .starting || state == .recording,
-              let provider = windowRect else { return }
-        if let r = provider() {
-            fl_drm_view_recording_set_crop(Int32(r.x), Int32(r.y),
-                                           Int32(r.w), Int32(r.h))
-        } else {
-            stop()
-        }
+              let alive = windowAlive, !alive() else { return }
+        stop()
     }
 
     func stop() { endSession(reason: nil) }
@@ -247,7 +245,7 @@ final class RecordingService {
                 guard let self else { return }
                 self.state = .idle
                 self.startedAt = nil
-                self.windowRect = nil
+                self.windowAlive = nil
                 self.windowLabel = nil
                 if saved != nil { self.lastSavedPath = saved }
                 self.onChange?()
