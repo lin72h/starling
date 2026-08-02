@@ -9,15 +9,28 @@ import Glibc
 import FlutterDRMBridge
 
 /// Owns a screen-recording session: engine frames in, a finished MP4 in
-/// ~/Videos out, through StarlingRecord's ffmpeg pipe.
+/// ~/Videos out — zero-copy through the GPU when the stack allows, through
+/// StarlingRecord's ffmpeg pipe otherwise.
 ///
-/// Threads. The engine delivers frames on ITS recorder writer thread —
-/// `ingest` copies into the mailbox under the lock and returns. The pacer
-/// queue turns the mailbox into a constant 30fps stream for ffmpeg: raw
-/// video over a pipe carries no timestamps, so pacing IS the timeline —
-/// the last frame repeats while the desktop idles, extras drop while it
-/// presents at 60. `state`/`onChange` are main-thread only, like all shell
-/// state.
+/// Two frame paths, chosen per session at start:
+///
+/// Zero-copy (VaapiEncoder): the engine blits each frame into a dmabuf ring
+/// and hands fds to `ingestDmabuf` on its PRESENTING thread — queue and hop,
+/// nothing heavier. The encode queue maps each fd into VAAPI, encodes on the
+/// GPU, and releases the ring slot; pixels never touch the CPU and frames
+/// carry real timestamps, so there is no pacer. If the engine cannot build
+/// the ring it sends one sentinel frame (fd < 0) and falls back to CPU
+/// frames mid-start — `swapToPipeEncoder` swaps the session onto the pipe
+/// path without the user noticing.
+///
+/// Pipe (FfmpegEncoder): the engine delivers CPU frames on ITS recorder
+/// writer thread — `ingest` copies into the mailbox under the lock and
+/// returns. The pacer queue turns the mailbox into a constant 30fps stream
+/// for ffmpeg: raw video over a pipe carries no timestamps, so pacing IS
+/// the timeline — the last frame repeats while the desktop idles, extras
+/// drop while it presents at 60.
+///
+/// `state`/`onChange` are main-thread only, like all shell state.
 ///
 /// Present pump. The engine consumes start/stop requests on its presenting
 /// thread, and an idle desktop never presents — the shell's 33ms frame-tick
@@ -38,19 +51,24 @@ final class RecordingService {
 
     static let fps = 30
 
-    /// The tile dims itself on machines that cannot record (no ffmpeg).
+    /// The tile dims itself on machines that cannot record (no ffmpeg
+    /// binary for the pipe path AND no in-process zero-copy encoder).
     /// Checked once — packages don't come and go under a live session.
-    lazy var available: Bool = FfmpegEncoder.findFfmpeg() != nil
+    lazy var available: Bool =
+        FfmpegEncoder.findFfmpeg() != nil || resolveZeroCopyDevice() != nil
 
-    // VAAPI probe result — a real test encode, run once. Warmed in the
-    // background at init so the first Record tap doesn't pay the ~200ms;
-    // the lock makes a too-early tap wait for it instead of racing it.
+    // Probe results — real test opens, run once. Warmed in the background
+    // at init so the first Record tap doesn't pay for them; the lock makes
+    // a too-early tap wait instead of racing.
     private let hwLock = NSLock()
     private var hwProbed = false
     private var hwEncoder: HardwareEncoder?
+    private var zcProbed = false
+    private var zcDevice: String?
 
     init() {
         let warm: () -> Void = { [weak self] in
+            _ = self?.resolveZeroCopyDevice()
             _ = self?.resolveHardwareEncoder()
         }
         queue.async(execute: unsafeBitCast(warm, to: (@Sendable () -> Void).self))
@@ -73,12 +91,40 @@ final class RecordingService {
         return hwEncoder
     }
 
+    /// Render node with a working in-process VAAPI path, or nil. When this
+    /// resolves, sessions record zero-copy: dmabuf frames, GPU encode, no
+    /// ffmpeg child, no pacer.
+    private func resolveZeroCopyDevice() -> String? {
+        hwLock.lock()
+        defer { hwLock.unlock() }
+        if !zcProbed {
+            zcDevice = VaapiEncoder.detectDevice()
+            zcProbed = true
+            let msg = zcDevice != nil
+                ? "[Recording] zero-copy VAAPI encoder ready\n"
+                : "[Recording] no zero-copy encoder — pipe path\n"
+            _ = msg.withCString { write(2, $0, strlen($0)) }
+        }
+        return zcDevice
+    }
+
     /// What the last (or current) session captures at, and through which
     /// encoder — the broker reports these so tests assert the file against
     /// the shell's own claim rather than re-deriving the policy.
     private(set) var captureWidth = 0
     private(set) var captureHeight = 0
     private(set) var usingHardware = false
+    private(set) var zeroCopy = false
+
+    // The live session's engine-side frame size and output file — what a
+    // mid-start fallback to the pipe encoder must recreate exactly (the
+    // engine's dims are frozen; the URL was claimed and then deleted by
+    // the aborted zero-copy encoder).
+    private var engineWidth = 0
+    private var engineHeight = 0
+    private var sessionURL: URL?
+    // Bumped per start; stale deadline checks compare against it.
+    private var sessionGen = 0
 
     var isRecording: Bool { state == .starting || state == .recording }
     /// The frame-tick pump must run while this holds (see class comment).
@@ -103,6 +149,13 @@ final class RecordingService {
     private var encoder: FfmpegEncoder?
     private var scratch: [UInt8] = []
 
+    // Zero-copy path: dmabuf frames queued by the engine's presenting
+    // thread, drained on `queue`. Slots are the engine's finite ring —
+    // every queued frame either encodes or gets its slot released.
+    private var vaapiEncoder: VaapiEncoder?
+    private let dmabufLock = NSLock()
+    private var dmabufPending: [FlDrmRecordDmabufFrame] = []
+
     // MARK: Frame ingest (engine writer thread)
 
     func ingest(_ rgba: UnsafePointer<UInt8>?, width: Int, height: Int) {
@@ -119,6 +172,85 @@ final class RecordingService {
         }
         mailboxFresh = true
         mailboxLock.unlock()
+    }
+
+    // MARK: Frame ingest, zero-copy (engine PRESENTING thread — queue and go)
+
+    func ingestDmabuf(_ frame: FlDrmRecordDmabufFrame) {
+        guard frame.fd >= 0 else {
+            // Sentinel: the engine couldn't build the ring and the session
+            // continues as CPU frames — swap to the pipe encoder.
+            hopToMain { $0.swapToPipeEncoder() }
+            return
+        }
+        dmabufLock.lock()
+        dmabufPending.append(frame)
+        dmabufLock.unlock()
+        let drain: () -> Void = { [weak self] in self?.drainDmabuf() }
+        queue.async(execute: unsafeBitCast(drain, to: (@Sendable () -> Void).self))
+    }
+
+    /// Encode queue: map each queued dmabuf into VAAPI, encode, release
+    /// the ring slot. After endSession clears the encoder, queued frames
+    /// only get their slots released — the footage ends at the stop.
+    private func drainDmabuf() {
+        while true {
+            dmabufLock.lock()
+            let frame = dmabufPending.isEmpty ? nil : dmabufPending.removeFirst()
+            dmabufLock.unlock()
+            guard let frame else { return }
+            guard let enc = vaapiEncoder else {
+                fl_drm_view_recording_release_dmabuf_slot(frame.slot)
+                continue
+            }
+            let ok = enc.encode(fd: frame.fd, stride: frame.stride,
+                                offset: frame.offset, fourcc: frame.fourcc,
+                                modifier: frame.modifier,
+                                timestampUs: frame.timestamp_us)
+            fl_drm_view_recording_release_dmabuf_slot(frame.slot)
+            if !ok {
+                let detail = "hardware encode failed: \(enc.errorOutput)"
+                hopToMain { $0.endSession(reason: detail) }
+                return
+            }
+            if enc.frameCount == 1 {
+                hopToMain {
+                    guard $0.state == .starting else { return }
+                    $0.state = .recording
+                    $0.onChange?()
+                }
+            }
+        }
+    }
+
+    /// Mid-start fallback (main thread): the engine sent the dmabuf
+    /// sentinel, so this session's frames arrive as CPU frames at the
+    /// engine's frozen dims. Recreate the pipe encoder at those dims (its
+    /// crop filter handles odd sizes) on the same output URL the aborted
+    /// zero-copy encoder just vacated, and start the pacer.
+    private func swapToPipeEncoder() {
+        guard state == .starting || state == .recording, zeroCopy else { return }
+        zeroCopy = false
+        vaapiEncoder?.abort()
+        vaapiEncoder = nil
+        guard let ffmpeg = FfmpegEncoder.findFfmpeg(), let url = sessionURL else {
+            endSession(reason: "ffmpeg is not installed")
+            return
+        }
+        let hw = resolveHardwareEncoder()
+        guard let enc = try? FfmpegEncoder(width: engineWidth,
+                                           height: engineHeight,
+                                           fps: Self.fps, outputURL: url,
+                                           ffmpegPath: ffmpeg,
+                                           hardware: hw) else {
+            endSession(reason: "could not start ffmpeg")
+            return
+        }
+        encoder = enc
+        usingHardware = hw != nil
+        captureWidth = engineWidth
+        captureHeight = engineHeight
+        startPacer(deadline: Date().addingTimeInterval(3))
     }
 
     // MARK: Session control (main thread)
@@ -140,8 +272,13 @@ final class RecordingService {
                windowAlive alive: (() -> Bool)? = nil,
                windowLabel label: String? = nil) {
         guard state == .idle else { return }
-        guard let ffmpeg = FfmpegEncoder.findFfmpeg(),
-              let view = drmViewHandle else {
+        guard let view = drmViewHandle else {
+            onFinished?(nil, "no display")
+            return
+        }
+        let ffmpeg = FfmpegEncoder.findFfmpeg()
+        let zcDevice = resolveZeroCopyDevice()
+        guard ffmpeg != nil || zcDevice != nil else {
             onFinished?(nil, "ffmpeg is not installed")
             return
         }
@@ -149,34 +286,66 @@ final class RecordingService {
         let h = texture != nil ? height : Int(fl_drm_view_get_height(view))
         guard w > 0, h > 0 else { return }
 
-        // Hardware encodes the full screen for free; software x264 at 4K
-        // starved a real desktop into unresponsiveness, so it captures at
-        // half size (the engine downscales on the GPU, not us).
-        let hw = resolveHardwareEncoder()
-        let shift = FfmpegEncoder.downscaleShift(width: w, height: h,
-                                                 hardware: hw != nil)
-        let cw = max(1, w >> shift)
-        let ch = max(1, h >> shift)
-
         let dir = RecordingPaths.videosDir(home: LoginUser.home)
         Self.ensureOwnedDir(dir)
         let url = RecordingPaths.outputURL(in: dir, now: Date(), label: label)
-        guard let enc = try? FfmpegEncoder(width: cw, height: ch,
-                                           fps: Self.fps, outputURL: url,
-                                           ffmpegPath: ffmpeg,
-                                           hardware: hw) else {
-            onFinished?(nil, "could not start ffmpeg")
-            return
+
+        var shift = 0
+        if let device = zcDevice,
+           let zc = VaapiEncoder(device: device, inWidth: w, inHeight: h,
+                                 width: max(2, w & ~1),
+                                 height: max(2, h & ~1),
+                                 fps: Self.fps, outputURL: url) {
+            // Zero-copy: full resolution always (the GPU encodes it for
+            // free, and the transport is free too — that is the point).
+            vaapiEncoder = zc
+            encoder = nil
+            zeroCopy = true
+            usingHardware = true
+            captureWidth = zc.width
+            captureHeight = zc.height
+            fl_drm_view_recording_set_dmabuf(1)
+        } else {
+            guard let ffmpeg else {
+                onFinished?(nil, "ffmpeg is not installed")
+                return
+            }
+            // Hardware encodes the full screen for free; software x264 at
+            // 4K starved a real desktop into unresponsiveness, so it
+            // captures at half size (the engine downscales on the GPU,
+            // not us).
+            let hw = resolveHardwareEncoder()
+            shift = FfmpegEncoder.downscaleShift(width: w, height: h,
+                                                 hardware: hw != nil)
+            let cw = max(1, w >> shift)
+            let ch = max(1, h >> shift)
+            guard let enc = try? FfmpegEncoder(width: cw, height: ch,
+                                               fps: Self.fps, outputURL: url,
+                                               ffmpegPath: ffmpeg,
+                                               hardware: hw) else {
+                onFinished?(nil, "could not start ffmpeg")
+                return
+            }
+            encoder = enc
+            vaapiEncoder = nil
+            zeroCopy = false
+            usingHardware = hw != nil
+            captureWidth = cw
+            captureHeight = ch
+            fl_drm_view_recording_set_dmabuf(0)
         }
 
         mailboxLock.lock()
         mailboxFresh = false
         mailboxLock.unlock()
+        dmabufLock.lock()
+        dmabufPending.removeAll()
+        dmabufLock.unlock()
 
-        encoder = enc
-        captureWidth = cw
-        captureHeight = ch
-        usingHardware = hw != nil
+        engineWidth = max(1, w >> shift)
+        engineHeight = max(1, h >> shift)
+        sessionURL = url
+        sessionGen += 1
         self.windowAlive = alive
         self.windowLabel = label
         state = .starting
@@ -188,8 +357,26 @@ final class RecordingService {
         } else {
             fl_drm_view_recording_start(view, Int32(shift))
         }
-        startPacer(deadline: Date().addingTimeInterval(3))
+        if zeroCopy {
+            scheduleZeroCopyDeadline(generation: sessionGen)
+        } else {
+            startPacer(deadline: Date().addingTimeInterval(3))
+        }
         onChange?()
+    }
+
+    /// The zero-copy twin of the pacer's start deadline: no pacer runs, so
+    /// a session the engine never feeds (callback unwired, ES3 missing)
+    /// must be failed from here rather than sitting in .starting forever.
+    private func scheduleZeroCopyDeadline(generation: Int) {
+        let check: () -> Void = { [weak self] in
+            guard let self, self.sessionGen == generation,
+                  self.state == .starting, self.zeroCopy else { return }
+            self.endSession(reason: "the engine delivered no frames")
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 3,
+            execute: unsafeBitCast(check, to: (@Sendable () -> Void).self))
     }
 
     /// Called from the shell's frame-tick pump while recording: end the
@@ -215,6 +402,8 @@ final class RecordingService {
 
         let enc = encoder
         encoder = nil
+        let zenc = vaapiEncoder
+        vaapiEncoder = nil
         let failure = reason
         let work: () -> Void = { [weak self] in
             // The engine joins its writer thread when it consumes the stop
@@ -226,9 +415,32 @@ final class RecordingService {
                 usleep(50_000)
                 waitedMs += 50
             }
+            // Zero-copy: frames queued after the encoder was detached only
+            // need their ring slots back (the footage ends at the stop).
+            if let self {
+                self.dmabufLock.lock()
+                let leftovers = self.dmabufPending
+                self.dmabufPending.removeAll()
+                self.dmabufLock.unlock()
+                for f in leftovers {
+                    fl_drm_view_recording_release_dmabuf_slot(f.slot)
+                }
+            }
             var saved: String? = nil
             var detail = failure ?? ""
-            if let enc {
+            if let zenc {
+                if failure == nil, zenc.finish() {
+                    saved = zenc.outputURL.path
+                    Self.chownToLoginUser(zenc.outputURL.path)
+                } else {
+                    if failure == nil {
+                        detail = zenc.frameCount == 0
+                            ? "no frames were captured"
+                            : "hardware encode failed: \(zenc.errorOutput)"
+                    }
+                    zenc.abort()
+                }
+            } else if let enc {
                 if failure == nil, enc.finish() {
                     saved = enc.outputURL.path
                     Self.chownToLoginUser(enc.outputURL.path)
@@ -247,6 +459,7 @@ final class RecordingService {
                 self.startedAt = nil
                 self.windowAlive = nil
                 self.windowLabel = nil
+                self.sessionURL = nil
                 if saved != nil { self.lastSavedPath = saved }
                 self.onChange?()
                 self.onFinished?(saved, detail)

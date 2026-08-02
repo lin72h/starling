@@ -595,6 +595,13 @@ func runDRM() -> Never {
     fl_drm_view_set_record_frame_callback(view, { _, rgba, w, h, _ in
         recordingService?.ingest(rgba, width: Int(w), height: Int(h))
     }, nil)
+    // Zero-copy sibling: dmabuf frames on the engine's PRESENTING thread —
+    // ingestDmabuf queues the frame and returns; anything heavier here
+    // stalls the desktop's present path.
+    fl_drm_view_set_record_dmabuf_callback(view, { _, frame in
+        guard let frame else { return }
+        recordingService?.ingestDmabuf(frame.pointee)
+    }, nil)
 
     // Mark as epoll-driven so tick() doesn't dispatch (epoll handles it).
     wayland.setEpollDriven()

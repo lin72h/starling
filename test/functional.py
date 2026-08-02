@@ -1111,7 +1111,8 @@ def check_recording() -> None:
                    and abs(r["capture_h"] - ph / d) <= 1 for d in (1, 2)), \
             f"capture {r['capture_w']}x{r['capture_h']} is neither " \
             f"{pw:.0f}x{ph:.0f} nor half of it"
-        enc = "vaapi" if r["hardware"] else "x264"
+        enc = "zero-copy vaapi" if r.get("zero_copy") \
+            else ("vaapi" if r["hardware"] else "x264")
         log(f"{codec} {w}x{h} via {enc}, {os.path.getsize(path)} bytes")
     finally:
         # The tier must not grow the session user's Videos on every run.

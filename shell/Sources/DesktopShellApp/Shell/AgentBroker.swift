@@ -495,6 +495,7 @@ final class AgentBroker: @unchecked Sendable {
                        "capture_w": rec?.captureWidth ?? 0,
                        "capture_h": rec?.captureHeight ?? 0,
                        "hardware": rec?.usingHardware ?? false,
+                       "zero_copy": rec?.zeroCopy ?? false,
                        "window": rec?.windowLabel ?? ""])
             return
         }
