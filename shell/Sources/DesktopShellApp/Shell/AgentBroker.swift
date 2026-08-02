@@ -494,7 +494,8 @@ final class AgentBroker: @unchecked Sendable {
                        // re-derivation of the downscale policy.
                        "capture_w": rec?.captureWidth ?? 0,
                        "capture_h": rec?.captureHeight ?? 0,
-                       "hardware": rec?.usingHardware ?? false])
+                       "hardware": rec?.usingHardware ?? false,
+                       "window": rec?.windowLabel ?? ""])
             return
         }
 
@@ -504,7 +505,8 @@ final class AgentBroker: @unchecked Sendable {
         // out instead of reproducing its arithmetic.
         if op == "control_center_state" {
             let icon = shell.statusItemCenter(.controlCenter)
-            let tileIds = ["wifi", "dark", "tiling", "mute", "record"]
+            let tileIds = ["wifi", "dark", "tiling", "mute", "record",
+                           "recordapp"]
             var tiles: [[String: Any]] = []
             for (i, tid) in tileIds.enumerated() {
                 let c = shell.controlCenterTileCenter(i)

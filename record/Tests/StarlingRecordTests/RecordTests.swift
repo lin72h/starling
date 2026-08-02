@@ -48,6 +48,20 @@ import Testing
         #expect(RecordingPaths.videosDir(home: "/home/u").path
                 == "/home/u/Videos")
     }
+
+    @Test func windowLabelInName() {
+        let dir = URL(fileURLWithPath: "/tmp/nowhere")
+        let url = RecordingPaths.outputURL(in: dir,
+                                           now: date(2026, 8, 1, 14, 30, 5),
+                                           label: "Task Manager")
+        #expect(url.lastPathComponent
+                == "Screen Recording (Task Manager) 2026-08-01 at 14.30.05.mp4")
+        // A label with a path separator must not escape the directory.
+        let sneaky = RecordingPaths.outputURL(in: dir,
+                                              now: date(2026, 8, 1, 14, 30, 5),
+                                              label: "a/b")
+        #expect(sneaky.deletingLastPathComponent().path == dir.path)
+    }
 }
 
 @Suite struct EncoderArguments {

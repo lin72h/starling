@@ -20,15 +20,20 @@ public enum RecordingPaths {
 
     /// "Screen Recording 2026-08-01 at 14.30.05.mp4" — the macOS shape,
     /// dots in the time because a colon in a filename confuses enough
-    /// tools to matter. Collisions (two recordings inside one second)
-    /// get " 2", " 3", … suffixes rather than overwriting.
-    public static func outputURL(in dir: URL, now: Date,
+    /// tools to matter. A window recording carries its app:
+    /// "Screen Recording (Terminal) 2026-…". Collisions (two recordings
+    /// inside one second) get " 2", " 3", … suffixes rather than
+    /// overwriting.
+    public static func outputURL(in dir: URL, now: Date, label: String? = nil,
                                  fileManager: FileManager = .default) -> URL {
         let fmt = DateFormatter()
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let stamp = fmt.string(from: now)
-        let base = "Screen Recording \(stamp)"
+        let tag = label.map { l in
+            " (" + l.replacingOccurrences(of: "/", with: "-") + ")"
+        } ?? ""
+        let base = "Screen Recording\(tag) \(stamp)"
         var candidate = dir.appendingPathComponent(base + ".mp4")
         var n = 2
         while fileManager.fileExists(atPath: candidate.path) {

@@ -626,8 +626,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if fl_drm_view_capture_active() != 0 { tick = true }
             // Recording rides the same pump: presents carry the engine's
             // start/stop requests AND feed the frame mailbox, so it runs
-            // from the start tap until the engine confirms the stop.
-            if recordingService?.needsFramePump == true { tick = true }
+            // from the start tap until the engine confirms the stop. A
+            // window recording also re-points its crop here, so the
+            // footage follows the window as it is dragged.
+            if recordingService?.needsFramePump == true {
+                tick = true
+                recordingService?.refreshWindowCrop()
+            }
             #endif
             if tick { self?.setState { self?._frameTick += 1 } }
         }
@@ -4310,13 +4315,50 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     }
                 }
             },
+            // Record App: same session machinery, cropped to the topmost
+            // window and following it. Either tile stops a running session.
+            _ccToggleTile(icon: CupertinoIcons.macwindow,
+                          label: recordingService?.isRecording == true
+                              ? "Recording" : "Record App",
+                          active: recordingService?.isRecording == true
+                              && recordingService?.windowLabel != nil,
+                          enabled: recordingService?.available == true) { [self] in
+                if recordingService?.isRecording == true {
+                    recordingService?.stop()
+                    return
+                }
+                guard let win = windowManager.visibleWindows.last else {
+                    _postLocalNotification(summary: "Nothing to record",
+                                           body: "Open the app first — Record App captures the frontmost window.")
+                    return
+                }
+                let winId = win.id
+                let label = _record(win.appId)?.name ?? win.title
+                let wm = windowManager
+                setState { activeStatusBarPopup = nil }
+                // The rect provider captures the (non-Sendable) window
+                // manager; main-queue-only by construction — the codebase's
+                // unsafeBitCast hop, same as the timers.
+                let begin: () -> Void = {
+                    recordingService?.start(windowRect: {
+                        guard let w = wm.windows.first(where: { $0.id == winId }),
+                              !w.isMinimized else { return nil }
+                        let dpi = currentShellDpi
+                        return (Int(w.rect.left * dpi), Int(w.rect.top * dpi),
+                                Int(w.rect.width * dpi), Int(w.rect.height * dpi))
+                    }, windowLabel: label)
+                }
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + .milliseconds(300),
+                    execute: unsafeBitCast(begin, to: (@Sendable () -> Void).self))
+            },
         ]
         var children: [Widget] = [
             Row(children: [tiles[0], SizedBox(width: Self.kCcGap), tiles[1]]),
             SizedBox(height: Self.kCcGap),
             Row(children: [tiles[2], SizedBox(width: Self.kCcGap), tiles[3]]),
             SizedBox(height: Self.kCcGap),
-            Row(children: [tiles[4]]),
+            Row(children: [tiles[4], SizedBox(width: Self.kCcGap), tiles[5]]),
             SizedBox(height: 14),
             _ccSliderRow(icon: CupertinoIcons.speaker_2_fill,
                          value: min(_ccAudio.volume, 1.0) * 100,
