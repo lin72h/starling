@@ -21,14 +21,16 @@ struct SystemInfo {
     /// this used to be a hardcoded string, and it shipped reading "0.2.1"
     /// on a 0.2.2 install.
     static func starlingVersion() -> String {
-        let dirs = [ProcessInfo.processInfo.environment["STARLING_DATA_DIR"],
-                    "/usr/share/starling"].compactMap { $0 }
-        for dir in dirs {
-            if let v = try? String(contentsOfFile: dir + "/VERSION",
-                                   encoding: .utf8) {
-                let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
-            }
+        // When STARLING_DATA_DIR is set it names the tree the shell actually
+        // runs from, and it alone is the truth: falling through to the
+        // system path made a staged checkout on a machine with the .deb
+        // installed report the package's version instead of "dev build".
+        let dir = ProcessInfo.processInfo.environment["STARLING_DATA_DIR"]
+            ?? "/usr/share/starling"
+        if let v = try? String(contentsOfFile: dir + "/VERSION",
+                               encoding: .utf8) {
+            let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
         }
         return "dev build"
     }
