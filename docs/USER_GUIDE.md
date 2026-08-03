@@ -222,8 +222,11 @@ Starling is an early preview (v0.2). A few limits you will notice:
 - **Scaling is fixed at 2.0.** Fractional scaling produced blurry text and is
   not usable yet.
 - **No display-mode picker.** The session uses the connector's preferred mode.
-- **Zoom runs with a caveat** — it starts but reports `no pactl and pacmd
-  found`, because nothing in the package pulls in an audio stack yet.
+- **Zoom runs without audio.** It starts and reports `no pactl and pacmd
+  found`. That message is expected: `pactl` is deliberately left off the system
+  because Zoom crashes at startup when it is present. **Do not install
+  `pulseaudio-utils` to fix it** — that trades a silent Zoom for one that will
+  not start. Sound in other apps (Chrome, Slack, Teams) is unaffected.
 - Verified on **AMD** and **virtio-gpu** graphics; Intel and NVIDIA are not yet
   tested.
 

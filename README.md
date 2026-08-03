@@ -88,9 +88,15 @@ What follows is deliberately specific about what is and is not done, because
   Starling ships none of them. Chrome and VS Code do show their real icons in
   the launcher and dock, read from the host at runtime; the rest fall back to a
   generic glyph, since only those two ids are wired to that lookup.
-- **One catalogued app runs with a caveat.** Zoom starts but complains
-  `no pactl and pacmd found` — nothing in the package pulls in an audio stack,
-  and no first-party app needs one yet.
+- **One catalogued app runs with a caveat.** Zoom starts but reports
+  `no pactl and pacmd found` and has no audio. That is deliberate rather than a
+  missing dependency: Zoom segfaults during audio init whenever `pactl` is on
+  PATH on a PipeWire box with no native PulseAudio daemon, which is the stock
+  Ubuntu 26.04 arrangement. Absent `pactl` it skips audio and runs; present, it
+  crashes, and a working `PULSE_SERVER` does not save it. **Do not install
+  `pulseaudio-utils` to "fix" this** — it trades a silent Zoom for one that will
+  not start. Other libpulse apps (Chrome, Slack, Teams) do get sound; Zoom is a
+  single-app exception until `pactl` can be masked for it alone.
 - **No CI.** Testing is the framework's unit tests plus manual verification in
   a VM.
 
