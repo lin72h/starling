@@ -137,10 +137,16 @@ nonisolated(unsafe) var screenCastService: ScreenCastService? = nil
 
 /// Current shell DPI — updated at runtime by Settings app. Read this instead
 /// of the FLUTTER_DRM_DPI env var for coordinate conversion.
-// Default 2.0: integer scaling on 4K panels — fractional scales (e.g. 1.7)
-// can't land text stems on the pixel grid and read as blurry (the Apr 2026
-// 1.7 default was a crispness regression).
-nonisolated(unsafe) var currentShellDpi: Double = Double(ProcessInfo.processInfo.environment["FLUTTER_DRM_DPI"] ?? "2.0") ?? 2.0
+///
+/// This is only the value to use before there is a display to ask. On DRM the
+/// engine derives the real scale from the panel while creating the view, and
+/// the code below adopts it (`fl_drm_view_get_scale`) before anything reads
+/// this. It used to default to 2.0 for 4K panels, which was right on every
+/// machine it had been run on and wrong everywhere else: a 1280x800 display
+/// then rendered a 640x400 desktop, too short for windows the registry sizes
+/// in logical pixels.
+nonisolated(unsafe) var currentShellDpi: Double =
+    Double(ProcessInfo.processInfo.environment["FLUTTER_DRM_DPI"] ?? "") ?? 1.0
 
 /// The display layout (virtual desktop of one or more outputs). Built at DRM
 /// startup; nil on the macOS/GLFW dev paths (screen size falls back there).
@@ -410,11 +416,10 @@ func runDRM() -> Never {
     let assetsPath = "\(engineOutDir)/flutter_assets"
     let icuPath = "\(engineOutDir)/icudtl.dat"
 
-    // Ensure FLUTTER_DRM_DPI is in the environment so the C engine
-    // (fl_drm_view.cc) uses the same default as Swift's currentShellDpi.
-    if ProcessInfo.processInfo.environment["FLUTTER_DRM_DPI"] == nil {
-        setenv("FLUTTER_DRM_DPI", "\(currentShellDpi)", 1)
-    }
+    // FLUTTER_DRM_DPI is deliberately NOT forced here. Setting it would be
+    // the engine's own override, so the view could never derive a scale from
+    // the panel — it would only ever read back the guess we just made. The
+    // adoption happens after creation instead, below.
 
     // Create the DRM view — this initializes DRM display, GBM, EGL,
     // the Flutter engine, and input handling.
@@ -435,6 +440,17 @@ func runDRM() -> Never {
     // SecondaryOutputScreen. At N=1 this reproduces the previous
     // single-screen behavior exactly.
     drmViewHandle = view
+
+    // Adopt the scale the view resolved from the panel. Everything downstream
+    // reads currentShellDpi — the display layout below, coordinate
+    // conversion, the recorder's capture size — so this has to land before
+    // any of them. Exported so spawned apps and shell-drive.py inherit the
+    // real value instead of each keeping their own default.
+    currentShellDpi = fl_drm_view_get_scale(view)
+    setenv("FLUTTER_DRM_DPI", "\(currentShellDpi)", 1)
+    FileHandle.standardError.write(Data(
+        "[DisplayLayout] scale \(currentShellDpi) for \(screenW)x\(screenH)\n".utf8))
+
     let simSpec = ProcessInfo.processInfo.environment["STARLING_SIM_OUTPUTS"] ?? ""
     let realOutputCount = Int(fl_drm_view_get_output_count(view))
     if simSpec.isEmpty && realOutputCount > 1,
