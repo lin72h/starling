@@ -218,8 +218,12 @@
       <ul>
         <li><strong>Linux x86_64</strong> with a graphical session (Wayland or X11).
           Ubuntu 26.04 is what we test on; anything with a recent glibc should work.</li>
-        <li><strong>Swift 6.x</strong> — from <a href="https://swift.org/install">swift.org</a>
-          or <a href="https://swiftlang.github.io/swiftly/">swiftly</a>.</li>
+        <li><strong>Swift 6.2 or newer</strong> — from
+          <a href="https://swift.org/install">swift.org</a> or
+          <a href="https://swiftlang.github.io/swiftly/">swiftly</a>.
+          Tested on <strong>6.2.4</strong> and <strong>6.3.3</strong>; on 6.3 you can
+          drop two flags from the manifest below, so it is the one to pick if you have
+          a choice.</li>
         <li><strong>GTK 3 and a few system libraries</strong>, which the engine links
           against:
 <pre>sudo apt install libgtk-3-dev libegl-dev libgles-dev libdrm-dev \
@@ -289,7 +293,8 @@ sudo tar -xzf starling-sdk-linux-x86_64.tar.gz -C /opt/</pre>
                 <span class="c">// Required: the framework is built with C++ interop, and</span>
                 <span class="c">// SwiftPM does not inherit it from a dependency.</span>
                 .interoperabilityMode(.Cxx),
-                <span class="c">// Required on Ubuntu 26.04 only — see "If it does not build".</span>
+                <span class="c">// Swift 6.2 on Ubuntu 26.04 only. DELETE these two lines on</span>
+                <span class="c">// Swift 6.3+ — see "If it does not build".</span>
                 .unsafeFlags([<span class="s">"-Xcc"</span>, <span class="s">"-D_GLIBCXX_MATH_H"</span>,
                               <span class="s">"-Xcc"</span>, <span class="s">"-include"</span>, <span class="s">"-Xcc"</span>, <span class="s">"/usr/include/math.h"</span>]),
             ]
@@ -422,13 +427,20 @@ cp -r /opt/starling-sdk-linux-x86_64/engine/share/*      dist/data/</pre>
 
       <h3><code>cmath: redefinition of 'acos'</code></h3>
       <p>
-        Ubuntu 26.04. The Swift 6.2 toolchain is built for 24.04, and 26.04 pairs
-        glibc 2.43 with libstdc++ 15, which makes Foundation's C shim pull
-        <code>&lt;cmath&gt;</code> twice under C++ interop. The two
-        <code>-Xcc</code> flags in the manifest above are the workaround; they are
-        harmless on other releases and disappear once swift.org ships a native 26.04
-        toolchain. <strong>They must be on your target</strong> — SwiftPM does not
-        propagate compiler settings from a dependency.
+        <strong>Swift 6.2 on Ubuntu 26.04.</strong> The 6.2 toolchain is built for
+        24.04, and 26.04 pairs glibc 2.43 with libstdc++ 15, which makes Foundation's
+        C shim pull <code>&lt;cmath&gt;</code> twice under C++ interop. The two
+        <code>-Xcc</code> flags in the manifest above are the workaround, and
+        <strong>they must be on your own target</strong> — SwiftPM does not propagate
+        compiler settings from a dependency, so the SDK setting them internally does
+        nothing for you.
+      </p>
+      <p>
+        <strong>Swift 6.3 does not need them.</strong> We measured both: 6.2.4 fails
+        exactly as above without the flags and builds with them; 6.3.3 builds either
+        way. If you are on 6.3 or newer, delete those two lines — they are only clutter
+        there. (There is still no official Ubuntu 26.04 toolchain; 24.04 remains the
+        newest swift.org build, and it works fine on 26.04.)
       </p>
 
       <h3><code>libflutter_linux_gtk.so: cannot open shared object file</code></h3>
