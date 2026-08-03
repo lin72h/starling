@@ -37,6 +37,49 @@ private final class AtomicBox<T>: @unchecked Sendable {
     }
 }
 
+/// The connected child socket, shared between its reader thread and the
+/// platform thread. The reader is the ONLY closer; every other touch goes
+/// through the same lock, and close invalidates the fd under that lock —
+/// so once the kernel recycles the number, nothing here can reach the
+/// stranger now holding it. destroyApp used to close this fd directly
+/// while the reader thread still owned it: the second close landed on
+/// whatever the number had become — once, the portal picker's stdout
+/// pipe, whose EBADF Foundation's internal `try!` turned into a shell
+/// abort. destroyApp gets shutdown() instead, which unblocks the reader's
+/// recv with EOF (a close from another thread does not) and frees nothing.
+private final class ChildSocket: @unchecked Sendable {
+    private let box: AtomicBox<Int32>
+
+    init(adopting fd: Int32) { box = AtomicBox(fd) }
+
+    /// Platform thread: send one message. Silently dropped once the
+    /// socket is gone — the child is exiting, there is no one to tell.
+    func write(_ buf: UnsafeRawPointer, _ count: Int) {
+        box.withLock { fd in
+            guard fd >= 0 else { return }
+            _ = Glibc.write(fd, buf, count)
+        }
+    }
+
+    /// Platform thread (destroyApp): wake the reader out of its blocked
+    /// recv so it can perform the one true close.
+    func shutdown() {
+        box.withLock { fd in
+            guard fd >= 0 else { return }
+            _ = Glibc.shutdown(fd, Int32(SHUT_RDWR))
+        }
+    }
+
+    /// Reader thread only, at loop exit.
+    func close() {
+        box.withLock { fd in
+            guard fd >= 0 else { return }
+            _ = Glibc.close(fd)
+            fd = -1
+        }
+    }
+}
+
 /// Pending DMA-BUF resize — child sent a new fd + metadata after resizing.
 private struct PendingDmaBufResize: @unchecked Sendable {
     let textureId: Int64
@@ -51,7 +94,7 @@ private struct PendingDmaBufResize: @unchecked Sendable {
 private struct PendingDmaBufLaunch: @unchecked Sendable {
     let process: Process
     let pipe: Pipe
-    let clientSocket: Int32       // connected client socket for frame signals
+    let sock: ChildSocket         // connected client socket for frame signals
     let dmaFd: Int32              // DMA-BUF fd received from child
     let width: Int
     let height: Int
@@ -183,7 +226,7 @@ class LinuxProcessAppManager {
                     height: launch.height,
                     onTerminated: launch.onTerminated,
                     dmaFd: launch.dmaFd,
-                    dmaBufSocket: launch.clientSocket,
+                    sock: launch.sock,
                     dmaBufStride: launch.stride,
                     dmaBufFourcc: launch.fourcc
                 )
@@ -494,11 +537,16 @@ class LinuxProcessAppManager {
                 return
             }
 
+            // From here the fd is shared (tick hands it to the entry), so
+            // it moves into a ChildSocket: this thread keeps the raw fd
+            // for its recv loop and remains the only closer.
+            let sock = ChildSocket(adopting: clientSock)
+
             // Queue for tick() on platform thread
             pendingDmaBufLaunches.withLock { $0.append(PendingDmaBufLaunch(
                 process: process,
                 pipe: pipe,
-                clientSocket: clientSock,
+                sock: sock,
                 dmaFd: receivedFd,
                 width: Int(meta.width),
                 height: Int(meta.height),
@@ -582,7 +630,7 @@ class LinuxProcessAppManager {
                 }
             }
 
-            Glibc.close(clientSock)
+            sock.close()
         }
 
         // Handle process termination
@@ -616,11 +664,11 @@ class LinuxProcessAppManager {
 
     /// Pushes the desktop appearance to one child over its socket.
     func sendTheme(textureId: Int64, dark: Bool) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         var event = DmaBufInputEvent(x: dark ? 1 : 0, y: 0, buttons: 0,
                                      type: Int32(DMABUF_CONTROL_SET_THEME),
                                      phase: 0)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Appearance switch: push the new theme to every child app.
@@ -632,11 +680,11 @@ class LinuxProcessAppManager {
 
     /// Pushes the window-manager layout to one child (true = tiling).
     func sendLayout(textureId: Int64, tiling: Bool) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         var event = DmaBufInputEvent(x: tiling ? 1 : 0, y: 0, buttons: 0,
                                      type: Int32(DMABUF_CONTROL_SET_LAYOUT),
                                      phase: 0)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Layout switch: push to every child so Settings toggles stay live.
@@ -649,11 +697,11 @@ class LinuxProcessAppManager {
 
     /// Pushes the wallpaper preset to one child.
     func sendWallpaper(textureId: Int64, preset: Int) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         var event = DmaBufInputEvent(x: Double(preset), y: 0, buttons: 0,
                                      type: Int32(DMABUF_CONTROL_SET_WALLPAPER),
                                      phase: 0)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Wallpaper switch: push to every child so Settings pickers stay live.
@@ -666,11 +714,11 @@ class LinuxProcessAppManager {
 
     /// Sends a pointer event to the child process via the Unix socket.
     func sendPointerEvent(textureId: Int64, phase: Int32, x: Double, y: Double, buttons: Int64) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         var event = DmaBufInputEvent(x: x, y: y, buttons: buttons,
                                      type: Int32(DMABUF_INPUT_POINTER),
                                      phase: phase)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Sends a keyboard event to the child process via the Unix socket.
@@ -680,12 +728,12 @@ class LinuxProcessAppManager {
     /// 2=repeat.
     func sendKeyEvent(textureId: Int64, physical: Int64, logical: Int64,
                       character: UInt32, phase: Int32) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         var event = DmaBufInputEvent(x: Double(physical), y: Double(logical),
                                      buttons: Int64(character),
                                      type: Int32(DMABUF_INPUT_KEY),
                                      phase: phase)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Sends a mouse-wheel scroll to the child. Deltas are packed as two
@@ -693,34 +741,33 @@ class LinuxProcessAppManager {
     /// DmaBufInputEvent has no spare double fields.
     func sendScrollEvent(textureId: Int64, x: Double, y: Double,
                          dx: Double, dy: Double) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         let packed = UInt64(Float(dx).bitPattern)
             | (UInt64(Float(dy).bitPattern) << 32)
         var event = DmaBufInputEvent(x: x, y: y,
                                      buttons: Int64(bitPattern: packed),
                                      type: Int32(DMABUF_INPUT_SCROLL),
                                      phase: 0)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Sends a DPI change to all child processes via their Unix sockets.
     func broadcastDpiChange(_ dpi: Double) {
         for (_, entry) in apps {
-            guard entry.dmaBufSocket >= 0 else { continue }
             var event = DmaBufInputEvent(x: dpi, y: 0, buttons: 0,
                                          type: DMABUF_CONTROL_SET_DPI, phase: 0)
-            _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+            entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
         }
     }
 
     /// Sends a resize event to the child process via the Unix socket.
     func sendResize(textureId: Int64, width: Int, height: Int) {
-        guard let entry = apps[textureId], entry.dmaBufSocket >= 0 else { return }
+        guard let entry = apps[textureId] else { return }
         guard width != entry.width || height != entry.height else { return }
         var event = DmaBufInputEvent(x: Double(width), y: Double(height), buttons: 0,
                                      type: Int32(DMABUF_INPUT_RESIZE),
                                      phase: 0)
-        _ = Glibc.write(entry.dmaBufSocket, &event, MemoryLayout<DmaBufInputEvent>.size)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
     /// Terminates the child process and unregisters its texture.
@@ -733,9 +780,7 @@ class LinuxProcessAppManager {
         if entry.dmaFd >= 0 {
             Glibc.close(entry.dmaFd)
         }
-        if entry.dmaBufSocket >= 0 {
-            Glibc.close(entry.dmaBufSocket)
-        }
+        entry.sock.shutdown()
         textureRegistry.unregisterTexture(engine: engine, id: textureId)
     }
 }
@@ -750,7 +795,7 @@ private struct ProcessAppEntry {
     let onTerminated: () -> Void
 
     var dmaFd: Int32 = -1
-    var dmaBufSocket: Int32 = -1
+    let sock: ChildSocket
     var dmaBufStride: Int = 0
     var dmaBufFourcc: UInt32 = 0
 }
