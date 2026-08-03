@@ -235,9 +235,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     /// Dock order, as app ids — mutable for drag-to-reorder and Remove from
     /// Dock. Seeded from the registry's default dock, which is already
-    /// filtered to what is installed: a given build or package may not ship
-    /// every first-party app (the .deb ships five), and a dock tile that
-    /// launches nothing is worse than an absent one. Filtering at seed time
+    /// filtered to what is installed: a given build may not ship every
+    /// first-party app (a dev stage carries only what was built), and a dock
+    /// tile that launches nothing is worse than an absent one. Filtering at
+    /// seed time
     /// rather than at display time keeps drag-to-reorder honest — those
     /// indices address dockAppOrder directly.
     var dockAppOrder: [String] = AppRegistry.shared.defaultDock.map { $0.id }

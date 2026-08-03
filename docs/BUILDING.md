@@ -273,9 +273,17 @@ or `$STARLING_ENGINE`).
 
 ### 2.4 Build the shell and the apps
 
+The set the `.deb` ships is defined by the registry, not by a list here:
+every `registry/catalog.d/*.app` record with `Kind=first-party` names its
+executable in `Exec=`, and `package-desktop.sh` requires a built binary for
+each one (a record without a binary is a hard error — an installed desktop
+would show a launcher tile that launches nothing). Build the shell, then
+every first-party app the catalog declares:
+
 ```bash
 swift build -c release --package-path shell
-for a in SettingsApp FileExplorerApp TerminalApp CalculatorApp AppStoreApp; do
+for a in $(grep -l "^Kind=first-party" registry/catalog.d/*.app \
+             | xargs -n1 sed -n 's/^Exec=//p'); do
     swift build -c release --package-path "apps/$a"
 done
 ```
@@ -283,9 +291,11 @@ done
 No extra flags on any release: the manifests carry what 26.04 needs.
 
 The shell pulls in `sdk/` (the `FlutterSwift` framework port) as a package
-dependency, so there is nothing to build there separately. Those five apps are
-the set the `.deb` ships; `apps/` holds more, and any app with a built binary
-gets picked up by staging — so build only what you want shipped.
+dependency, so there is nothing to build there separately. `apps/` holds more
+than the catalog declares (dev and demo tools — DSATool, BlueScreenApp,
+FlutterDemoApp); those have no record and stay out of the package on purpose.
+Staging picks up any app with a built binary, so a partial build still runs —
+only packaging insists on the full first-party set.
 
 ### 2.5 Stage
 
@@ -372,7 +382,8 @@ build/package-desktop.sh        # -> starling-desktop_<ver>_amd64.deb
 
 Wraps `stage.sh`'s output with control metadata, the polkit policy, and the
 session entry, and computes `Depends` with `dpkg-shlibdeps`. Prereqs: the
-release shell, the five apps, and the engine's **`host_release`**.
+release shell, every first-party app in the catalog (§2.4), and the engine's
+**`host_release`**.
 
 The result
 bundles the Swift runtime and the engine privately, installs under
