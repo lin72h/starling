@@ -282,6 +282,11 @@
             the text stack, the embedders.</div>
         </div>
       </div>
+
+      <p style="margin-top:30px;font-size:16px;color:var(--ink-faint)">
+        Here to build something rather than read the argument?
+        <a href="start.html">Start here</a> — install, write an app, run it.
+      </p>
     </div>
     <div class="hero-tail"></div>
   </div>
@@ -677,16 +682,61 @@
     </div>
   </section>
 
+  <section>
+    <div class="wrap narrow prose">
+      <div class="kicker">Real code</div>
+      <h2>Everything here was written with it</h2>
+      <p>
+        The most useful documentation for a framework is a program that uses it
+        seriously, and this one comes with a dozen. The Starling desktop's
+        <a href="https://github.com/starling-build/starling/tree/main/apps">first-party
+        apps</a> are ordinary SDK consumers — each a SwiftPM package that depends on
+        the framework exactly the way your app will, with nothing privileged about
+        them:
+      </p>
+      <ul style="margin-top:18px;padding-left:22px;color:var(--ink-dim)">
+        <li style="margin-bottom:8px"><a href="https://github.com/starling-build/starling/tree/main/apps/CalculatorApp">Calculator</a>
+          — ~480 lines. The one to read first.</li>
+        <li style="margin-bottom:8px"><a href="https://github.com/starling-build/starling/tree/main/apps/TextEditorApp">Text Editor</a>
+          and <a href="https://github.com/starling-build/starling/tree/main/apps/FileExplorerApp">Files</a>
+          — text editing, list virtualisation, real file I/O.</li>
+        <li style="margin-bottom:8px"><a href="https://github.com/starling-build/starling/tree/main/apps/TerminalApp">Terminal</a>
+          — a pty, an escape-sequence parser, and a custom-painted grid.</li>
+        <li style="margin-bottom:8px"><a href="https://github.com/starling-build/starling/tree/main/apps/SettingsApp">Settings</a>
+          — ~2,300 lines, nine panes, the largest of them.</li>
+        <li><a href="https://github.com/starling-build/starling/tree/main/sdk/Examples">The SDK's own examples</a>
+          — the Flutter counter, a todo app, and a port of the kalender package with
+          day, week and month views.</li>
+      </ul>
+
+      <div class="pull">
+        And then the same thing, one level up: the desktop itself — compositor, window
+        manager, dock, Mission Control, some twenty thousand lines of it — is a Swift
+        program built on this framework. Its widgets are your widgets.
+      </div>
+
+      <p>
+        That is the part worth taking seriously if you are weighing whether the
+        framework is real. There is no separate privileged API that the desktop uses
+        and applications do not. The shell composites its windows into a widget tree,
+        lays them out with the same constraint model as a <code>Column</code>, and
+        rebuilds through <code>setState</code>. When we hit a limit, we fix it in the
+        framework — which is why the framework is the part that gets better.
+      </p>
+    </div>
+  </section>
+
   <section class="close">
     <div class="wrap narrow">
       <h2>Build something with it</h2>
       <p>
-        The framework, the bridges, the desktop host and the ported samples — the
-        counter above, a todo app, a calendar package port — are in one repository,
-        and the demo runs on the Linux session you are already using.
+        One download, four files, one <code>swift build</code> — no engine checkout,
+        no toolchain beyond Swift. The guide walks the whole loop on an ordinary
+        Linux session.
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/starling-build/starling/tree/main/sdk">SDK on GitHub</a>
+        <a class="btn btn-primary" href="start.html">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/starling-build/starling/tree/main/sdk">SDK source</a>
         <a class="btn btn-ghost" href="why.html">The desktop built on it</a>
       </div>
     </div>
