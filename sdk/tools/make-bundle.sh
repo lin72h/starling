@@ -88,9 +88,18 @@ if [ "$PLATFORM" = linux ]; then
     # The DRM embedder is what FlutterDRMBridge binds; optional for consumers
     # that only use the framework, so do not fail without it.
     [ -f "$E/libflutter_linux_drm.so" ] && install -m644 "$E/libflutter_linux_drm.so" "$DEST/engine/lib/"
-    # The GTK embedder is what FlutterGTK binds (desktop-session host); same
-    # deal — optional.
-    [ -f "$E/libflutter_linux_gtk.so" ] && install -m644 "$E/libflutter_linux_gtk.so" "$DEST/engine/lib/"
+    # The GTK embedder is what FlutterGTK binds — the windowed host, and so the
+    # one every ordinary desktop app in this bundle depends on. Missing it is
+    # not a degraded bundle, it is a broken one: apps link fine and die at
+    # startup on "libflutter_linux_gtk.so: cannot open shared object file". It
+    # used to be copied only if present, and shipped a bundle without it,
+    # because BUILDING.md's ninja line did not name it. Refuse instead.
+    if [ ! -f "$E/libflutter_linux_gtk.so" ]; then
+        echo "error: $E/libflutter_linux_gtk.so is missing — build it with" >&2
+        echo "       ninja -C $(basename "$E") libflutter_linux_gtk.so" >&2
+        exit 1
+    fi
+    install -m644 "$E/libflutter_linux_gtk.so" "$DEST/engine/lib/"
 else
     cp -R "$E/FlutterMacOS.framework" "$DEST/engine/lib/"
     install -m644 "$E/libswift_bridge.dylib" "$DEST/engine/lib/"

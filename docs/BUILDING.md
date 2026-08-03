@@ -151,8 +151,8 @@ commands are what create it.** (`gn` itself lives at
 ### 1.6 Build the two libraries
 
 ```bash
-ninja -C out/host_debug   libflutter_engine.so libflutter_linux_drm.so
-ninja -C out/host_release libflutter_engine.so libflutter_linux_drm.so
+ninja -C out/host_debug   libflutter_engine.so libflutter_linux_drm.so libflutter_linux_gtk.so
+ninja -C out/host_release libflutter_engine.so libflutter_linux_drm.so libflutter_linux_gtk.so
 ```
 
 **depot_tools must be on PATH for these too**, not just for `tools/gn` (§1.2).
@@ -169,8 +169,13 @@ that skip your profile are the usual way this bites.
 - `host_release` is what `stage.sh` copies into the shipping tree, and what
   packaging requires.
 
-Each config yields `libflutter_engine.so`, `libflutter_linux_drm.so`, and
-`icudtl.dat`. That is the entire interface the desktop consumes. Later
+Each config yields `libflutter_engine.so`, `libflutter_linux_drm.so`,
+`libflutter_linux_gtk.so`, and `icudtl.dat`. That is the entire interface the
+desktop consumes. The GTK one is not used by the desktop at all — it is the
+embedder the SDK's windowed host runs on, so an SDK bundle built without it
+produces apps that link and then die looking for it. `make-bundle.sh` copies it
+only if it exists, which is exactly how a bundle ships silently incomplete.
+Later
 engine-only changes rebuild in seconds and need **no Swift relink**: the shell
 binds only the engine's stable C API.
 
