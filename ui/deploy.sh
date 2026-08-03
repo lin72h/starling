@@ -23,7 +23,7 @@ git clone --depth 1 "$REPO" "$WORK/site" 2>/dev/null || {
 
 # Replace tracked content, keeping the site repo's own git metadata.
 find "$WORK/site" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-cp -r "$UI"/index.html "$UI"/why.html "$UI"/sdk.html "$UI"/guide.html \
+cp -r "$UI"/index.html "$UI"/why.html "$UI"/sdk.html "$UI"/start.html "$UI"/guide.html \
       "$UI"/CNAME "$UI"/img "$WORK/site/"
 
 cd "$WORK/site"
