@@ -24,6 +24,12 @@ OUT="${1:-/tmp/starling-pkg}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 E=$REPO/engine/src/out/host_release
 SHELL_BUILD=$REPO/shell/.build
+# The system-integration payload: the session launcher GDM execs, its
+# wayland-session entry, the polkit policy behind the App Store's Install
+# button, and the NetworkManager drop-in. Real files rather than heredocs so
+# a packager for another distribution installs the same bytes we do instead
+# of transcribing them — see build/session/README.md.
+SESSION=$REPO/build/session
 
 # The apps to ship, read out of the registry — NOT a list maintained here.
 #
@@ -155,24 +161,8 @@ EOF
 
 # polkit: let the active session's user run app-install through pkexec
 # without a prompt — the App Store's Install button drives this.
-mkdir -p "$ROOT/usr/share/polkit-1/actions"
-cat > "$ROOT/usr/share/polkit-1/actions/org.starling.app-install.policy" <<'POLICY'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
- "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
-<policyconfig>
-  <action id="org.starling.app-install">
-    <description>Install and remove applications</description>
-    <message>Authentication is required to manage applications</message>
-    <defaults>
-      <allow_any>no</allow_any>
-      <allow_inactive>no</allow_inactive>
-      <allow_active>yes</allow_active>
-    </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/app-install</annotate>
-  </action>
-</policyconfig>
-POLICY
+install -Dm644 "$SESSION/org.starling.app-install.policy" \
+               "$ROOT/usr/share/polkit-1/actions/org.starling.app-install.policy"
 
 # NetworkManager: manage wired devices too.
 #
@@ -187,126 +177,15 @@ POLICY
 #
 # Precedence keeps the user in charge: NM reads /usr/lib before /etc, so
 # anything in /etc/NetworkManager/conf.d still wins over this.
-mkdir -p "$ROOT/usr/lib/NetworkManager/conf.d"
-cat > "$ROOT/usr/lib/NetworkManager/conf.d/90-starling-managed-devices.conf" <<'NMCONF'
-# Installed by starling. A desktop manages its own network devices — wired
-# included. Override in /etc/NetworkManager/conf.d/ if you want otherwise.
-[keyfile]
-unmanaged-devices=none
-NMCONF
+install -Dm644 "$SESSION/90-starling-managed-devices.conf" \
+               "$ROOT/usr/lib/NetworkManager/conf.d/90-starling-managed-devices.conf"
 
 # --- session launcher --------------------------------------------------------
-cat > "$ROOT/usr/libexec/starling-session" <<'LAUNCHER'
-#!/usr/bin/env bash
-# Starling session entry point (what GDM execs). Unprivileged: DRM master
-# and input come from logind via libseat.
-set -u
-LIB=/usr/lib/starling
-SHARE=/usr/share/starling
+install -Dm755 "$SESSION/starling-session" \
+               "$ROOT/usr/libexec/starling-session"
 
-# First DRM card with a connected connector, unless overridden.
-if [ -z "${FLUTTER_DRM_DEVICE:-}" ]; then
-    for st in /sys/class/drm/card*-*/status; do
-        [ -e "$st" ] || continue
-        if [ "$(cat "$st")" = connected ]; then
-            c=$(basename "$(dirname "$st")")
-            FLUTTER_DRM_DEVICE=/dev/dri/${c%%-*}
-            break
-        fi
-    done
-fi
-export FLUTTER_DRM_DEVICE="${FLUTTER_DRM_DEVICE:-/dev/dri/card0}"
-
-# Private runtime dir + session bus for the Starling session. XDG_DATA_HOME
-# below points the bus's servicedir here, and it is searched before
-# /usr/share/dbus-1/services, so these stubs mask the system service files.
-#
-# org.freedesktop.secrets: makes Chromium/Electron apps skip the 120 s
-# keyring service_start_timeout stall (no keyring in this session).
-#
-# org.freedesktop.portal.Desktop: the shell's own portal serves this name.
-# Left activatable, the stock xdg-desktop-portal starts on this bus and takes
-# the name (we ask with ALLOW_REPLACEMENT, it asks with REPLACE_EXISTING),
-# then serves only its backend-less interfaces — FileChooser needs an
-# impl.portal.desktop.* backend and none declares Starling, so file dialogs
-# break in every Chromium/Electron/GTK app.
-# $XDG is a per-user name: a fixed shared one locked the second user out of
-# the desktop entirely — nothing removes the dir on logout, so whoever
-# session-started first owned it until reboot and every other user's login
-# bounced straight back to GDM. The uid suffix gives each user their own
-# claim. It is still a predictable name in a world-writable /tmp, so before
-# trusting it we have to prove it is ours: anyone can pre-create it, and
-# `mkdir -p` succeeds just the same on someone else's directory. Owning it
-# would mean owning every socket the session puts inside — the Wayland
-# socket, the agent broker, the bus. A symlink there is the same attack with
-# an extra hop, so reject anything that is not a real directory we own, and
-# keep it 0700 so nobody can reach in afterwards. (Pre-creating someone
-# else's dir is now only a denial of service, never a takeover.)
-XDG=/tmp/xdg-starling-$(id -u)
-mkdir -p "$XDG" 2>/dev/null
-if [ -L "$XDG" ] || [ ! -d "$XDG" ] || [ ! -O "$XDG" ]; then
-    echo "starling-session: $XDG is not a directory owned by $(id -un) —" \
-         "refusing to start (someone else may have created it)" >&2
-    exit 1
-fi
-chmod 700 "$XDG"
-mkdir -p "$XDG/data/dbus-1/services"
-for n in org.freedesktop.secrets org.freedesktop.portal.Desktop \
-         org.freedesktop.Notifications; do
-    printf '[D-BUS Service]\nName=%s\nExec=/usr/bin/false\n' "$n" \
-        > "$XDG/data/dbus-1/services/$n.service"
-done
-# Never adopt a bus socket we did not create. The old `[ ! -S ]` test meant a
-# pre-planted socket was taken as the session bus, which hands every app's
-# D-Bus traffic — and the portal name behind every file dialog — to whoever
-# planted it. Ours or nothing: drop a stale one and start our own.
-if [ -e "$XDG/bus" ] && { [ ! -S "$XDG/bus" ] || [ ! -O "$XDG/bus" ]; }; then
-    rm -f "$XDG/bus"
-fi
-if [ ! -S "$XDG/bus" ]; then
-    setsid env XDG_DATA_HOME="$XDG/data" \
-        dbus-daemon --session --address="unix:path=$XDG/bus" --nofork \
-        >/dev/null 2>&1 &
-    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$XDG/bus" ] && break; sleep 0.2; done
-fi
-
-# A DM-launched session is by definition a logind session; still honor an
-# explicit override (dev boxes testing against seatd).
-export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-logind}"
-
-# libpipewire resolves its daemon socket under XDG_RUNTIME_DIR, which the
-# exec below overrides to the private dir. GDM handed this script the real
-# runtime dir — keep a pointer to it so the shell's ScreenCast can reach
-# the user's PipeWire daemon. Forwarded only when the socket exists, never
-# as an empty string (the env-knob rule).
-REAL_RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-PW_ENV=()
-if [ -S "$REAL_RUN/${PIPEWIRE_REMOTE:-pipewire-0}" ]; then
-    PW_ENV=(PIPEWIRE_RUNTIME_DIR="$REAL_RUN")
-fi
-
-exec env \
-    "${PW_ENV[@]}" \
-    LD_LIBRARY_PATH="$LIB" \
-    FLUTTER_DRM_SEAT=libseat \
-    FLUTTER_ENGINE_OUT="$SHARE" \
-    STARLING_DATA_DIR="$SHARE" \
-    FLUTTER_APPS_DIR="$LIB/apps" \
-    STARLING_CHILD_HOST_GL=1 \
-    XDG_RUNTIME_DIR="$XDG" \
-    "$LIB/DesktopShellApp" --drm "$@" \
-    > "/tmp/starling-session-$(id -u).log" 2>&1
-LAUNCHER
-chmod 755 "$ROOT/usr/libexec/starling-session"
-
-cat > "$ROOT/usr/share/wayland-sessions/starling.desktop" <<'DESKTOP'
-[Desktop Entry]
-Name=Starling
-Comment=Starling desktop shell
-Exec=/usr/libexec/starling-session
-Type=Application
-DesktopNames=Starling
-DESKTOP
+install -Dm644 "$SESSION/starling.desktop" \
+               "$ROOT/usr/share/wayland-sessions/starling.desktop"
 
 # --- control ------------------------------------------------------------------
 # Depends computed from the staged ELF objects. -l points dpkg-shlibdeps at

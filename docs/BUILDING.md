@@ -145,8 +145,17 @@ flutter/tools/gn --runtime-mode=release --no-lto --no-backtrace --no-rbe
 
 This writes `out/host_debug/args.gn` / `out/host_release/args.gn` and runs
 `gn gen`. **`out/` is untracked, so a fresh clone has no `args.gn` — these two
-commands are what create it.** (`gn` itself lives at
-`flutter/third_party/gn/gn`, not in `buildtools/`, which only carries clang.)
+commands are what create it.**
+
+`gn` itself comes from `flutter/third_party/gn/gn`, which `gclient` hydrates
+(not `buildtools/`, which only carries clang). A tree without that copy — a
+distribution package build, say — falls back to whatever `gn` is on PATH, and
+`$STARLING_GN` overrides both. Two further knobs exist for the same reason:
+`$STARLING_SWIFT_INCLUDE` sets the Swift include directory the bridge's
+`BUILD.gn` reads (Arch keeps it at `/usr/lib/swift/include`, not under a
+toolchain root), and `$STARLING_SWIFT_TOOLCHAIN` supplies a toolchain root to
+derive it from. Version stamping degrades to `unknown` rather than failing
+when the skia, dart, or framework checkouts a gclient tree provides are absent.
 
 ### 1.6 Build the two libraries
 
@@ -164,10 +173,15 @@ that skip your profile are the usual way this bites.
 ~4400 steps per config. **Build both:**
 
 - `host_debug` is what every Swift package links against and bakes into its
-  rpath (`engineOutDir` in each `Package.swift`), so the desktop will not link
-  without it — even for a release desktop build.
+  rpath by default (`engineOutDir` in each `Package.swift`), so the desktop
+  will not link without it — even for a release desktop build.
 - `host_release` is what `stage.sh` copies into the shipping tree, and what
   packaging requires.
+
+Set `$STARLING_ENGINE_OUT` to build only one of them: every `Package.swift`
+and `stage.sh` read it, so pointing all of them at `out/host_release` makes a
+release-only engine build sufficient. That halves the ~4400-step build, which
+matters most for a distribution package that ships release binaries anyway.
 
 Each config yields `libflutter_engine.so`, `libflutter_linux_drm.so`,
 `libflutter_linux_gtk.so`, and `icudtl.dat`. That is the entire interface the
@@ -234,15 +248,8 @@ missing package:
 - **`seatd`** — lets the shell take the seat with no sudo, which is the
   shipping model; see §3.
 
-### 2.2 Swift 6.2.4, at exactly the right path
+### 2.2 Swift 6.2.4
 
-Every `Package.swift` hardcodes the toolchain include directory:
-
-```swift
-let swiftToolchainInclude = NSHomeDirectory() + "/.local/share/swiftly/toolchains/6.2.4/usr/include"
-```
-
-so the toolchain **must** live at `~/.local/share/swiftly/toolchains/6.2.4/`.
 swift.org publishes no `ubuntu26.04` build of 6.2.4; the `ubuntu24.04` one runs
 fine on 26.04:
 
@@ -256,11 +263,20 @@ export PATH="$TC/usr/bin:$PATH"
 swift --version          # Swift version 6.2.4 (swift-6.2.4-RELEASE)
 ```
 
-Installing 6.2.4 with `swiftly` itself produces the same layout and is equally
-fine — the path is what matters, not how the toolchain got there.
+That path is a convention, not a requirement. No `Package.swift` names a
+toolchain directory: `<swift/bridging>`, the only toolchain header the bridge
+headers need, is vendored into `sdk/` by `sdk/tools/sync-vendored-headers.sh`
+and resolves through the package's own include directory. So installing 6.2.4
+with `swiftly`, unpacking it anywhere, or using a distribution's own Swift all
+work, provided `swift` is on PATH. The engine's `BUILD.gn` is the one place
+that still needs the include directory itself, and it can be pointed anywhere
+(§1.5).
 
 On 26.04, `swift-build` cannot start until the toolchain gets a libxml2 compat
-symlink; `./bootstrap.sh` in the next step creates it.
+symlink; `./bootstrap.sh` in the next step creates it. It looks under
+`$STARLING_SWIFT_TOOLCHAIN`, defaulting to the swiftly path above. Other
+distributions do not need the symlink at all — it exists because the 6.2.4
+binary is an ubuntu24.04 build.
 
 ### 2.3 Clone, and point it at the engine
 
@@ -387,10 +403,16 @@ sudo build/shell-drive.py "dock calculator" "sleep 2" "shot /tmp/x.png"
 build/package-desktop.sh        # -> starling-desktop_<ver>_amd64.deb
 ```
 
-Wraps `stage.sh`'s output with control metadata, the polkit policy, and the
-session entry, and computes `Depends` with `dpkg-shlibdeps`. Prereqs: the
-release shell, every first-party app in the catalog (§2.4), and the engine's
+Wraps `stage.sh`'s output with control metadata and the system-integration
+payload, and computes `Depends` with `dpkg-shlibdeps`. Prereqs: the release
+shell, every first-party app in the catalog (§2.4), and the engine's
 **`host_release`**.
+
+That payload — the session launcher, its wayland-session entry, the polkit
+policy, and the NetworkManager drop-in — lives in `build/session/` as real
+files, installed verbatim. Packaging Starling for another distribution means
+consuming `stage.sh` for the tree and `build/session/` for those four files;
+`build/session/README.md` gives the install paths and modes.
 
 The result
 bundles the Swift runtime and the engine privately, installs under
@@ -468,10 +490,14 @@ rm -rf ~/.cache/clang
   `flutter/tools/gn`'s `vpython3` shebang.
 - **`out/*/args.gn` is not in the repo** — a fresh clone must run
   `flutter/tools/gn` before `ninja`.
-- **Build both engine configs.** A `host_debug`-only build cannot be packaged;
-  a `host_release`-only build cannot be linked against.
-- **The Swift toolchain path is hardcoded** to
-  `~/.local/share/swiftly/toolchains/6.2.4`.
+- **Build both engine configs, or set `$STARLING_ENGINE_OUT`.** By default a
+  `host_debug`-only build cannot be packaged and a `host_release`-only build
+  cannot be linked against; that variable points the Swift packages and
+  `stage.sh` at one config, which makes a single build enough.
+- **No Swift toolchain path is hardcoded any more.** The packages resolve
+  `<swift/bridging>` from the copy vendored in `sdk/`; only the engine's
+  `BUILD.gn` needs the toolchain's include directory, overridable with
+  `$STARLING_SWIFT_INCLUDE` or `$STARLING_SWIFT_TOOLCHAIN`.
 - **Never forward the engine's env knobs as empty strings.** They are read with
   a bare `getenv()`, and `""` is non-NULL in C: `FLUTTER_DRM_CONNECTOR=""` makes
   the connector filter reject every output, giving

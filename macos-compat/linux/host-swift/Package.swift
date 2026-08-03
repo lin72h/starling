@@ -8,8 +8,22 @@
 import PackageDescription
 import Foundation
 
-let swiftToolchainInclude = NSHomeDirectory() + "/.local/share/swiftly/toolchains/6.2.4/usr/include"
-let engineOutDir = "../../../engine/src/out/host_debug"
+// Context.environment, not ProcessInfo: it is the API SwiftPM sanctions for
+// manifest-time environment reads, and the one where changing a variable
+// actually re-evaluates the manifest. Same as sdk/Package.swift.
+func env(_ key: String, default fallback: String) -> String {
+    guard let v = Context.environment[key], !v.isEmpty else { return fallback }
+    return v
+}
+
+// No toolchain include path here: <swift/bridging>, the only toolchain header
+// the bridge headers needed, is vendored by the framework
+// (sdk/tools/sync-vendored-headers.sh) and resolves through its own include
+// directory. Nothing here may name a toolchain path: a build against a
+// distribution's own Swift has no such directory to name.
+
+let engineOutDir = env("STARLING_ENGINE_OUT",
+                       default: "../../../engine/src/out/host_debug")
 let glfwLib = "../../../host/.deps/lib"
 
 let package = Package(
@@ -34,9 +48,6 @@ let package = Package(
             ],
             swiftSettings: [
                 .interoperabilityMode(.Cxx),
-                .unsafeFlags([
-                    "-Xcc", "-I\(swiftToolchainInclude)",
-                ]),
             ],
             linkerSettings: [
                 .unsafeFlags([

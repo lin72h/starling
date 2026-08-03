@@ -33,7 +33,8 @@ shell/     DesktopShellApp package — its own CLAUDE.md in Sources/DesktopShell
 apps/      first-party apps, one SwiftPM package each
 build/     stage.sh (assembles the tree — the single definition of the layout),
            run-desktop.sh (run it), shell-drive.py (input + screenshots),
-           package-desktop.sh (Ubuntu .deb), app-run/app-install,
+           package-desktop.sh (Ubuntu .deb), session/ (the four
+           system-integration files it installs verbatim), app-run/app-install,
            tools/ (drm_screenshot), vendored flutter_assets, bundled wallpapers
            live in shell/Resources
 macos-compat/  research: running unmodified Mach-O macOS binaries on Linux.
@@ -54,7 +55,10 @@ docs/plans/    design notes, including standalone-sdk.md — the framework's
   Drive/screenshot with `sudo build/shell-drive.py …`.
 - Package: `build/package-desktop.sh` → .deb. It consumes `build/stage.sh`, which
   is the **single definition of the layout** — change assembly there, never in
-  the packager alone.
+  the packager alone. The session launcher, its `.desktop`, the polkit policy
+  and the NetworkManager drop-in are files in `build/session/`, installed
+  verbatim; edit them there and never re-inline them as heredocs, or a distro
+  package built from this tree ships a stale copy of the launcher.
 - Test: `test/run.sh` (~0.4s, no GPU — run it on every change),
   `test/run.sh --build` to compile everything and the .deb,
   `sudo test/run.sh --functional` to drive a live desktop, and `test/vm.sh`
