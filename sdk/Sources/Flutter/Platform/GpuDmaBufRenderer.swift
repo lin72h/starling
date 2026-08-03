@@ -1068,6 +1068,32 @@ public class GpuDmaBufRenderer {
             s.taskQueue.enqueue(task, targetNanos: targetTimeNanos)
         }
 
+        // 4b. UI task runner — merged onto the main thread, mirroring the
+        // shell (fl_drm_view.cc). Left null, the engine spins up its own
+        // io.flutter.ui thread and the widget pipeline runs THERE, while
+        // DispatchQueue.main closures (a pty reader's setState, timers,
+        // @MainActor continuations) run on the main thread's GCD drain —
+        // two threads mutating one widget tree. The old 100ms GCD cadence
+        // kept the overlap rare (mutation drained, then main slept while
+        // the UI thread built); prompt GCD wakeups made it a reliable
+        // segfault in swiftCore refcounting under a flooding client. Both
+        // descriptions post to the same queue and carry the same (default)
+        // identifier, which embedder.h requires of runners that service
+        // one thread.
+        var uiTaskRunner = FlutterTaskRunnerDescription()
+        uiTaskRunner.struct_size = MemoryLayout<FlutterTaskRunnerDescription>.size
+        uiTaskRunner.user_data = statePtr
+        uiTaskRunner.runs_task_on_current_thread_callback = { userData -> Bool in
+            guard let userData = userData else { return false }
+            let s = Unmanaged<GpuRendererState>.fromOpaque(userData).takeUnretainedValue()
+            return pthread_equal(pthread_self(), s.mainThreadPthread) != 0
+        }
+        uiTaskRunner.post_task_callback = { task, targetTimeNanos, userData in
+            guard let userData = userData else { return }
+            let s = Unmanaged<GpuRendererState>.fromOpaque(userData).takeUnretainedValue()
+            s.taskQueue.enqueue(task, targetNanos: targetTimeNanos)
+        }
+
         var taskRunners = FlutterCustomTaskRunners()
         taskRunners.struct_size = MemoryLayout<FlutterCustomTaskRunners>.size
 
@@ -1076,16 +1102,19 @@ public class GpuDmaBufRenderer {
         let initResult = withUnsafeMutablePointer(to: &callbacks) { cbPtr in
             withUnsafeMutablePointer(to: &platformTaskRunner) { taskRunnerPtr in
                 taskRunners.platform_task_runner = UnsafePointer(taskRunnerPtr)
-                return withUnsafeMutablePointer(to: &taskRunners) { taskRunnersPtr in
-                    args.custom_task_runners = UnsafePointer(taskRunnersPtr)
-                    return FlutterEngineInitializeSwift(
-                        Int(FLUTTER_ENGINE_VERSION),
-                        &rendererConfig,
-                        &args,
-                        statePtr,  // user_data -> passed to renderer callbacks
-                        UnsafeRawPointer(cbPtr),
-                        &eng
-                    )
+                return withUnsafeMutablePointer(to: &uiTaskRunner) { uiRunnerPtr in
+                    taskRunners.ui_task_runner = UnsafePointer(uiRunnerPtr)
+                    return withUnsafeMutablePointer(to: &taskRunners) { taskRunnersPtr in
+                        args.custom_task_runners = UnsafePointer(taskRunnersPtr)
+                        return FlutterEngineInitializeSwift(
+                            Int(FLUTTER_ENGINE_VERSION),
+                            &rendererConfig,
+                            &args,
+                            statePtr,  // user_data -> passed to renderer callbacks
+                            UnsafeRawPointer(cbPtr),
+                            &eng
+                        )
+                    }
                 }
             }
         }
@@ -1120,19 +1149,32 @@ public class GpuDmaBufRenderer {
 
         // 9. GCD main queue integration — drain DispatchQueue.main so
         // @MainActor / async-await continuations fire on the main thread.
-        // NOTE: The GCD main queue fd is always readable on Linux (libdispatch
-        // implementation detail), so we do NOT poll on it. Instead, we drain
-        // GCD on each iteration and use the task queue pipe for wakeups.
+        //
+        // The handle fd IS pollable, but it is an eventfd that the drain
+        // callback does NOT reset — only read()ing it does. Poll it without
+        // that read and it stays readable after the first drain forever,
+        // which reads as "always readable" and once demoted this loop to a
+        // 100ms timeout. That pinned every child whose repaints arrive via
+        // DispatchQueue.main.async — a pty reader thread, say — to exactly
+        // 10fps: the enqueue wakes no fd this loop polled, so each repaint
+        // sat a full timeout. Protocol: poll it, and on POLLIN read it
+        // CLEARED before the next drain — anything enqueued after the read
+        // re-signals the fd, so a wakeup can be spurious but never lost.
         typealias GCDDrainFunc = @convention(c) (UnsafeMutableRawPointer?) -> Void
+        typealias GCDHandleFunc = @convention(c) () -> Int32
         let gcdDrainSym = dlsym(nil, "_dispatch_main_queue_callback_4CF")
         let gcdDrain: GCDDrainFunc? = gcdDrainSym.map { unsafeBitCast($0, to: GCDDrainFunc.self) }
+        let gcdHandleSym = dlsym(nil, "_dispatch_get_main_queue_handle_4CF")
+        let gcdFd: Int32 = gcdHandleSym.map { unsafeBitCast($0, to: GCDHandleFunc.self)() } ?? -1
 
-        // 10. Event loop — poll on task queue pipe and parent socket
+        // 10. Event loop — poll on task queue pipe, parent socket, and the
+        // GCD main queue handle (fd -1 if unavailable; poll ignores those).
         running = true
         var pointerAdded = false
-        var pfds: (pollfd, pollfd) = (
+        var pfds: (pollfd, pollfd, pollfd) = (
             pollfd(fd: state.taskQueue.wakeupReadFd, events: Int16(POLLIN), revents: 0),
-            pollfd(fd: state.socketFd, events: Int16(POLLIN), revents: 0)
+            pollfd(fd: state.socketFd, events: Int16(POLLIN), revents: 0),
+            pollfd(fd: gcdFd, events: Int16(POLLIN), revents: 0)
         )
         while running {
             // Drain GCD main queue (@MainActor, DispatchQueue.main.async)
@@ -1155,20 +1197,28 @@ public class GpuDmaBufRenderer {
                     timeoutMs = 0
                 }
             } else {
-                timeoutMs = 100  // Idle: check GCD every 100ms
+                timeoutMs = 100  // Idle backstop; the GCD fd wakes us early
             }
 
             pfds.0.revents = 0
             pfds.1.revents = 0
+            pfds.2.revents = 0
             withUnsafeMutablePointer(to: &pfds) { ptr in
-                ptr.withMemoryRebound(to: pollfd.self, capacity: 2) { pollPtr in
-                    _ = poll(pollPtr, 2, timeoutMs)
+                ptr.withMemoryRebound(to: pollfd.self, capacity: 3) { pollPtr in
+                    _ = poll(pollPtr, 3, timeoutMs)
                 }
             }
 
             // Drain the task queue pipe
             if pfds.0.revents & Int16(POLLIN) != 0 {
                 state.taskQueue.consumeWakeup()
+            }
+
+            // Consume the GCD eventfd so it goes quiet until the next
+            // enqueue; the drain at the top of the loop does the work.
+            if pfds.2.revents & Int16(POLLIN) != 0 {
+                var v: UInt64 = 0
+                _ = Glibc.read(gcdFd, &v, 8)
             }
 
             // Parent closed the socket — exit
