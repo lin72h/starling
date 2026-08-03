@@ -322,15 +322,28 @@ static void _parse_options(sd_bus_message *m, char *handle_token, int ht_sz,
     sd_bus_message_exit_container(m);
 }
 
-static void _build_handle_path(char *buf, int bufsz, const char *sender, const char *token) {
+/// kind: "request" or "session" — the two object families the portal mints.
+/// Spec escaping: the sender's initial ':' is REMOVED (not replaced), then
+/// '.' becomes '_'. Clients derive these paths on their own to subscribe
+/// for Response BEFORE calling — with an instantly-answered method, a
+/// divergence here makes them miss the signal forever. The old ':'→'_'
+/// dialect survived in FileChooser only because its responses wait on a
+/// human, so clients had time to re-subscribe on the returned path.
+static void _build_portal_path(char *buf, int bufsz, const char *kind,
+                               const char *sender, const char *token) {
     char esc[128];
     const char *s = sender; char *d = esc;
+    if (*s == ':') s++;
     while (*s && (d - esc) < (int)sizeof(esc) - 1) {
         *d++ = (*s == '.' || *s == ':') ? '_' : *s;
         s++;
     }
     *d = 0;
-    snprintf(buf, bufsz, "/org/freedesktop/portal/desktop/request/%s/%s", esc, token);
+    snprintf(buf, bufsz, "/org/freedesktop/portal/desktop/%s/%s/%s", kind, esc, token);
+}
+
+static void _build_handle_path(char *buf, int bufsz, const char *sender, const char *token) {
+    _build_portal_path(buf, bufsz, "request", sender, token);
 }
 
 static PendingRequest *_find_free_request(PortalService *ps) {
