@@ -130,16 +130,38 @@ fi
 # than silent — a package that stops being built without saying so is how you
 # ship a desktop with a missing app.
 #
+# The same now covers apps/BlueScreenApp, which links a committed aarch64
+# libglfw and so cannot build on x86-64. Nothing here names it: drop in a
+# matching libglfw and it builds again, exactly as with libpdfium. Neither is
+# packaged (build/package-desktop.sh: both are dev and demo tools with no
+# registry record), so skipping them costs the shipped desktop nothing.
+#
 # The host's ELF machine word is read off /bin/true instead of mapping uname -m
 # to an ELF name, so this needs no architecture table either.
 elf_machine() { readelf -h "$1" 2>/dev/null | sed -n 's/^ *Machine: *//p'; }
 HOST_MACHINE="$(elf_machine /bin/true)"
 
+# Every .so a package could link against: its own vendored .deps — both the
+# .deps/<name>/lib layout ImageViewerApp uses and the flatter .deps/lib one —
+# plus any .deps directory its manifest names. That last case is what this
+# missed: apps/BlueScreenApp links -lglfw out of ../../host/.deps/lib, another
+# package's directory, so looking only under "$1"/.deps found nothing and the
+# intended skip became a hard build failure. host/.deps/lib/libglfw.so.3.4 is
+# committed as an aarch64 binary, so that is every x86-64 machine.
+vendored_libs() {
+    local pkg="$1" d
+    ls "$pkg"/.deps/*/lib/*.so "$pkg"/.deps/lib/*.so 2>/dev/null
+    grep -oE '"[^"]*\.deps[^"]*"' "$pkg/Package.swift" 2>/dev/null | tr -d '"' \
+        | sort -u | while read -r d; do
+            ls "$pkg/$d"/*.so "$pkg/$d"/lib/*.so 2>/dev/null
+        done
+}
+
 # Prints "<lib> (<its arch>, host is <ours>)" and succeeds when a vendored
 # library cannot be linked on this host; fails silently when all of them can.
 vendored_arch_mismatch() {
     local lib m
-    for lib in "$1"/.deps/*/lib/*.so; do
+    for lib in $(vendored_libs "$1" | sort -u); do
         [ -f "$lib" ] || continue
         m="$(elf_machine "$lib")"
         [ -n "$m" ] && [ -n "$HOST_MACHINE" ] && [ "$m" != "$HOST_MACHINE" ] && {
