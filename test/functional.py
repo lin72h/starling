@@ -390,6 +390,12 @@ def check_third_party_identity() -> None:
         quit_app("gimp", "gimp-3.2")
     wait_for(lambda: "gimp" not in dock(), "gimp icon to go away")
     wait_for(lambda: not apps()["gimp"]["window"], "gimp window to go away")
+    # And for the process itself. quit_app only signals, and the window and
+    # dock icon both clear the moment the surface goes — while GIMP is still
+    # tearing down. The removal check below requires it gone, so leaving that
+    # to luck makes this a timing race between two checks: it survived only
+    # while the desktop was small enough for GIMP to exit quickly.
+    wait_for(lambda: not apps()["gimp"]["process"], "gimp process to exit")
 
 
 @check("identity: a window is NOT attributed to an app that merely shares its binary")
