@@ -161,6 +161,11 @@ ENV_ARGS=(
     STARLING_DATA_DIR="$SHARE"
     FLUTTER_APPS_DIR="$LIB/apps"
     XDG_RUNTIME_DIR="$XDG"
+    # libpipewire resolves its daemon socket under XDG_RUNTIME_DIR, which
+    # the line above points at the private session dir — hand the shell the
+    # real one explicitly or ScreenCast (and any other PipeWire client in
+    # this process) finds no daemon. Guarded below: forwarded only when the
+    # socket actually exists (never as an empty string — the env-knob rule).
     STARLING_CHILD_HOST_GL=1
     STARLING_APP_RUN="$STAGE_DIR/bin/app-run"
     STARLING_WECHAT_RUN="$STAGE_DIR/bin/wechat-run"
@@ -175,6 +180,12 @@ ENV_ARGS=(
     #   sudo install -m755 .stage/bin/app-install /usr/bin/app-install
     #   sudo install -m644 registry/catalog.d/*.app /usr/share/starling/catalog.d/
 )
+
+# See the note beside XDG_RUNTIME_DIR above.
+PW_RUN="/run/user/$(id -u)"
+if [ -S "$PW_RUN/${PIPEWIRE_REMOTE:-pipewire-0}" ]; then
+    ENV_ARGS+=(PIPEWIRE_RUNTIME_DIR="$PW_RUN")
+fi
 
 # LCD subpixel text (RGB-stripe panels) + Core-Graphics-style stem darkening.
 # Default on; export either as "" (empty) to disable — the engine treats an

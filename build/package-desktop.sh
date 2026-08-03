@@ -274,7 +274,19 @@ fi
 # explicit override (dev boxes testing against seatd).
 export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-logind}"
 
+# libpipewire resolves its daemon socket under XDG_RUNTIME_DIR, which the
+# exec below overrides to the private dir. GDM handed this script the real
+# runtime dir — keep a pointer to it so the shell's ScreenCast can reach
+# the user's PipeWire daemon. Forwarded only when the socket exists, never
+# as an empty string (the env-knob rule).
+REAL_RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+PW_ENV=()
+if [ -S "$REAL_RUN/${PIPEWIRE_REMOTE:-pipewire-0}" ]; then
+    PW_ENV=(PIPEWIRE_RUNTIME_DIR="$REAL_RUN")
+fi
+
 exec env \
+    "${PW_ENV[@]}" \
     LD_LIBRARY_PATH="$LIB" \
     FLUTTER_DRM_SEAT=libseat \
     FLUTTER_ENGINE_OUT="$SHARE" \

@@ -193,7 +193,7 @@ sudo apt-get install -y \
 sudo apt-get install -y \
     libwayland-dev libxkbcommon-dev libdrm-dev libgbm-dev libegl-dev \
     libgles-dev libinput-dev libudev-dev libsystemd-dev libxshmfence-dev \
-    libx11-dev libxcb1-dev libpixman-1-dev
+    libx11-dev libxcb1-dev libpixman-1-dev libpipewire-0.3-dev
 sudo apt-get install -y \
     libavcodec-dev libavutil-dev libavformat-dev libavfilter-dev
 sudo apt-get install -y \
@@ -203,7 +203,9 @@ sudo apt-get install -y \
 First group: Swift's own prerequisites. Second: what the shell's C targets
 compile and link against — the Wayland compositor (`wayland-server`,
 `xkbcommon`), the DRM/GBM/EGL stack, `libinput`/`libudev`, sd-bus for the portal
-(`libsystemd`), and the in-tree X server's `xshmfence`. Third: the ffmpeg
+(`libsystemd`), the in-tree X server's `xshmfence`, and PipeWire for the
+portal's ScreenCast stream (linked, not dlopen'd — `libpipewire-0.3-0` is in
+every Ubuntu desktop install as the audio stack). Third: the ffmpeg
 headers the zero-copy screen recorder compiles against (`record/`'s
 `CVaapiEncoder`) — headers only; at runtime the libraries are `dlopen`'d,
 pinned to the sonames these headers describe, and their absence just means

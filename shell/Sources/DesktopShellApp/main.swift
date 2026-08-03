@@ -130,6 +130,10 @@ nonisolated(unsafe) var notificationIntegration: NotificationIntegration? = nil
 /// touching shell state is off-limits — the service is the thread-safe
 /// mailbox between the two worlds.
 nonisolated(unsafe) var recordingService: RecordingService? = nil
+/// Portal ScreenCast (screen share into Chromium/OBS/gstreamer) — a global
+/// for the same reason as recordingService: hooks land on the portal and
+/// recorder writer threads.
+nonisolated(unsafe) var screenCastService: ScreenCastService? = nil
 
 /// Current shell DPI — updated at runtime by Settings app. Read this instead
 /// of the FLUTTER_DRM_DPI env var for coordinate conversion.
@@ -592,8 +596,16 @@ func runDRM() -> Never {
     // service's mailbox and returns — nothing here may touch shell state.
     let recording = RecordingService()
     recordingService = recording
+    screenCastService = ScreenCastService()
+    // One frame sink, two consumers: the engine runs a single capture
+    // session, so each frame belongs to whichever service claimed it —
+    // a ScreenCast session routes here, everything else is a recording.
     fl_drm_view_set_record_frame_callback(view, { _, rgba, w, h, _ in
-        recordingService?.ingest(rgba, width: Int(w), height: Int(h))
+        if ScreenCastService.captureActive {
+            screenCastService?.ingest(rgba, width: Int(w), height: Int(h))
+        } else {
+            recordingService?.ingest(rgba, width: Int(w), height: Int(h))
+        }
     }, nil)
     // Zero-copy sibling: dmabuf frames on the engine's PRESENTING thread —
     // ingestDmabuf queues the frame and returns; anything heavier here
@@ -669,7 +681,18 @@ func runDRM() -> Never {
     // child window (see PortalFileChooser.swift). userdata unused — the thunk
     // reaches the shell via the _shellState global.
     portal.setChooserLauncher(portalChooserLaunchThunk, userdata: nil)
+    // ScreenCast: monitor capture into a PipeWire stream (screen share for
+    // Chromium/Electron/OBS). The completion closure is assigned before the
+    // hooks so a request cannot race the wiring; it is thread-safe.
+    screenCastService?.completeStart = { handle, node, w, h, response in
+        portalIntegration?.completeScreenCastStart(
+            handle: handle, node: node, width: w, height: h,
+            response: response)
+    }
     portalIntegration = portal
+    portal.setScreenCastHooks(start: portalScreenCastStartThunk,
+                              stop: portalScreenCastStopThunk,
+                              userdata: nil)
 
     // The notification daemon, on the same pinned bus for the same reasons.
     // The launchers mask org.freedesktop.Notifications so a stock daemon

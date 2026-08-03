@@ -657,6 +657,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 tick = true
                 recordingService?.checkWindowAlive()
             }
+            // ScreenCast rides it the same way: presents feed the PipeWire
+            // stream, and the tick observes the stop draining. Until the
+            // first frame lands it needs the full rate (see
+            // needsPrimingRebuilds); live, the floor suffices — a static
+            // desktop simply produces few frames, which is the point.
+            if screenCastService?.needsFramePump == true {
+                tick = true
+                if screenCastService?.needsPrimingRebuilds == true {
+                    rebuild = true
+                }
+                screenCastService?.pumpTick()
+            }
             #endif
             guard tick else { return }
             // The pump is a LIVENESS FLOOR, not a frame source. A present

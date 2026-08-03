@@ -1277,6 +1277,74 @@ def check_recording_motion() -> None:
             os.unlink(path)
 
 
+@check("screencast: the portal serves a live PipeWire stream")
+def check_screencast() -> None:
+    """org.freedesktop.portal.ScreenCast end to end minus the browser: the
+    session handshake on one connection, a Start whose response carries a
+    PipeWire node, and real frames pulled off that node — the interface
+    Chromium's getDisplayMedia and OBS ride on Wayland. Frames are pulled
+    twice: a count proves the stream flows, a PNG snapshot proves it
+    carries the desktop rather than black."""
+    uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    pw_dir = f"/run/user/{uid}"
+    if not os.path.exists(f"{pw_dir}/pipewire-0"):
+        raise Skip("no PipeWire daemon for the session user")
+    try:
+        import gi  # noqa: F401
+    except ImportError:
+        raise Skip("python3-gi not installed")
+    if not shutil.which("gst-launch-1.0"):
+        raise Skip("gstreamer not installed")
+
+    def as_user(cmd: list, **kw):
+        user = os.environ.get("SUDO_USER")
+        if os.geteuid() == 0 and user:
+            cmd = ["sudo", "-u", user, "env", f"PIPEWIRE_RUNTIME_DIR={pw_dir}"] + cmd
+        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+    bus = os.path.dirname(broker_path()) + "/bus"
+    r = as_user([sys.executable,
+                 str(Path(__file__).parent / "screencast_client.py"),
+                 f"unix:path={bus}"], timeout=30)
+    assert r.returncode == 0, f"portal handshake failed: {r.stderr.strip()}"
+    info = json.loads(r.stdout)
+    node, w, h = info["node"], info["width"], info["height"]
+    assert node > 0 and w > 0 and h > 0, f"bad stream: {info}"
+    log(f"stream node {node} ({w}x{h})")
+
+    # gst pulls by NODE NAME, not the id: pipewiresrc's path/target-object
+    # resolve against the object *serial*, which only coincidentally equals
+    # the id (it did once, which made this flaky instead of red). The id in
+    # the Start response stays the contract for real consumers — webrtc
+    # passes it straight to pw_stream_connect, which does take ids. The
+    # stream-properties inject the media.type gst omits and without which
+    # this distro's WirePlumber linking scripts crash ("Constraint:
+    # equals: expected constraint value") and no link is ever made.
+    gst_src = ["pipewiresrc", "target-object=starling-screencast",
+               "stream-properties=props,media.type=Video,"
+               "media.category=Capture,media.role=Screen"]
+    try:
+        pull = as_user(["gst-launch-1.0", "-q"] + gst_src +
+                       ["num-buffers=5", "!", "fakesink"], timeout=30)
+        assert pull.returncode == 0, \
+            f"no frames from node {node}: {pull.stderr.strip()}"
+        with tempfile.TemporaryDirectory() as d:
+            png = f"{d}/frame.png"
+            snap = as_user(["gst-launch-1.0", "-q"] + gst_src +
+                           ["num-buffers=1", "!",
+                            "videoconvert", "!", "pngenc", "!",
+                            "filesink", f"location={png}"], timeout=30)
+            assert snap.returncode == 0, f"snapshot failed: {snap.stderr.strip()}"
+            size = os.path.getsize(png)
+            # A black 1080p frame zips into a few KB of PNG; the desktop
+            # (wallpaper, dock, glass) cannot.
+            assert size > 30000, f"snapshot is {size}B of PNG — a blank stream"
+            log(f"5 buffers pulled, snapshot {size} bytes")
+    finally:
+        session_busctl("call", "org.freedesktop.portal.Desktop", info["session"],
+                       "org.freedesktop.portal.Session", "Close")
+
+
 CHECKS = [v for v in dict(globals()).values()
           if callable(v) and hasattr(v, "_check_name")]
 

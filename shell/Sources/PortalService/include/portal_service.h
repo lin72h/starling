@@ -92,6 +92,37 @@ void portal_service_set_color_scheme(PortalService *ps, uint32_t scheme);
 void portal_service_set_accent_color(PortalService *ps, double r, double g, double b);
 void portal_service_set_contrast(PortalService *ps, uint32_t contrast);
 
+// --- ScreenCast (org.freedesktop.portal.ScreenCast) ---
+//
+// One session at a time: the shell has one screen and one capture
+// pipeline, and a new CreateSession replaces (and Closes) the previous
+// session. Start is asynchronous like the file chooser: the hook returns
+// immediately and the shell later delivers the PipeWire node through
+// portal_service_complete_screencast_start.
+
+/// Start the capture and stand up the PipeWire stream. Portal thread.
+/// Return 0 if the start is under way (complete later with `handle`),
+/// negative to fail the request immediately.
+typedef int (*portal_screencast_start_fn)(void *userdata, const char *handle);
+
+/// The session ended (client Closed it, or a new session replaced it).
+/// Portal thread. Stop the capture and free the stream.
+typedef void (*portal_screencast_stop_fn)(void *userdata);
+
+void portal_service_set_screencast_hooks(PortalService *ps,
+                                         portal_screencast_start_fn start,
+                                         portal_screencast_stop_fn stop,
+                                         void *userdata);
+
+/// Deliver the result of an async ScreenCast start. Thread-safe.
+/// response: 0 = success (node_id/width/height describe the live stream),
+/// 2 = the capture could not start.
+void portal_service_complete_screencast_start(PortalService *ps,
+                                              const char *handle,
+                                              uint32_t node_id,
+                                              uint32_t width, uint32_t height,
+                                              unsigned int response);
+
 #ifdef __cplusplus
 }
 #endif

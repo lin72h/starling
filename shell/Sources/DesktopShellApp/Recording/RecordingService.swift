@@ -288,6 +288,11 @@ final class RecordingService {
                windowAlive alive: (() -> Bool)? = nil,
                windowLabel label: String? = nil) {
         guard state == .idle else { return }
+        // The engine runs one capture session; a live screen share owns it.
+        guard !ScreenCastService.captureActive else {
+            onFinished?(nil, "screen sharing is using the capture")
+            return
+        }
         guard let view = drmViewHandle else {
             onFinished?(nil, "no display")
             return

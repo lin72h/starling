@@ -80,6 +80,7 @@ let shellDeps: [Target.Dependency] = [
     "WaylandServerBridge",
     "X11Server",
     "PortalService",
+    "PipeWireCast",
     "NotificationService",
     "ImeBridge",
     .product(name: "StarlingRegistry", package: "StarlingRegistry"),
@@ -147,6 +148,22 @@ targets += [
         linkerSettings: [
             .linkedLibrary(sdbusLib),
         ] + (starlingDeploy.map { [.unsafeFlags(["-L\($0)/lib"])] } ?? [])
+    ),
+    // PipeWire video-source stream — the producer half of portal ScreenCast.
+    // Linked, not dlopen'd: libpipewire-0.3-0 ships in every Ubuntu desktop
+    // install (it is the audio stack), unlike the libav* soft deps.
+    .target(
+        name: "PipeWireCast",
+        path: "Sources/PipeWireCast",
+        publicHeadersPath: "include",
+        cSettings: [
+            .define("_GNU_SOURCE"),
+            .unsafeFlags(["-I/usr/include/pipewire-0.3",
+                          "-I/usr/include/spa-0.2"]),
+        ],
+        linkerSettings: [
+            .linkedLibrary("pipewire-0.3"),
+        ]
     ),
     // Notification daemon (org.freedesktop.Notifications) using sd-bus
     .target(

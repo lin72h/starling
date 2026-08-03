@@ -49,6 +49,28 @@ final class PortalIntegration {
         portal_service_stop(s)
     }
 
+    // MARK: - ScreenCast
+
+    /// Register the ScreenCast start/stop hooks (called on the portal
+    /// thread; see ScreenCastService).
+    func setScreenCastHooks(start: @escaping portal_screencast_start_fn,
+                            stop: @escaping portal_screencast_stop_fn,
+                            userdata: UnsafeMutableRawPointer?) {
+        guard let s = service else { return }
+        portal_service_set_screencast_hooks(s, start, stop, userdata)
+    }
+
+    /// Deliver an async ScreenCast start result. Emits the D-Bus Response
+    /// (with the stream's PipeWire node on success) on the portal thread.
+    /// `response`: 0 = success, 2 = failed. Thread-safe.
+    func completeScreenCastStart(handle: String, node: UInt32,
+                                 width: UInt32, height: UInt32,
+                                 response: UInt32) {
+        guard let s = service else { return }
+        portal_service_complete_screencast_start(s, handle, node,
+                                                 width, height, response)
+    }
+
     // MARK: - Settings
 
     func setColorScheme(_ scheme: UInt32) {
