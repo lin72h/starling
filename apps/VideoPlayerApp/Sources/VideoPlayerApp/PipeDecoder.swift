@@ -9,9 +9,11 @@ import Glibc
 // Video decoding through a SPAWNED ffmpeg — nothing here links libav (the
 // linked decoder was removed in ade2f64 for the GPL it dragged in; the
 // process boundary is the point). ffprobe answers the metadata, then one
-// ffmpeg per playback run streams raw RGBA frames down a pipe at realtime
-// pace (-re). Pause and seek are "kill it, respawn at the position" — no
-// codec state to manage, and a fresh -ss lands on a keyframe.
+// ffmpeg per playback run streams raw RGBA frames down a pipe as fast as
+// the reader drains it — the reader paces (not -re; see init). The pipe is
+// forced to exact CFR at info.fps so pacing frame counts IS pacing time.
+// Pause and seek are "kill it, respawn at the position" — no codec state
+// to manage, and a fresh -ss lands on a keyframe.
 
 struct VideoInfo {
     var width = 0
@@ -45,7 +47,7 @@ final class PipeDecoder: @unchecked Sendable {
         p.executableURL = URL(fileURLWithPath: ffprobe)
         p.arguments = [
             "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,avg_frame_rate:format=duration",
+            "-show_entries", "stream=width,height,r_frame_rate:format=duration",
             "-of", "json", path,
         ]
         let out = Pipe()
@@ -64,10 +66,22 @@ final class PipeDecoder: @unchecked Sendable {
         else { return nil }
 
         var info = VideoInfo(width: w, height: h)
-        if let rate = v["avg_frame_rate"] as? String {
+        // The PLAYBACK rate, and it must match what the decode pipe carries.
+        // This was avg_frame_rate, and on the desktop's own screen
+        // recordings — VFR files whose encoder skips unchanged frames, so
+        // 54 real frames can span a 24s timeline — avg comes out at ~2fps
+        // while ffmpeg's rawvideo output pads to CFR at r_frame_rate (60).
+        // Pacing a 60fps pipe at 2fps played the file in 26x slow motion:
+        // the position clock looked right while the picture sat on the
+        // first frame — "the recording is frozen", except the file was
+        // fine. r_frame_rate is the rate the pipe actually ticks at; the
+        // spawn below forces exactly this rate with -vf fps= so the two
+        // can never disagree again, and the cap keeps a 2560x1600 RGBA
+        // pipe (8MB a frame) inside what a desktop player needs.
+        if let rate = v["r_frame_rate"] as? String {
             let parts = rate.split(separator: "/").compactMap { Double($0) }
             if parts.count == 2, parts[1] > 0, parts[0] > 0 {
-                info.fps = min(120, max(1, parts[0] / parts[1]))
+                info.fps = min(30, max(1, parts[0] / parts[1]))
             }
         }
         if let fmt = root["format"] as? [String: Any],
@@ -96,6 +110,10 @@ final class PipeDecoder: @unchecked Sendable {
             "-hide_banner", "-loglevel", "error",
             "-ss", String(format: "%.3f", startPosition),
             "-i", path,
+            // Exact CFR at the rate the reader paces (info.fps — see probe).
+            // Without this the rawvideo muxer picks its own CFR rate, and a
+            // reader pacing at a different one plays fast or frozen-slow.
+            "-vf", String(format: "fps=%.4f", info.fps),
             "-f", "rawvideo", "-pix_fmt", "rgba", "-an",
             "pipe:1",
         ]
