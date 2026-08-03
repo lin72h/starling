@@ -364,18 +364,26 @@ func drmOutputsChanged() {
         // Always re-advertise on hotplug — shrinking back to one output
         // must reach clients too.
         waylandIntegration?.setOutputs(dl.outputs)
-        // Windows stranded on an unplugged output come home to the primary
-        // (macOS behavior), keeping their size.
+        // Windows stranded on an unplugged output come home (macOS behavior),
+        // keeping their size. "Stranded" is a matter of degree, not of bare
+        // intersection: a window that straddled the boundary still overlaps the
+        // surviving output, and testing only for zero intersection left it
+        // exactly where it was, with most of its area off the desktop.
+        //
+        // Home is the output it most belongs to among the survivors, not always
+        // the primary — a straddling window stays on the monitor it was mostly
+        // on. owningOutput falls back to the primary when nothing overlaps,
+        // which is the fully-stranded case.
         if let shell = _shellState {
             for win in shell.windowManager.visibleWindows
-            where dl.outputs(intersectingRect: win.rect).isEmpty {
-                let p = dl.primary
+            where dl.visibleFraction(ofRect: win.rect) < DisplayLayout.minVisibleFractionToStay {
+                let home = dl.owningOutput(ofRect: win.rect)
                 let w = win.rect.width
                 let h = win.rect.height
-                let nx = min(max(win.rect.left, p.logicalLeft),
-                             max(p.logicalLeft, p.logicalRight - w))
-                let ny = min(max(win.rect.top, p.logicalTop),
-                             max(p.logicalTop, p.logicalBottom - h))
+                let nx = min(max(win.rect.left, home.logicalLeft),
+                             max(home.logicalLeft, home.logicalRight - w))
+                let ny = min(max(win.rect.top, home.logicalTop),
+                             max(home.logicalTop, home.logicalBottom - h))
                 win.rect = Rect.fromLTWH(nx, ny, w, h)
             }
         }

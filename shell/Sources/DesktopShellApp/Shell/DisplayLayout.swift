@@ -109,6 +109,30 @@ final class DisplayLayout {
         }
     }
 
+    /// A window keeps its place across a layout change only when at least this
+    /// much of it is still on the visible desktop. Necessarily above 0.5: a
+    /// window split evenly across two outputs has to come home when one of them
+    /// is unplugged, and that is the case bare intersection got wrong.
+    static let minVisibleFractionToStay = 0.75
+
+    /// The fraction of `rect`'s area that lands on the visible desktop, 0…1.
+    ///
+    /// Outputs never overlap — the layout arranges them side by side from the
+    /// engine's enumeration — so per-output intersections sum without double
+    /// counting. Clamped anyway, so an overlapping arrangement would degrade to
+    /// "fully visible" rather than to a fraction above 1.
+    func visibleFraction(ofRect rect: Rect) -> Double {
+        let area = rect.width * rect.height
+        guard area > 0 else { return 0 }
+        var covered = 0.0
+        for o in outputs {
+            let w = max(0.0, min(o.logicalRight, rect.right) - max(o.logicalLeft, rect.left))
+            let h = max(0.0, min(o.logicalBottom, rect.bottom) - max(o.logicalTop, rect.top))
+            covered += w * h
+        }
+        return min(1.0, covered / area)
+    }
+
     /// Keep the primary output's scale in step with a runtime DPI change
     /// (Settings app). Per-output scale for real multi-monitor comes later.
     func updatePrimaryScale(_ scale: Double) {

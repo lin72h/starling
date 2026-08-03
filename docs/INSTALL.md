@@ -179,6 +179,20 @@ bundle them. Install them through the **App Store** (which uses your system's
 `apt`), or with your distribution's own packaging. See the
 [User Guide](USER_GUIDE.md#installing-more-apps).
 
+### Zoom starts but has no audio
+
+Expected in this release — and the obvious fix makes it worse. Zoom reports
+`no pactl and pacmd found` because `pactl` is deliberately not installed: Zoom
+segfaults during audio init whenever `pactl` is on PATH on a PipeWire system
+with no native PulseAudio daemon, which is the stock Ubuntu 26.04 arrangement.
+
+**Do not `apt install pulseaudio-utils`.** With `pactl` absent, Zoom skips audio
+and runs normally; with it present, Zoom crashes at startup, and setting
+`PULSE_SERVER` does not help.
+
+Sound in other apps is unaffected — Chrome, Slack and Teams reach the host's
+PipeWire/PulseAudio socket normally.
+
 ### Getting a clean log for a bug report
 
 ```bash
