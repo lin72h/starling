@@ -1254,10 +1254,19 @@ public class GpuDmaBufRenderer {
                             // Update the Swift framework's view metrics so the widget
                             // tree re-layouts at the new size. This also triggers
                             // onMetricsChanged → scheduleFrame().
+                            //
+                            // devicePixelRatio must travel with the size:
+                            // ViewConfiguration defaults it to 1.0, so leaving
+                            // it out silently reset a 2x view to 1x on every
+                            // resize — the app relaid out at physical==logical
+                            // and rendered half-size after fullscreen/maximize/
+                            // drag-resize. Invisible on a 1x panel, where the
+                            // default happens to be right.
                             let newSize = Size(Double(physW), Double(physH))
                             PlatformDispatcher.instance._updateWindowMetrics(
                                 0,
                                 ViewConfiguration(
+                                    devicePixelRatio: pixelRatio,
                                     size: newSize,
                                     viewConstraints: ViewConstraints(tight: newSize)
                                 )
@@ -1304,6 +1313,7 @@ public class GpuDmaBufRenderer {
                                 PlatformDispatcher.instance._updateWindowMetrics(
                                     0,
                                     ViewConfiguration(
+                                        devicePixelRatio: newDpi,
                                         size: newSize,
                                         viewConstraints: ViewConstraints(tight: newSize)
                                     )

@@ -166,7 +166,24 @@ class DesktopWindow: StatelessWidget {
             // Fullscreen: content fills the whole window. The title bar
             // overlays at the top only while the shell is revealing the
             // system status bar (cursor in the top edge of the screen).
+            //
+            // The backing is the OPAQUE version of the window material.
+            // Windowed content sits on the liquid-glass backdrop below;
+            // fullscreen rightly skips that blur (nothing meaningful to
+            // frost), but skipping the backing entirely let every
+            // translucent app surface composite straight onto the
+            // wallpaper — a fullscreen window looked like a ghost of
+            // itself. macOS resolves fullscreen materials against an
+            // opaque base; do the same with the glass tint at full alpha.
+            let tint = shellTheme.windowGlassTint
+            let opaqueBase = Color(
+                alpha: 1.0, red: tint.r, green: tint.g, blue: tint.b)
             var bodyChildren: [Widget] = [
+                Positioned(
+                    fill: (),
+                    child: ColoredBox(
+                        color: opaqueBase, child: SizedBox(expand: ()))
+                ),
                 Positioned(
                     fill: (),
                     child: ClipRect(child: _buildContentArea(context))
