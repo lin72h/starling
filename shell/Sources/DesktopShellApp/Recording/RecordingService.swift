@@ -174,6 +174,22 @@ final class RecordingService {
         mailboxLock.unlock()
     }
 
+    // MARK: Source damage (any thread, from the texture registry)
+
+    /// The texture an app recording is capturing, or -1. Read from
+    /// whatever thread refreshes a texture, so it is a plain global rather
+    /// than shell state: a stale read costs one keepalive frame, nothing
+    /// more. Written on main at session start/end.
+    nonisolated(unsafe) private(set) static var recordedTextureId: Int64 = -1
+
+    /// A window's texture got new content. When it is the one being
+    /// recorded, tell the engine — between commits the capture skips
+    /// presents instead of encoding identical frames (fl_drm_view.h).
+    static func noteSourceContentChanged(textureId: Int64) {
+        guard textureId == recordedTextureId else { return }
+        fl_drm_view_recording_notify_source_changed()
+    }
+
     // MARK: Frame ingest, zero-copy (engine PRESENTING thread — queue and go)
 
     func ingestDmabuf(_ frame: FlDrmRecordDmabufFrame) {
@@ -348,6 +364,7 @@ final class RecordingService {
         sessionGen += 1
         self.windowAlive = alive
         self.windowLabel = label
+        Self.recordedTextureId = texture ?? -1
         state = .starting
         startedAt = Date()
         if let texture {
@@ -460,6 +477,7 @@ final class RecordingService {
                 self.windowAlive = nil
                 self.windowLabel = nil
                 self.sessionURL = nil
+                Self.recordedTextureId = -1
                 if saved != nil { self.lastSavedPath = saved }
                 self.onChange?()
                 self.onFinished?(saved, detail)

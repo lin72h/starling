@@ -11,6 +11,7 @@ import StarlingPower
 import StarlingAudio
 #if os(Linux)
 import FlutterDRMBridge  // fl_drm_view_capture_active (X11 GetImage present pump)
+import FlutterEmbedderBridge  // FlutterEngineScheduleFrame (frame-pump ticks)
 #endif
 
 /// Called from main.swift after waylandIntegration is set.
@@ -432,6 +433,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // exactly once, inside the exposé. Stored here (not in the extension)
     // because Swift extensions cannot add stored properties; the UI lives
     // in MissionControl.swift.
+    /// Frame-pump tick counter — see the frame-tick timer. The pump is a
+    /// liveness floor: it forces a rebuild every `kPumpFloorTicks` ticks
+    /// (33ms each) and otherwise stays out of the way so content-driven
+    /// presents get the pipeline.
+    var _pumpTicks = 0
+    /// ~250ms. Long enough that a rebuild (~100ms at 4K) is not always in
+    /// flight, short enough that a stop request is consumed promptly.
+    static let kPumpFloorTicks = 8
+
     var _missionControlOpen = false
     var _mcOpenController: AnimationController?
     var _mcOpenCurve: CurvedAnimation?
@@ -623,12 +633,21 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                        repeating: .milliseconds(33))
         timer.setEventHandler { [weak self] in
             var tick = false
+            var rebuild = false
             if _DesktopShellState._frameTickRequested != 0 {
                 _DesktopShellState._frameTickRequested = 0
                 tick = true
+                rebuild = true
             }
             #if os(Linux)
-            if fl_drm_view_capture_active() != 0 { tick = true }
+            // X11 GetImage (Zoom screen share) reads a CPU mirror refreshed
+            // per present and has no timeline of its own — a slow floor
+            // would show the far end a 4fps desktop, so that path keeps the
+            // full-rate rebuild it was written for.
+            if fl_drm_view_capture_active() != 0 {
+                tick = true
+                rebuild = true
+            }
             // Recording rides the same pump: presents carry the engine's
             // start/stop requests AND feed the frame mailbox, so it runs
             // from the start tap until the engine confirms the stop. An
@@ -638,7 +657,22 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 recordingService?.checkWindowAlive()
             }
             #endif
-            if tick { self?.setState { self?._frameTick += 1 } }
+            guard tick else { return }
+            // The pump is a LIVENESS FLOOR, not a frame source. A present
+            // only happens when the tree is dirty, and a full rebuild of
+            // the 4K desktop takes ~100ms — so asking for one every 33ms
+            // does not produce 30fps, it saturates the pipeline with
+            // rebuilds and starves the presents that real content (a
+            // client committing a new buffer) would otherwise drive. That
+            // is what pinned recordings to exactly 10fps whatever they
+            // captured. Ticking the floor slowly leaves the pipeline free
+            // for content-driven presents, and an idle desktop still gets
+            // refreshed often enough to carry start/stop requests and keep
+            // the recording indicator's clock counting.
+            self?._pumpTicks += 1
+            if rebuild || (self?._pumpTicks ?? 0) % Self.kPumpFloorTicks == 0 {
+                self?.setState { self?._frameTick += 1 }
+            }
         }
         timer.resume()
         _frameTickTimer = timer

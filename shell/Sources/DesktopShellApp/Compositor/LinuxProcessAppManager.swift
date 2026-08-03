@@ -571,6 +571,12 @@ class LinuxProcessAppManager {
                     }
                     if frameTexId != 0 {
                         pendingDmaBufFrames.withLock { $0.append(frameTexId) }
+                        // A first-party child renders into ONE gbm_bo for
+                        // its whole life — the buffer is imported once and
+                        // never again, so this signal is the only evidence
+                        // its pixels changed. An app recording needs it.
+                        RecordingService.noteSourceContentChanged(
+                            textureId: frameTexId)
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     }
                 }

@@ -323,6 +323,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         entry.dmaModifier = modifier
         entry.dirty = true
         lock.unlock()
+        RecordingService.noteSourceContentChanged(textureId: id)
 
         FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
         FlutterEngineScheduleFrame(engine)
@@ -375,6 +376,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         entry.dmaModifier = modifier
         entry.dirty = true
         lock.unlock()
+        RecordingService.noteSourceContentChanged(textureId: id)
 
         FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
         FlutterEngineScheduleFrame(engine)
@@ -412,6 +414,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         entry.pixelData?.copyMemory(from: data, byteCount: byteCount)
         entry.dirty = true
         lock.unlock()
+        RecordingService.noteSourceContentChanged(textureId: id)
 
         // Tell the rasterizer the texture has new content (clears cached image).
         FlutterEngineMarkExternalTextureFrameAvailable(engine, id)

@@ -30,6 +30,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -1185,6 +1186,92 @@ def check_record_app_picker() -> None:
             f"recorded {w}x{h} does not look like a window on {pw}x{ph}"
         log(f"picked '{label}', {codec} {w}x{h}, "
             f"{os.path.getsize(path)} bytes")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+def _motion(path: str, sample_fps: int = 4) -> tuple[int, int, float]:
+    """Sample a recording across its whole length and report how many
+    consecutive sampled pairs actually differ. A file can be perfectly
+    valid — right codec, right size, decodable — and still be a still
+    image; only this catches that. Returns (moved, pairs, max_diff)."""
+    with tempfile.TemporaryDirectory() as d:
+        rc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path, "-vf", f"fps={sample_fps}",
+             f"{d}/f%04d.png"], capture_output=True, text=True)
+        assert rc.returncode == 0, f"ffmpeg could not decode {path}: {rc.stderr}"
+        frames = sorted(Path(d).iterdir())
+        assert len(frames) >= 3, f"only {len(frames)} frames sampled from {path}"
+        # Mean absolute difference per pair, computed without numpy/PIL:
+        # ffmpeg's own signalstats would need a filter build, so compare the
+        # raw PNG bytes decoded to grayscale via ffmpeg one pair at a time.
+        diffs = []
+        for a, b in zip(frames, frames[1:]):
+            out = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", str(a), "-i", str(b),
+                 "-filter_complex", "blend=all_mode=difference,signalstats,"
+                 "metadata=print:key=lavfi.signalstats.YAVG:file=-",
+                 "-f", "null", "-"], capture_output=True, text=True)
+            val = 0.0
+            for line in out.stdout.splitlines():
+                if "YAVG" in line:
+                    val = float(line.rsplit("=", 1)[1])
+            diffs.append(val)
+        moved = sum(1 for v in diffs if v > 0.5)
+        return moved, len(diffs), max(diffs)
+
+
+@check("recording: the footage actually moves")
+def check_recording_motion() -> None:
+    """A recording of a changing screen must contain changing frames. This
+    is the check that a frozen or barely-ticking capture fails: the earlier
+    checks all pass on a still image, which is exactly how a capture bug
+    once shipped looking green. Drives continuously-changing content (a
+    terminal streaming random hex), records the screen, and requires most
+    sampled pairs to differ."""
+    rec = lambda: ask("recording_state")
+    if not rec()["available"]:
+        raise Skip("no ffmpeg on this machine")
+    assert rec()["state"] == "idle", f"a recording is already {rec()['state']}"
+
+    drive("dock terminal", "click")
+    time.sleep(5)
+    # Random hex: every line differs, so a repeated frame is unambiguous.
+    drive("type while true; do head -c 1200 /dev/urandom | xxd | head -30; done")
+    drive("key enter")
+    time.sleep(3)
+    try:
+        drive("key ctrl+shift+r")
+        wait_for(lambda: rec()["state"] == "recording", "the first frame")
+        time.sleep(8)
+        drive("key ctrl+shift+r")
+        wait_for(lambda: rec()["state"] == "idle", "the encode to finalize")
+    finally:
+        if rec()["state"] not in ("idle", "stopping"):
+            drive("key ctrl+shift+r")
+        drive("key ctrl+c")  # stop the flood
+        subprocess.run(["pkill", "-x", "TerminalApp"], capture_output=True)
+
+    path = rec()["last_file"]
+    assert path, "the shell reports no saved file"
+    try:
+        moved, pairs, peak = _motion(path)
+        # The desktop cannot always hit the sample rate, but a recording of
+        # a continuously-changing screen must be moving most of the time.
+        assert moved >= pairs * 0.6, (
+            f"only {moved}/{pairs} sampled pairs differ (peak {peak:.1f}) — "
+            f"the recording is frozen or badly under-sampling motion")
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path], capture_output=True, text=True).stdout)
+        nframes = len(subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+            capture_output=True, text=True).stdout.split())
+        fps = nframes / dur if dur else 0
+        assert fps >= 12, f"recorded at {fps:.1f}fps — too choppy to watch"
+        log(f"{moved}/{pairs} pairs moving, {fps:.1f}fps, peak diff {peak:.1f}")
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)
