@@ -246,16 +246,30 @@ step "power menu: Shut Down from the UI actually powers the machine off"
 # from the UI, sight unseen.
 #
 # Coordinates are physical pixels at the harness's fixed 1280x800, measured
-# 2026-07-31 (icon 1222,32; "Shut Down…" row 967,336; confirm button
-# 1114,248). All three confirm prompts are single-line by an invariant
+# 2026-08-03 (icon 1252,17; "Shut Down…" row 1123,165; confirm button
+# 1197,121). All three confirm prompts are single-line by an invariant
 # documented on PowerAction.prompt, so every confirm panel shares this
 # geometry — a prompt that wraps moves the buttons and breaks it. A layout
 # change that moves them makes the clicks land elsewhere, the guest stays up,
 # and this step fails loudly — the coordinates cannot rot in silence.
+#
+# Physical pixels means these are only valid at the scale the session chose:
+# the previous set was measured while the shell assumed 2.0 on every panel,
+# and deriving it from the display (1.0 here) moved every one of them. So
+# check the scale first and say so, rather than clicking blind and reporting
+# the shutdown as broken.
+expected_scale=1.0
+got_scale=$(ssh_vm 'grep -ho "scale [0-9.]* for" /tmp/starling-session-*.log \
+                    | head -1 | cut -d" " -f2' 2>/dev/null | tr -d '\r')
+[ "$got_scale" = "$expected_scale" ] || fail "the session is running at scale
+      ${got_scale:-unknown}, but the power-menu coordinates below were measured
+      at $expected_scale — re-measure them against a live desktop (gshot.py)
+      before trusting this step"
+
 click() { (cd "$VM" && python3 qmp-abs-click.py "$1" "$2" 1280 800 >/dev/null); }
-click 1222 32;  sleep 2   # power icon -> menu
-click 967  336; sleep 2   # Shut Down… -> confirm panel
-click 1114 248            # confirm Shut Down
+click 1252 17;  sleep 2   # power icon -> menu
+click 1123 165; sleep 2   # Shut Down… -> confirm panel
+click 1197 121            # confirm Shut Down
 echo -n "waiting for the guest to power itself off"
 # 120s, not 60: this pass runs on llvmpipe, and a software-GL session takes
 # its time tearing down — one run shut down correctly but crossed the line
