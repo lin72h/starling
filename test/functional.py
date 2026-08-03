@@ -1329,6 +1329,9 @@ def check_screencast() -> None:
         assert pull.returncode == 0, \
             f"no frames from node {node}: {pull.stderr.strip()}"
         with tempfile.TemporaryDirectory() as d:
+            # The tier runs as root but gst runs as the session user, who
+            # must be able to create the file in this directory.
+            os.chmod(d, 0o777)
             png = f"{d}/frame.png"
             snap = as_user(["gst-launch-1.0", "-q"] + gst_src +
                            ["num-buffers=1", "!",

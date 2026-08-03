@@ -158,6 +158,10 @@ step "functional checks, against the installed .deb"
 # behaviours under test, not a precondition. This is the tier to do it in: a
 # clean snapshot, and a machine whose software we are free to change.
 "$VM/scp-vm.sh" "$REPO/test/functional.py" '~/' >/dev/null
+# The screencast check shells out to its portal client, resolved beside
+# functional.py — forget this file and the check fails as "portal handshake
+# failed" with a python traceback about a missing script.
+"$VM/scp-vm.sh" "$REPO/test/screencast_client.py" '~/' >/dev/null
 "$VM/scp-vm.sh" "$REPO/build/shell-drive.py" '~/' >/dev/null
 ssh_vm 'mkdir -p ~/fixtures'
 for f in "$REPO"/test/fixtures/*.app; do
