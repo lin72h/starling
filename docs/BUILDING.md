@@ -9,6 +9,13 @@ Verified end to end on **2026-07-25** on a fresh **Ubuntu 26.04 LTS (resolute)**
 toolchain of any kind installed, and finishing with the desktop running on DRM
 and an app window compositing.
 
+Re-verified on **2026-08-02** on real hardware (a Lenovo laptop, 16 threads,
+14 GB RAM, AMD Radeon 680M driving the panel), through the live-desktop tier:
+`sudo test/run.sh --functional` passed 17 checks. The times below assume an
+otherwise-idle machine; they stretch considerably if you overlap the steps.
+The fourth package group in §2.1 came out of that run — every one of those
+failures happens after a completely successful build.
+
 | step | wall clock | disk |
 |---|---|---|
 | `gclient sync` (engine DEPS) | 25 min | 29 GB |
@@ -46,18 +53,19 @@ nothing extra to type. What they are and why is in
   means re-running `gn gen`, a full ~4400-step rebuild per config, and
   relinking every Swift binary.
 
-The three repos sit side by side, which is what `bootstrap.sh` expects:
+The two repos sit side by side, which is what `bootstrap.sh` expects:
 
 ```
 ~/dev/starling-build/
     starling-engine/     the C++ half (also the flutter monorepo root)
-    flutter-swift/       the Flutter→Swift framework port (SwiftPM "FlutterSwift")
-    starling/            the desktop — shell, compositor, apps, packaging
+    starling/            the desktop — shell, compositor, apps, packaging,
+                         and sdk/ (the Flutter→Swift framework, in-tree)
 ```
 
-`bootstrap.sh` makes `starling/engine` and `starling/sdk` symlinks into the
-first two, so every manifest in the desktop can say `../engine` and `../../sdk`
-without hardcoding where you cloned things.
+`bootstrap.sh` makes one symlink, `starling/engine`, so every manifest in the
+desktop can say `../engine` without hardcoding where you cloned things. The
+framework needs no symlink: it lives in this repo at `sdk/`, folded back from
+the separate `flutter-swift` checkout as a git subtree in 2026-08.
 
 ---
 
@@ -188,6 +196,8 @@ sudo apt-get install -y \
     libx11-dev libxcb1-dev libpixman-1-dev
 sudo apt-get install -y \
     libavcodec-dev libavutil-dev libavformat-dev libavfilter-dev
+sudo apt-get install -y \
+    netpbm ffmpeg mesa-va-drivers seatd
 ```
 
 First group: Swift's own prerequisites. Second: what the shell's C targets
@@ -198,6 +208,24 @@ headers the zero-copy screen recorder compiles against (`record/`'s
 `CVaapiEncoder`) — headers only; at runtime the libraries are `dlopen`'d,
 pinned to the sonames these headers describe, and their absence just means
 recording falls back to piping frames to the `ffmpeg` binary.
+
+Fourth: nothing compiles against these, so the build succeeds without them and
+each one instead fails later, at run time, in a way that does not name the
+missing package:
+
+- **`netpbm`** — `build/shell-drive.py` shells out to `pnmtopng` to turn the
+  shell's `.ppm` dump into a PNG. Without it every `shot` dies with a bare
+  `FileNotFoundError: 'pnmtopng'` after the screenshot was already captured.
+- **`ffmpeg`** — the *binary*, which is a separate thing from the `-dev`
+  headers above. It is the recorder's pipe fallback, and
+  `shell-drive.py`'s `record-stop` also uses it. Missing, the shell logs
+  `[Recording] no VAAPI encoder — software x264, large screens capture at half
+  size`, which reads like a GPU problem but only means the fallback encoder
+  is not installed.
+- **`mesa-va-drivers`** — VAAPI itself. Without it there is no hardware
+  encoder at all and the zero-copy recording path silently degrades.
+- **`seatd`** — lets the shell take the seat with no sudo, which is the
+  shipping model; see §3.
 
 ### 2.2 Swift 6.2.4, at exactly the right path
 
@@ -295,6 +323,23 @@ sudo fuser -v /dev/dri/card*                 # expect nothing
 Seat access is automatic: libseat (seatd or logind, no sudo — the shipping
 model) when a seat manager is reachable, else a root device open via sudo.
 
+Two group memberships make the no-sudo path work, and both matter only in the
+dev loop, where the display manager is stopped and you are typically on SSH.
+A real session gets each of these from logind as an ACL on the device; an SSH
+session is not seat-active, so it gets neither and falls back to group
+permissions:
+
+```bash
+sudo usermod -aG video,render "$USER"        # log in again to pick them up
+```
+
+`video` reaches `/run/seatd.sock` (`root:video`), without which `run-desktop.sh`
+drops to the sudo path. `render` reaches `/dev/dri/renderD*` (`root:render`),
+which the shell opens **directly** to probe for an in-process VAAPI encoder —
+so without it recording loses the zero-copy path even with `mesa-va-drivers`
+installed. Confirm with `getfacl /dev/dri/renderD129`: if no `user:<you>` entry
+appears, the group is the only thing granting access.
+
 Drive it and take screenshots without touching a keyboard:
 
 ```bash
@@ -302,6 +347,20 @@ sudo build/shell-drive.py "click 1125 1035" "shot /tmp/x.png"
 ```
 
 Note the quoting: each action **and its arguments** is one argv entry.
+
+**`shell-drive.py` speaks logical coordinates; screenshots come out physical.**
+The virtual pointer is built against `SCREEN_W_PHYS / DPI`, so on a HiDPI panel
+(2560x1600 at scale 2 = logical 1280x800) a point read off a screenshot must be
+**halved** before you click it. Getting this wrong does not fail: the click just
+lands at 2x the intended spot, usually off-screen, and the feature under test
+looks broken. Avoid the conversion entirely where you can — `"dock ?"` lists
+every dock icon's real centre, as the dock is laid out right now, and
+`"dock calculator"` clicks one by name:
+
+```bash
+sudo build/shell-drive.py "dock ?"
+sudo build/shell-drive.py "dock calculator" "sleep 2" "shot /tmp/x.png"
+```
 
 ---
 
@@ -404,3 +463,27 @@ rm -rf ~/.cache/clang
   and the next run listens on `wayland-1`; clients must use the socket from the
   current run's `wayland_server: listening on wayland-N` log line.
 - `pkill -f <word>` matches its own `bash -c` line — use `pkill -x`.
+- **On a dual-GPU laptop the VAAPI probe fails once, harmlessly.** The shell
+  probes every render node, so a machine with a discrete card on `nouveau`
+  alongside the iGPU logs
+  `libva: nouveau_drv_video.so init failed` / `Failed to initialise VAAPI
+  connection: 2` for that node and then succeeds on the other. It reads like the
+  encoder is broken. The line that actually decides is
+  `[Recording] zero-copy VAAPI encoder ready`; if that is present, recording is
+  fine. Check which node is which with
+  `basename $(readlink -f /sys/class/drm/renderD129/device/driver)`.
+- **An idle desktop presents rarely, so `shell-drive.py "shot"` can time out**
+  on a healthy shell. The screenshot is taken in the present callback, and
+  `shot()` gives up after 6 s with `screenshot never appeared — is the shell
+  running?` — while the `.ppm` lands a moment later. Precede a shot with a
+  `move` (or any input) to wake the compositor:
+  `sudo build/shell-drive.py "move 640 400" "sleep 1" "shot /tmp/x.png"`.
+- **`sg` is not installed on a stock 26.04**, so the usual one-liner for
+  running something with a group you have not logged in for again does not
+  exist. Use sudo instead — and note the flag is `-P`, not
+  `--preserve-groups`, which is rejected with an unhelpful bare
+  `invalid option provided`:
+
+  ```bash
+  sudo -u "$USER" -g video env HOME="$HOME" build/run-desktop.sh --no-stage
+  ```
