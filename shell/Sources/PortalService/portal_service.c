@@ -45,6 +45,7 @@
 
 typedef struct {
     char handle[256];
+    char sender[64];        // the caller, for the directed Response
     sd_bus_slot *slot;
     pid_t child_pid;        // helper process PID
     int stdout_fd;          // read end of helper's stdout pipe
@@ -107,6 +108,7 @@ struct PortalService {
         int active;
         int started;               // Start completed, stream live
         char path[256];            // session object path
+        char sender[64];           // session owner, for directed signals
         sd_bus_slot *slot;         // session vtable slot
         uint32_t cursor_mode;
         char start_handle[256];    // pending Start request path ("" = none)
@@ -513,6 +515,10 @@ static void _emit_response(PortalService *ps, PendingRequest *req,
     int r = sd_bus_message_new_signal(ps->bus, &sig, req->handle,
                                       REQUEST_IFACE, "Response");
     if (r >= 0) {
+        // Directed like the ScreenCast responses (_scast_emit_response):
+        // an instant Response (launcher failure, Close) races the
+        // caller's AddMatch and a broadcast can be dropped unheard.
+        if (req->sender[0]) sd_bus_message_set_destination(sig, req->sender);
         sd_bus_message_append(sig, "u", response);
         sd_bus_message_open_container(sig, 'a', "{sv}");
         if (response == 0 && num_uris > 0) {
@@ -574,6 +580,7 @@ static int _filechooser_common(sd_bus_message *m, void *userdata,
     }
 
     snprintf(req->handle, sizeof(req->handle), "%s", handle_path);
+    snprintf(req->sender, sizeof(req->sender), "%s", sender);
     req->active = 1;
     req->slot = NULL;
     req->child_pid = -1;
@@ -659,15 +666,23 @@ static int _request_close(sd_bus_message *m, void *userdata, sd_bus_error *ret_e
 // ScreenCast
 // ============================================================================
 
-/// Emit Response(response, results) on a request path. A successful Start
-/// (response 0 with a node) carries the one stream:
-/// (node, {position, size, source_type}); everything else, empty results.
+/// Emit Response(response, results) on a request path, DIRECTED at the
+/// caller. Directed matters: a broadcast is only delivered to clients
+/// whose AddMatch the daemon has already seen, and Chromium's webrtc
+/// subscribes AFTER the method returns — our instant Response fired into
+/// a match-less void and Chrome waited forever. A unicast signal is
+/// delivered regardless of match rules (and is what the reference
+/// xdg-desktop-portal sends). A successful Start (response 0 with a
+/// node) carries the one stream: (node, {position, size, source_type});
+/// everything else, empty results.
 static void _scast_emit_response(PortalService *ps, const char *handle,
+                                 const char *dest,
                                  uint32_t response, uint32_t node,
                                  uint32_t width, uint32_t height) {
     sd_bus_message *sig = NULL;
     if (sd_bus_message_new_signal(ps->bus, &sig, handle,
                                   REQUEST_IFACE, "Response") < 0) return;
+    if (dest && dest[0]) sd_bus_message_set_destination(sig, dest);
     sd_bus_message_append(sig, "u", response);
     sd_bus_message_open_container(sig, 'a', "{sv}");
     if (response == 0 && node != 0) {
@@ -719,6 +734,8 @@ static void _scast_teardown(PortalService *ps, int emit_closed) {
     snprintf(start_handle, sizeof(start_handle), "%s", ps->scast.start_handle);
     char path[256];
     snprintf(path, sizeof(path), "%s", ps->scast.path);
+    char sender[64];
+    snprintf(sender, sizeof(sender), "%s", ps->scast.sender);
     sd_bus_slot *slot = ps->scast.slot;
     memset(&ps->scast, 0, sizeof(ps->scast));
     ps->scast_completion.pending = 0;  // a late completion must not revive it
@@ -727,7 +744,7 @@ static void _scast_teardown(PortalService *ps, int emit_closed) {
     pthread_mutex_unlock(&ps->mutex);
 
     if (start_handle[0])
-        _scast_emit_response(ps, start_handle, 1, 0, 0, 0);  // cancelled
+        _scast_emit_response(ps, start_handle, sender, 1, 0, 0, 0);  // cancelled
     // The stop hook blocks until the capture drains — call it OUTSIDE the
     // mutex: the shell side may call complete_screencast_start meanwhile,
     // which takes it.
@@ -737,6 +754,7 @@ static void _scast_teardown(PortalService *ps, int emit_closed) {
         sd_bus_message *sig = NULL;
         if (sd_bus_message_new_signal(ps->bus, &sig, path,
                                       SESSION_IFACE, "Closed") >= 0) {
+            if (sender[0]) sd_bus_message_set_destination(sig, sender);
             sd_bus_message_open_container(sig, 'a', "{sv}");
             sd_bus_message_close_container(sig);
             sd_bus_send(ps->bus, sig, NULL);
@@ -822,6 +840,7 @@ static int _scast_create_session(sd_bus_message *m, void *userdata,
     ps->scast.active = 1;
     ps->scast.slot = slot;
     snprintf(ps->scast.path, sizeof(ps->scast.path), "%s", session_path);
+    snprintf(ps->scast.sender, sizeof(ps->scast.sender), "%s", sender);
     pthread_mutex_unlock(&ps->mutex);
 
     fprintf(stderr, "[PortalService] ScreenCast.CreateSession: %s\n", session_path);
@@ -836,6 +855,7 @@ static int _scast_create_session(sd_bus_message *m, void *userdata,
     sd_bus_message *sig = NULL;
     if (sd_bus_message_new_signal(ps->bus, &sig, handle_path,
                                   REQUEST_IFACE, "Response") >= 0) {
+        sd_bus_message_set_destination(sig, sender);
         sd_bus_message_append(sig, "u", (uint32_t)0);
         sd_bus_message_open_container(sig, 'a', "{sv}");
         sd_bus_message_open_container(sig, 'e', "sv");
@@ -892,7 +912,7 @@ static int _scast_select_sources(sd_bus_message *m, void *userdata,
     char handle_path[256];
     _build_handle_path(handle_path, sizeof(handle_path), sender, handle_token);
     r = sd_bus_reply_method_return(m, "o", handle_path);
-    _scast_emit_response(ps, handle_path, 0, 0, 0, 0);
+    _scast_emit_response(ps, handle_path, sender, 0, 0, 0, 0);
     return r;
 }
 
@@ -932,7 +952,7 @@ static int _scast_start(sd_bus_message *m, void *userdata,
         pthread_mutex_lock(&ps->mutex);
         ps->scast.start_handle[0] = 0;
         pthread_mutex_unlock(&ps->mutex);
-        _scast_emit_response(ps, handle_path, 2, 0, 0, 0);
+        _scast_emit_response(ps, handle_path, sender, 2, 0, 0, 0);
     }
     return r;
 }
@@ -1001,9 +1021,11 @@ static void _drain_scast_completion(PortalService *ps) {
     }
     ps->scast.start_handle[0] = 0;
     if (response == 0) ps->scast.started = 1;
+    char dest[64];
+    snprintf(dest, sizeof(dest), "%s", ps->scast.sender);
     pthread_mutex_unlock(&ps->mutex);
 
-    _scast_emit_response(ps, handle, response, node, w, h);
+    _scast_emit_response(ps, handle, dest, response, node, w, h);
     if (response == 0)
         fprintf(stderr, "[PortalService] ScreenCast started: node %u (%ux%u)\n",
                 node, w, h);
