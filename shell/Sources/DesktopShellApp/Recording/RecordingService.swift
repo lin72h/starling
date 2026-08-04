@@ -397,6 +397,14 @@ final class RecordingService {
         let reset: () -> Void = { [weak self] in self?.lastEncodedUs = nil }
         queue.async(execute: unsafeBitCast(reset, to: (@Sendable () -> Void).self))
         startedAt = Date()
+        // Cap the capture rate in the ENGINE, not just here. Without it the
+        // capture blit runs once per present — a 90Hz panel blits three
+        // 2560x1600 frames into linear memory for every one a 30fps session
+        // keeps, each of them ahead of the swap in the present path.
+        // drainDmabuf's own cap then threw the extras away downstream,
+        // after they had already cost their bandwidth; it stays as the
+        // safety net.
+        fl_drm_view_recording_set_max_fps(Int32(Self.fps))
         if let texture {
             fl_drm_view_recording_start_texture(view, Int32(shift), texture,
                                                 Int32(w), Int32(h),
