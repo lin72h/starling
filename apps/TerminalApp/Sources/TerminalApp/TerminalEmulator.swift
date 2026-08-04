@@ -541,18 +541,45 @@ final class TerminalEmulator {
         Array(repeating: _blankCell, count: cols)
     }
 
+    // A single blank row, shared by copy-on-write with every grid row that is
+    // currently blank.
+    //
+    // Building a fresh one per scrolled line was, by a distance, the most
+    // expensive thing the emulator did: `perf annotate` on _scrollUp showed
+    // its time going almost entirely into the fill loop's `movq $0x20` /
+    // `movb $0x0` stores — 16 bytes x 241 cells, for every line that scrolls
+    // off. Handing out the shared row instead makes a scroll a retain. The
+    // first write to that row pays one copy-on-write memcpy, which is cheaper
+    // than the store-immediate fill it replaces, and a row that scrolls past
+    // untouched now costs nothing at all.
+    //
+    // Keyed on curBg because _blankCell carries it (SGR can set the background
+    // that erased cells take), and on cols because a resize changes the width.
+    private var _blankRowCache: [TermCell] = []
+    private var _blankRowCacheBg: UInt32 = .max
+    private var _blankRowCacheCols: Int = -1
+
+    private func _sharedBlankLine() -> [TermCell] {
+        if _blankRowCacheBg != curBg || _blankRowCacheCols != cols {
+            _blankRowCache = Array(repeating: _blankCell, count: cols)
+            _blankRowCacheBg = curBg
+            _blankRowCacheCols = cols
+        }
+        return _blankRowCache
+    }
+
     private func _eraseDisplay(mode: Int) {
         switch mode {
         case 0:
             _eraseLine(mode: 0)
-            for r in (cursorRow + 1) ..< rows { grid[r] = _blankLine() }
+            for r in (cursorRow + 1) ..< rows { grid[r] = _sharedBlankLine() }
         case 1:
             _eraseLine(mode: 1)
-            for r in 0 ..< cursorRow { grid[r] = _blankLine() }
+            for r in 0 ..< cursorRow { grid[r] = _sharedBlankLine() }
         case 2:
-            for r in 0 ..< rows { grid[r] = _blankLine() }
+            for r in 0 ..< rows { grid[r] = _sharedBlankLine() }
         case 3:
-            for r in 0 ..< rows { grid[r] = _blankLine() }
+            for r in 0 ..< rows { grid[r] = _sharedBlankLine() }
             scrollback.removeAll()
         default:
             break
@@ -567,7 +594,7 @@ final class TerminalEmulator {
         case 1:
             for c in 0 ... min(cursorCol, cols - 1) { grid[cursorRow][c] = _blankCell }
         case 2:
-            grid[cursorRow] = _blankLine()
+            grid[cursorRow] = _sharedBlankLine()
         default:
             break
         }
@@ -604,7 +631,7 @@ final class TerminalEmulator {
         let count = min(n, regionBottom - cursorRow + 1)
         for _ in 0 ..< count {
             grid.remove(at: regionBottom)
-            grid.insert(_blankLine(), at: cursorRow)
+            grid.insert(_sharedBlankLine(), at: cursorRow)
         }
         cursorCol = 0
     }
@@ -614,7 +641,7 @@ final class TerminalEmulator {
         let count = min(n, regionBottom - cursorRow + 1)
         for _ in 0 ..< count {
             grid.remove(at: cursorRow)
-            grid.insert(_blankLine(), at: regionBottom)
+            grid.insert(_sharedBlankLine(), at: regionBottom)
         }
         cursorCol = 0
     }
@@ -637,14 +664,14 @@ final class TerminalEmulator {
                 }
             }
             grid.remove(at: regionTop)
-            grid.insert(_blankLine(), at: regionBottom)
+            grid.insert(_sharedBlankLine(), at: regionBottom)
         }
     }
 
     private func _scrollDown(_ n: Int) {
         for _ in 0 ..< n {
             grid.remove(at: regionBottom)
-            grid.insert(_blankLine(), at: regionTop)
+            grid.insert(_sharedBlankLine(), at: regionTop)
         }
     }
 
@@ -730,7 +757,7 @@ final class TerminalEmulator {
         savedPrimaryGrid = grid
         savedPrimaryCursor = (cursorRow, cursorCol)
         altActive = true
-        grid = Array(repeating: _blankLine(), count: rows)
+        grid = Array(repeating: _sharedBlankLine(), count: rows)
         cursorRow = 0
         cursorCol = 0
     }
