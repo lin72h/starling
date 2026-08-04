@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Generate terminal benchmark streams, one file per workload.
+
+Modelled on vtebench's categories. Each workload is written to a FILE and the
+benchmark then `cat`s it: that way the producer costs the same on both
+terminals (a page-cached read) and what we measure is the terminal draining
+and drawing, not `seq` or a Python loop.
+
+Sizes are chosen so each test runs a couple of seconds on a fast terminal —
+long enough that startup and the repaint coalescing window do not dominate.
+"""
+import os, random, sys
+
+OUT = sys.argv[1] if len(sys.argv) > 1 else "bench"
+COLS = 200          # <= the narrower of the two terminals, so "one line" is
+                    # the same amount of work in both regardless of window size
+ROWS = 45
+os.makedirs(OUT, exist_ok=True)
+random.seed(1234)   # deterministic corpus
+
+def write(name, data):
+    p = os.path.join(OUT, name)
+    with open(p, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+    print(f"{name:24s} {os.path.getsize(p)/1e6:8.1f} MB")
+
+# 1. light_cells — short lines, the classic scrolling dump. Mostly measures
+#    line feed + scrollback churn rather than cell filling.
+write("01_light_cells.txt", "".join(f"{i}\n" for i in range(1_500_000)))
+
+# 2. dense_cells — every line fills the row, so cell writes dominate.
+row = "".join(chr(0x41 + (i % 26)) for i in range(COLS))
+write("02_dense_cells.txt", "".join(row + "\n" for _ in range(150_000)))
+
+# 3. sgr_fg — an SGR colour change per cell: hammers the CSI parser and the
+#    attribute path, not just the glyph store.
+buf = []
+for _ in range(60_000):
+    buf.append("".join(f"\x1b[3{i % 8}m{chr(0x41 + i % 26)}" for i in range(COLS)))
+    buf.append("\x1b[0m\n")
+write("03_sgr_fg.txt", "".join(buf))
+
+# 4. sgr_truecolor — 24-bit colour, so each escape carries five parameters.
+buf = []
+for _ in range(30_000):
+    buf.append("".join(
+        f"\x1b[38;2;{(i*7)%256};{(i*13)%256};{(i*29)%256}m{chr(0x41 + i % 26)}"
+        for i in range(COLS)))
+    buf.append("\x1b[0m\n")
+write("04_sgr_truecolor.txt", "".join(buf))
+
+# 5. unicode — exercises the UTF-8 decode path (2, 3 and 4 byte sequences).
+#    Glyph coverage differs between the two fonts, but decoding is the point.
+pool = "héllo wörld Привет αβγδ 日本語 中文 ✓✗→ ≤∞ 🎉🚀"
+line = (pool * ((COLS // len(pool)) + 1))[:COLS]
+write("05_unicode.txt", "".join(line + "\n" for _ in range(150_000)))
+
+# 6. cursor_motion — CSI cursor addressing with no scrolling: the cost is
+#    parsing and random cell access, which a pure dump never touches.
+buf = ["\x1b[2J"]
+for _ in range(400_000):
+    r = random.randint(1, ROWS); c = random.randint(1, COLS)
+    buf.append(f"\x1b[{r};{c}H{chr(0x41 + random.randint(0,25))}")
+write("06_cursor_motion.txt", "".join(buf) + "\x1b[2J\x1b[H")
+
+# 7. alt_screen — enter/leave the alternate screen with a full repaint each
+#    time, the shape every TUI (vim, htop, less) actually produces.
+buf = []
+for _ in range(4_000):
+    buf.append("\x1b[?1049h\x1b[2J\x1b[H")
+    for r in range(ROWS):
+        buf.append(f"\x1b[{r+1};1H" + row[:COLS])
+    buf.append("\x1b[?1049l")
+write("07_alt_screen.txt", "".join(buf))
+
+# 8. scroll_region — DECSTBM, so scrolling goes through the region path
+#    rather than the whole-screen one.
+buf = [f"\x1b[5;{ROWS-5}r"]
+for i in range(600_000):
+    buf.append(f"line {i} " + row[:60] + "\n")
+buf.append("\x1b[r")
+write("08_scroll_region.txt", "".join(buf))
+
+# 9. long_lines — far wider than the window, so autowrap runs constantly.
+long_row = "".join(chr(0x41 + (i % 26)) for i in range(COLS * 8))
+write("09_long_lines.txt", "".join(long_row + "\n" for _ in range(25_000)))
+
+# 10. binary — random printable bytes with stray escapes: the parser's
+#     worst case, and a crash test as much as a speed one.
+rnd = bytearray()
+for _ in range(30_000_000):
+    rnd.append(random.choice(b"abcdefghijklmnopqrstuvwxyz0123456789 \n\x1b["))
+write("10_binary.txt", bytes(rnd) + b"\x1b[0m\n")
