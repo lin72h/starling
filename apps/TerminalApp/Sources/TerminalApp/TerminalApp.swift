@@ -511,7 +511,7 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
         var end = line.count
         while end > 0 {
             let cell = line[end - 1]
-            if cell.char == " " && cell.bg == 0 { end -= 1 } else { break }
+            if cell.scalar == 32 && cell.bg == 0 { end -= 1 } else { break }
         }
 
         if end == 0 {

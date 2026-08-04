@@ -16,11 +16,32 @@ struct CellAttrs: OptionSet {
 }
 
 /// One terminal grid cell. Colors are ARGB; 0 means "default fg/bg".
+///
+/// `scalar` is a Unicode scalar value, NOT a `Character`, and that is load
+/// bearing: it keeps this struct trivial (POD), so `[TermCell]` destroys with
+/// a dealloc instead of a per-element release. It used to hold a `Character`,
+/// which is bridge-object backed and refcounted — every cell overwritten or
+/// dropped from scrollback took an ARC hit, and on a bulk dump that was the
+/// single biggest cost in the app: a perf profile of `seq 1 20000000` showed
+/// swift_arrayDestroy 14.5%, TermCell's destroy witness 13.6% and
+/// swift_bridgeObjectRelease 18%, against 2.2% for the actual parsing.
+///
+/// Storing one scalar per cell loses nothing today: `feed` decodes exactly one
+/// scalar per UTF-8 sequence and puts it in its own cell, so a base character
+/// and a following combining mark already landed in separate cells. A real
+/// grapheme-cluster cell would need a side table (the way Ghostty does it) and
+/// is a separate change.
 struct TermCell {
-    var char: Character = " "
+    var scalar: UInt32 = 32          // U+0020 space
     var fg: UInt32 = 0
     var bg: UInt32 = 0
     var attrs: CellAttrs = []
+
+    /// The scalar as a `Character`, for rendering and clipboard text. Only the
+    /// visible grid goes through this — never the feed path.
+    var char: Character {
+        Character(UnicodeScalar(scalar) ?? " ")
+    }
 
     static let blank = TermCell()
 }
@@ -42,8 +63,15 @@ final class TerminalEmulator {
     private(set) var grid: [[TermCell]]
 
     /// Lines scrolled off the top of the primary screen (oldest first).
+    ///
+    /// Kept between `scrollbackLimit` and `scrollbackLimit + scrollbackSlack`
+    /// lines: trimming is batched (see `_scrollUp`), so the limit is a floor
+    /// rather than an exact count.
     private(set) var scrollback: [[TermCell]] = []
     let scrollbackLimit = 2000
+    /// How far scrollback may overshoot `scrollbackLimit` before it is cut
+    /// back. Amortises the O(n) `removeFirst` across this many lines.
+    let scrollbackSlack = 512
 
     private(set) var cursorRow = 0
     private(set) var cursorCol = 0
@@ -132,11 +160,26 @@ final class TerminalEmulator {
                     utf8Pending = Array(input[i...])
                     break
                 }
-                let seq = Array(input[i ..< i + len])
-                if let scalarStr = String(bytes: seq, encoding: .utf8),
-                   let ch = scalarStr.first {
-                    _putChar(ch)
+                // Decode the scalar arithmetically rather than through
+                // String(bytes:encoding:) — that built a String (and then a
+                // Character) for every non-ASCII character on the feed path.
+                var v: UInt32
+                switch len {
+                case 2:  v = UInt32(byte & 0x1F)
+                case 3:  v = UInt32(byte & 0x0F)
+                case 4:  v = UInt32(byte & 0x07)
+                default: v = UInt32(byte)
                 }
+                var valid = len > 1
+                for k in 1 ..< max(len, 1) {
+                    let cont = input[i + k]
+                    if cont & 0xC0 != 0x80 { valid = false; break }
+                    v = (v << 6) | UInt32(cont & 0x3F)
+                }
+                // U+FFFD for anything malformed or not a scalar, so a bad byte
+                // never silently drops a cell.
+                if !valid || UnicodeScalar(v) == nil { v = 0xFFFD }
+                _putScalar(v)
                 i += len
                 continue
             }
@@ -197,7 +240,7 @@ final class TerminalEmulator {
         case 0x1B:
             state = .escape
         case 0x20...:
-            _putChar(Character(UnicodeScalar(byte)))
+            _putScalar(UInt32(byte))
         default:
             break  // ignore other C0 controls
         }
@@ -336,6 +379,13 @@ final class TerminalEmulator {
     // MARK: - Cursor + character output
 
     private func _putChar(_ ch: Character) {
+        _putScalar(ch.unicodeScalars.first?.value ?? 32)
+    }
+
+    /// The hot path: one Unicode scalar into the cell under the cursor.
+    /// Takes a scalar rather than a `Character` so printing ASCII never builds
+    /// a `Character` (which allocates) per byte — see `TermCell`.
+    private func _putScalar(_ v: UInt32) {
         if wrapPending {
             wrapPending = false
             if autowrap {
@@ -346,7 +396,7 @@ final class TerminalEmulator {
         guard cursorRow >= 0, cursorRow < rows,
               cursorCol >= 0, cursorCol < cols else { return }
         grid[cursorRow][cursorCol] = TermCell(
-            char: ch, fg: curFg, bg: curBg, attrs: curAttrs
+            scalar: v, fg: curFg, bg: curBg, attrs: curAttrs
         )
         if cursorCol == cols - 1 {
             wrapPending = true
@@ -397,7 +447,7 @@ final class TerminalEmulator {
     // MARK: - Erase / edit
 
     private var _blankCell: TermCell {
-        TermCell(char: " ", fg: 0, bg: curBg, attrs: [])
+        TermCell(scalar: 32, fg: 0, bg: curBg, attrs: [])
     }
 
     private func _blankLine() -> [TermCell] {
@@ -487,7 +537,15 @@ final class TerminalEmulator {
             let removed = grid[regionTop]
             if !altActive && regionTop == 0 {
                 scrollback.append(removed)
-                if scrollback.count > scrollbackLimit {
+                // Trim in batches, not every line. `removeFirst` shifts the
+                // whole array, so trimming the instant the limit is exceeded
+                // made every scrolled line an O(scrollbackLimit) memmove —
+                // 9% of the profile on a bulk dump. Letting it overshoot by
+                // `scrollbackSlack` and then cutting back amortises that to
+                // O(1) per line, at the cost of holding a few hundred extra
+                // lines. Readers must therefore treat `scrollbackLimit` as a
+                // floor, not an exact size — `scrollbackCount` is the truth.
+                if scrollback.count > scrollbackLimit + scrollbackSlack {
                     scrollback.removeFirst(scrollback.count - scrollbackLimit)
                 }
             }
