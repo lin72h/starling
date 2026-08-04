@@ -33,8 +33,10 @@ typedef struct VaapiEncoder VaapiEncoder;
 int vaapi_encoder_probe(const char* device);
 
 // Open one session: dmabuf frames of in_w x in_h pixels in, H.264 MP4 at
-// out_w x out_h (must be even — 4:2:0) written to out_path. qp is the CQP
-// quality (the pipe path's -qp). Returns NULL on failure.
+// out_w x out_h (must be even — 4:2:0) written to out_path. qp is the quality
+// on the usual scale (lower is better); it selects a bits-per-pixel budget for
+// capped VBR rather than a constant quantiser, so the output rate is bounded.
+// Returns NULL on failure.
 VaapiEncoder* vaapi_encoder_open(const char* device,
                                  int in_w, int in_h,
                                  int out_w, int out_h,

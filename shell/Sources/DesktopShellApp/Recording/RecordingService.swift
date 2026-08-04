@@ -115,6 +115,10 @@ final class RecordingService {
     private(set) var captureHeight = 0
     private(set) var usingHardware = false
     private(set) var zeroCopy = false
+    /// Timestamp of the last frame actually encoded, in the engine's
+    /// microseconds — the zero-copy path's rate limiter. Touched only on
+    /// `queue`, which is serial.
+    private var lastEncodedUs: UInt64? = nil
 
     // The live session's engine-side frame size and output file — what a
     // mid-start fallback to the pipe encoder must recreate exactly (the
@@ -219,6 +223,23 @@ final class RecordingService {
                 fl_drm_view_recording_release_dmabuf_slot(frame.slot)
                 continue
             }
+            // Hold the encoded rate to Self.fps. The engine hands over a frame
+            // per PRESENT, so on a 60Hz desktop this path recorded 60fps no
+            // matter what Self.fps said — that value only ever reached the
+            // encoder as nominal metadata. The result was a file at twice the
+            // frame rate anyone needs, which costs disk on the way in and CPU
+            // on the way out: playback does a full app render per frame, so
+            // the frame rate is what the player pays for.
+            //
+            // A tenth of the interval of slack, so ordinary present jitter
+            // does not drop two frames in a row and leave a 2/fps gap.
+            let minGapUs = UInt64(1_000_000 / Self.fps) * 9 / 10
+            if let last = lastEncodedUs, frame.timestamp_us >= last,
+               frame.timestamp_us - last < minGapUs {
+                fl_drm_view_recording_release_dmabuf_slot(frame.slot)
+                continue
+            }
+            lastEncodedUs = frame.timestamp_us
             let ok = enc.encode(fd: frame.fd, stride: frame.stride,
                                 offset: frame.offset, fourcc: frame.fourcc,
                                 modifier: frame.modifier,
@@ -371,6 +392,10 @@ final class RecordingService {
         self.windowLabel = label
         Self.recordedTextureId = texture ?? -1
         state = .starting
+        // Runs on the same serial queue drainDmabuf uses, so the reset cannot
+        // race a frame from the previous session still in flight.
+        let reset: () -> Void = { [weak self] in self?.lastEncodedUs = nil }
+        queue.async(execute: unsafeBitCast(reset, to: (@Sendable () -> Void).self))
         startedAt = Date()
         if let texture {
             fl_drm_view_recording_start_texture(view, Int32(shift), texture,

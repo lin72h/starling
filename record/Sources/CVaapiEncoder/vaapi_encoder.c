@@ -311,7 +311,32 @@ VaapiEncoder* vaapi_encoder_open(const char* device,
     if (e->mux->oformat->flags & AVFMT_GLOBALHEADER) {
       e->enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
-    p_av_opt_set_int(e->enc->priv_data, "qp", qp, 0);
+    // Capped VBR, not fixed QP. Constant QP has no upper bound on rate, and
+    // on high-entropy screen content that runs away: a scrolling hex dump
+    // captured at 1640x1100/60 produced 278MB for 37 seconds — 60 Mbps, or
+    // 0.55 bits per pixel — and every byte of that has to be read back off
+    // disk to play it. The target is derived from the picture rate so it
+    // scales with what is actually being recorded, and clamped at both ends:
+    // a floor so a small window still looks right, a ceiling so a busy 4K
+    // capture cannot produce a file nothing wants to handle.
+    //
+    // `qp` still sets the quality: it is mapped onto the bits-per-pixel
+    // budget rather than handed to the encoder, so the caller's existing
+    // scale (lower = better) keeps its meaning.
+    {
+        double bpp = 0.15 * (24.0 / (qp > 0 ? (double)qp : 24.0));
+        double target = (double)out_w * (double)out_h * (double)fps * bpp;
+        if (target < 4e6) target = 4e6;
+        if (target > 30e6) target = 30e6;
+        e->enc->bit_rate = (int64_t)target;
+        // Headroom for a burst (a window opening, a scene cut) without
+        // letting the average drift up, and a buffer of about a second so
+        // the rate is held over a sensible window rather than per frame.
+        e->enc->rc_max_rate = (int64_t)(target * 1.5);
+        e->enc->rc_buffer_size = (int64_t)(target * 1.5);
+        // No "qp" option: setting it puts the VAAPI encoder in CQP mode and
+        // the rate control above is then ignored entirely.
+    }
     if ((ret = p_avcodec_open2(e->enc, codec, NULL)) < 0) goto fail;
   }
 
