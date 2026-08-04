@@ -223,17 +223,15 @@ final class RecordingService {
                 fl_drm_view_recording_release_dmabuf_slot(frame.slot)
                 continue
             }
-            // Hold the encoded rate to Self.fps. The engine hands over a frame
-            // per PRESENT, so on a 60Hz desktop this path recorded 60fps no
-            // matter what Self.fps said — that value only ever reached the
-            // encoder as nominal metadata. The result was a file at twice the
-            // frame rate anyone needs, which costs disk on the way in and CPU
-            // on the way out: playback does a full app render per frame, so
-            // the frame rate is what the player pays for.
-            //
-            // A tenth of the interval of slack, so ordinary present jitter
-            // does not drop two frames in a row and leave a 2/fps gap.
-            let minGapUs = UInt64(1_000_000 / Self.fps) * 9 / 10
+            // Safety net only: the ENGINE owns the frame-rate cap now
+            // (fl_drm_view_recording_set_max_fps), paced on an absolute
+            // schedule so a present missed to client jitter is repaid by
+            // the next one — its catch-up frames arrive as little as one
+            // vsync apart. A 30ms floor here silently discarded exactly
+            // those frames and pinned recordings at ~27.6fps of the 30
+            // requested. A third of the interval still guards against a
+            // runaway engine without touching legitimate catch-up.
+            let minGapUs = UInt64(1_000_000 / Self.fps) / 3
             if let last = lastEncodedUs, frame.timestamp_us >= last,
                frame.timestamp_us - last < minGapUs {
                 fl_drm_view_recording_release_dmabuf_slot(frame.slot)
