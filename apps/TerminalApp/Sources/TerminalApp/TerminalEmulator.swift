@@ -127,7 +127,24 @@ final class TerminalEmulator {
         case oscEscape       // saw ESC inside OSC (expecting \)
     }
     private var state: ParseState = .ground
-    private var csiParams: String = ""
+
+    // CSI parameters, accumulated as NUMBERS while the bytes arrive.
+    //
+    // These used to be a `String` appended one `Character` at a time and then
+    // `split(separator: ";").map(Int.init)` on dispatch. That is a String
+    // build, a Substring split and an Int parse for every escape sequence —
+    // and colour-per-cell output is ~200 escapes per row. It showed up in a
+    // perf profile of a 24-bit-colour dump as String._uncheckedFromUTF8 2.9%,
+    // Collection.split 2.1% and _uncheckedIndex(after:) 2.2%, plus the ARC
+    // traffic they drag along. Digits fold into an Int as they arrive instead;
+    // no String is built on this path at all.
+    private var csiNums: [Int] = []
+    /// The number being accumulated; -1 means "no digits since the last ';'",
+    /// which is what distinguishes an absent parameter from an explicit 0.
+    private var csiCur: Int = -1
+    /// Leading '?' — DEC private mode.
+    private var csiPrivate = false
+
     private var oscBuffer: String = ""
 
     // Incremental UTF-8 decoding
@@ -250,7 +267,9 @@ final class TerminalEmulator {
         state = .ground
         switch byte {
         case UInt8(ascii: "["):
-            csiParams = ""
+            csiNums.removeAll(keepingCapacity: true)
+            csiCur = -1
+            csiPrivate = false
             state = .csi
         case UInt8(ascii: "]"):
             oscBuffer = ""
@@ -287,13 +306,26 @@ final class TerminalEmulator {
         // Parameter / intermediate bytes accumulate; 0x40-0x7E terminates.
         if byte >= 0x40 && byte <= 0x7E {
             state = .ground
-            _dispatchCsi(final: Character(UnicodeScalar(byte)))
-        } else if byte >= 0x20 && byte <= 0x3F {
-            csiParams.append(Character(UnicodeScalar(byte)))
+            // Close the parameter in flight. An empty parameter list stays
+            // empty: `CSI m` must give [] rather than [0], because callers
+            // distinguish "no parameters" from "parameter 0".
+            if csiCur >= 0 || !csiNums.isEmpty {
+                csiNums.append(csiCur < 0 ? 0 : csiCur)
+                csiCur = -1
+            }
+            _dispatchCsi(final: byte)
+        } else if byte >= 0x30 && byte <= 0x39 {        // digit
+            csiCur = (csiCur < 0 ? 0 : csiCur) * 10 + Int(byte - 0x30)
+        } else if byte == 0x3B {                        // ';' separator
+            csiNums.append(csiCur < 0 ? 0 : csiCur)
+            csiCur = -1
+        } else if byte == 0x3F {                        // '?' private marker
+            csiPrivate = true
         } else if byte == 0x1B {
             state = .escape
         }
-        // other C0 bytes inside CSI: ignored for simplicity
+        // Other 0x20-0x3F bytes are intermediates (SP, '$', '"', …) and other
+        // C0 bytes are ignored, as before — nothing we implement reads them.
     }
 
     private func _finishOsc() {
@@ -304,49 +336,44 @@ final class TerminalEmulator {
 
     // MARK: - CSI dispatch
 
-    private func _params(default def: Int = 0) -> [Int] {
-        let body = csiParams.hasPrefix("?") ? String(csiParams.dropFirst()) : csiParams
-        if body.isEmpty { return [] }
-        return body.split(separator: ";", omittingEmptySubsequences: false)
-            .map { Int($0) ?? def }
-    }
+    private func _params() -> [Int] { csiNums }
 
-    private var _isPrivate: Bool { csiParams.hasPrefix("?") }
+    private var _isPrivate: Bool { csiPrivate }
 
-    private func _dispatchCsi(final: Character) {
+    private func _dispatchCsi(final: UInt8) {
         let params = _params()
         func p(_ i: Int, _ def: Int) -> Int {
             i < params.count && params[i] != 0 ? params[i] : def
         }
 
         switch final {
-        case "A": _moveCursor(rowDelta: -p(0, 1), colDelta: 0)
-        case "B": _moveCursor(rowDelta: p(0, 1), colDelta: 0)
-        case "C": _moveCursor(rowDelta: 0, colDelta: p(0, 1))
-        case "D": _moveCursor(rowDelta: 0, colDelta: -p(0, 1))
-        case "E":
+        case UInt8(ascii: "A"): _moveCursor(rowDelta: -p(0, 1), colDelta: 0)
+        case UInt8(ascii: "B"): _moveCursor(rowDelta: p(0, 1), colDelta: 0)
+        case UInt8(ascii: "C"): _moveCursor(rowDelta: 0, colDelta: p(0, 1))
+        case UInt8(ascii: "D"): _moveCursor(rowDelta: 0, colDelta: -p(0, 1))
+        case UInt8(ascii: "E"):
             cursorCol = 0
             _moveCursor(rowDelta: p(0, 1), colDelta: 0)
-        case "F":
+        case UInt8(ascii: "F"):
             cursorCol = 0
             _moveCursor(rowDelta: -p(0, 1), colDelta: 0)
-        case "G", "`":
+        case UInt8(ascii: "G"), UInt8(ascii: "`"):
             cursorCol = max(0, min(cols - 1, p(0, 1) - 1))
             wrapPending = false
-        case "d":
+        case UInt8(ascii: "d"):
             _setCursor(row: p(0, 1) - 1, col: cursorCol)
-        case "H", "f":
+        case UInt8(ascii: "H"), UInt8(ascii: "f"):
             _setCursor(row: p(0, 1) - 1, col: p(1, 1) - 1)
-        case "J": _eraseDisplay(mode: params.first ?? 0)
-        case "K": _eraseLine(mode: params.first ?? 0)
-        case "L": _insertLines(p(0, 1))
-        case "M": _deleteLines(p(0, 1))
-        case "P": _deleteChars(p(0, 1))
-        case "@": _insertChars(p(0, 1))
-        case "X": _eraseChars(p(0, 1))
-        case "S": _scrollUp(p(0, 1))
-        case "T": _scrollDown(p(0, 1))
-        case "r":
+        case UInt8(ascii: "J"): _eraseDisplay(mode: params.first ?? 0)
+        case UInt8(ascii: "K"): _eraseLine(mode: params.first ?? 0)
+        case UInt8(ascii: "L"): _insertLines(p(0, 1))
+        case UInt8(ascii: "M"): _deleteLines(p(0, 1))
+        case UInt8(ascii: "P"): _deleteChars(p(0, 1))
+        case UInt8(ascii: "@"): _insertChars(p(0, 1))
+        case UInt8(ascii: "X"): _eraseChars(p(0, 1))
+        case UInt8(ascii: "S"): _scrollUp(p(0, 1))
+        case UInt8(ascii: "T"): _scrollDown(p(0, 1))
+        case UInt8(ascii: "r"):
             let top = p(0, 1) - 1
             let bottom = p(1, rows) - 1
             if top < bottom && bottom < rows {
@@ -357,19 +384,19 @@ final class TerminalEmulator {
                 regionBottom = rows - 1
             }
             _setCursor(row: 0, col: 0)
-        case "m": _sgr(params)
-        case "h": _setMode(params, on: true)
-        case "l": _setMode(params, on: false)
-        case "n":
+        case UInt8(ascii: "m"): _sgr(params)
+        case UInt8(ascii: "h"): _setMode(params, on: true)
+        case UInt8(ascii: "l"): _setMode(params, on: false)
+        case UInt8(ascii: "n"):
             if params.first == 5 { onResponse?("\u{1B}[0n") }
             if params.first == 6 {
                 onResponse?("\u{1B}[\(cursorRow + 1);\(cursorCol + 1)R")
             }
-        case "c":
+        case UInt8(ascii: "c"):
             onResponse?("\u{1B}[?6c")  // claim VT102
-        case "s": _saveCursor()
-        case "u": _restoreCursor()
-        case "g", "t", "q":
+        case UInt8(ascii: "s"): _saveCursor()
+        case UInt8(ascii: "u"): _restoreCursor()
+        case UInt8(ascii: "g"), UInt8(ascii: "t"), UInt8(ascii: "q"):
             break  // tab clear / window ops / cursor style — ignored
         default:
             break

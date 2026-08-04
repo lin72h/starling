@@ -154,18 +154,47 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
         pty.startReader()
     }
 
+    /// Shortest gap between rebuilds while output is streaming (~60/s).
+    ///
+    /// Coalescing alone was not enough. It collapses the requests outstanding
+    /// at any instant, but during a flood the main queue drains far faster
+    /// than the display refreshes, so each PTY chunk still got its own full
+    /// rebuild of every visible row — work thrown away before anyone saw it.
+    /// A 24-bit-colour dump spent 15.5 CPU-seconds over 6.2 wall seconds,
+    /// i.e. ~2.5 cores, most of it rebuilding frames nobody sees.
+    private static let minRepaintInterval: Double = 1.0 / 60.0
+    /// Monotonic (DispatchTime) stamp of the last rebuild, in seconds.
+    private var _lastRepaint: Double = 0
+
+    private static func _now() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
+
     private func _scheduleRepaint() {
         _lock.lock()
         let alreadyPending = _updatePending
         _updatePending = true
+        let last = _lastRepaint
         _lock.unlock()
         guard !alreadyPending else { return }
-        DispatchQueue.main.async { [weak self] in
+
+        // Always go through the queue, but not before the frame is due. The
+        // pending flag guarantees the LAST chunk still gets a rebuild, so
+        // output that stops mid-frame is never left undrawn — it just lands up
+        // to one frame later.
+        let delay = max(0, (last + Self.minRepaintInterval) - Self._now())
+        let work: @Sendable () -> Void = { [weak self] in
             guard let self = self else { return }
             self._lock.lock()
             self._updatePending = false
+            self._lastRepaint = Self._now()
             self._lock.unlock()
             self.setState {}
+        }
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: work)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
     }
 
@@ -558,7 +587,30 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
         )
     }
 
+    /// Cache key for a resolved cell style. `TextStyle` construction and copy
+    /// showed up in a profile of colour-heavy output (its value-witness copy
+    /// alone was 2.4%), and a row of per-cell colours asks for one style per
+    /// cell — but the same handful of styles repeat endlessly for any content
+    /// using a palette rather than 24-bit colour.
+    private struct _StyleKey: Hashable {
+        let fg: UInt32, bg: UInt32, attrs: UInt8
+    }
+    private var _styleCache: [_StyleKey: Flutter.TextStyle] = [:]
+
     private func _textStyle(_ style: (fg: UInt32, bg: UInt32, attrs: CellAttrs)) -> Flutter.TextStyle {
+        let key = _StyleKey(fg: style.fg, bg: style.bg, attrs: style.attrs.rawValue)
+        if let hit = _styleCache[key] { return hit }
+        let made = _makeTextStyle(style)
+        // Truecolor content can mint a distinct style per cell, so the cache
+        // must not grow without bound. Drop it wholesale rather than tracking
+        // ages — the working set for palette content is tiny, so it refills at
+        // once, and for truecolor the cache was not paying anyway.
+        if _styleCache.count > 4096 { _styleCache.removeAll(keepingCapacity: true) }
+        _styleCache[key] = made
+        return made
+    }
+
+    private func _makeTextStyle(_ style: (fg: UInt32, bg: UInt32, attrs: CellAttrs)) -> Flutter.TextStyle {
         var fg = style.fg == 0 ? TermTheme.defaultFg : style.fg
         if style.attrs.contains(.dim) {
             // Halve the brightness for dim text.
