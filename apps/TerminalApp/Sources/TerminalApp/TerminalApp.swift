@@ -547,6 +547,41 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
             return SizedBox(width: 1, height: cellH)
         }
 
+        // Background-colour erase: a run of coloured spaces that ENDS the line
+        // has to be drawn as a box, not as text.
+        //
+        // `ESC[41m` then `ESC[K` fills the rest of the row with red-background
+        // spaces, and the cells are set correctly — but text layout excludes
+        // trailing whitespace from the painted line, so the span's background
+        // never appeared. The same run rendered fine with any glyph after it,
+        // which is what gave the cause away: red showed mid-line, and vanished
+        // at end of line.
+        //
+        // Split that tail off and paint it as a sized ColoredBox. The head Text
+        // is given an explicit width too, so the boundary is pinned to the cell
+        // grid rather than to whatever width the text engine decides a string
+        // with trailing spaces has.
+        var tailStart = end
+        let tailBg = line[end - 1].bg
+        if tailBg != 0 {
+            var i = end
+            while i > 0 {
+                let cell = line[i - 1]
+                // Same colour, no attributes (an underlined space still has to
+                // be drawn as text so the line shows), and a space.
+                guard cell.scalar == 32, cell.bg == tailBg, cell.attrs.isEmpty
+                else { break }
+                i -= 1
+            }
+            tailStart = i
+        }
+        let tailWidth = Double(end - tailStart) * cellW
+        if tailStart == 0 {
+            return SizedBox(width: tailWidth, height: cellH,
+                            child: ColoredBox(color: Color(Int(tailBg))))
+        }
+        let headEnd = tailStart
+
         var spans: [InlineSpan] = []
         var runText = ""
         var runStyle: (fg: UInt32, bg: UInt32, attrs: CellAttrs)? = nil
@@ -557,7 +592,7 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
             runText = ""
         }
 
-        for c in 0 ..< end {
+        for c in 0 ..< headEnd {
             var cell = c < line.count ? line[c] : .blank
             var key = (fg: cell.fg, bg: cell.bg, attrs: cell.attrs)
             if cell.attrs.contains(.reverse) {
@@ -578,13 +613,22 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
         }
         flush()
 
-        return SizedBox(
+        let head = SizedBox(
             height: cellH,
             child: Text(
                 rich: TextSpan(children: spans),
                 maxLines: 1
             )
         )
+        guard tailWidth > 0 else { return head }
+        // The head is pinned to its cell width so the coloured tail starts
+        // exactly on the grid, whatever the text engine makes of a run that
+        // ends in spaces.
+        return SizedBox(height: cellH, child: Row(children: [
+            SizedBox(width: Double(headEnd) * cellW, height: cellH, child: head),
+            SizedBox(width: tailWidth, height: cellH,
+                     child: ColoredBox(color: Color(Int(tailBg)))),
+        ]))
     }
 
     /// Cache key for a resolved cell style. `TextStyle` construction and copy
