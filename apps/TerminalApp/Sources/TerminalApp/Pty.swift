@@ -130,7 +130,11 @@ final class Pty: @unchecked Sendable {
     /// Starts the reader loop on a background thread.
     func startReader() {
         let thread = Thread { [weak self] in
-            var buf = [UInt8](repeating: 0, count: 8192)
+            // 64K rather than 8K: every read is an allocation for the chunk
+            // and a trip through feed + a repaint request, and a terminal
+            // being flooded gets a full buffer every time. Eight times fewer
+            // of each, for 56 KB.
+            var buf = [UInt8](repeating: 0, count: 65536)
             while true {
                 guard let self = self else { return }
                 let n = read(self.masterFd, &buf, buf.count)

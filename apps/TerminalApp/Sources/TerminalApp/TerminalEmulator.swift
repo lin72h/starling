@@ -161,13 +161,73 @@ final class TerminalEmulator {
     // MARK: - Feeding input
 
     func feed(_ bytes: [UInt8]) {
-        var input = utf8Pending
-        input.append(contentsOf: bytes)
+        // Only splice when a partial UTF-8 sequence is actually carried over.
+        // The old code built `utf8Pending + bytes` unconditionally, copying
+        // every chunk that ever arrived; pending is empty on virtually all of
+        // them, and then this is a retain rather than a copy.
+        let input: [UInt8]
+        if utf8Pending.isEmpty {
+            input = bytes
+        } else {
+            var joined = utf8Pending
+            joined.append(contentsOf: bytes)
+            input = joined
+        }
         utf8Pending = []
 
         var i = 0
         while i < input.count {
             let byte = input[i]
+
+            // Fast path: a run of printable ASCII into the row the cursor is
+            // already on.
+            //
+            // Going through _putScalar per byte means `grid[r][c] = …` per
+            // byte, and that is a dynamically-enforced exclusive access to a
+            // class property plus a COW uniqueness check on BOTH the outer and
+            // the inner array — every character. On a profile of full-width
+            // output that overhead was ~45% of the app's time
+            // (swift_beginAccess + swift_endAccess + AccessSet::insert + the
+            // TLS lookups behind them ~35%, swift_isUniquelyReferenced ~10%)
+            // against 21% for the write itself. Taking the row's buffer once
+            // and filling a whole run through it pays that cost once per run
+            // instead of once per cell.
+            if case .ground = state, !wrapPending,
+               byte >= 0x20, byte < 0x7F,
+               cursorRow >= 0, cursorRow < rows, cursorCol < cols {
+                // Stop at the row's end, the chunk's end, or the first byte
+                // that is not plain printable ASCII — anything else has to go
+                // back through the state machine.
+                let limit = min(input.count, i + (cols - cursorCol))
+                var end = i
+                while end < limit {
+                    let b = input[end]
+                    if b < 0x20 || b >= 0x7F { break }
+                    end += 1
+                }
+                let n = end - i
+                if n > 0 {
+                    let fg = curFg, bg = curBg, at = curAttrs
+                    let start = cursorCol
+                    grid[cursorRow].withUnsafeMutableBufferPointer { row in
+                        for k in 0 ..< n {
+                            row[start + k] = TermCell(scalar: UInt32(input[i + k]),
+                                                      fg: fg, bg: bg, attrs: at)
+                        }
+                    }
+                    // Match _putScalar's wrap bookkeeping exactly: the cursor
+                    // parks on the last column and arms wrapPending rather
+                    // than stepping past the edge.
+                    if start + n >= cols {
+                        cursorCol = cols - 1
+                        wrapPending = true
+                    } else {
+                        cursorCol = start + n
+                    }
+                    i = end
+                    continue
+                }
+            }
 
             // In ground state, non-ASCII lead bytes start a UTF-8 sequence.
             if case .ground = state, byte >= 0x80 {
