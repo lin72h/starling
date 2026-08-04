@@ -127,8 +127,8 @@
     <h1>What screen recording costs the app on screen</h1>
     <p class="standfirst">One application, one binary — the ghostty terminal — runs on three
       Wayland desktops on the same machine, all recording with the same hardware H.264
-      encoder. First, just rendering: the same binary runs ~27% faster on Starling&rsquo;s
-      compositor (40 vs ~32&nbsp;MB/s). Then, recording the screen while it runs: GNOME slows
+      encoder. First, just rendering: the same binary moves ~27% more data per second on Starling
+      (40 vs ~32&nbsp;MB/s) — a pacing tradeoff §2 lays out in full, not a raw-speed claim. Then, recording the screen while it runs: GNOME slows
       it ~6% and Hyprland ~11%; Starling slows it ~4% while delivering the full 30&nbsp;fps —
       including every frame GNOME drops. Numbers and mechanism below.</p>
     <div class="meta">
@@ -196,13 +196,39 @@
       <p class="figunit">MB/s the terminal accepts from an unthrottled producer · dot = one run's baseline (mean of its two 120 s windows) · higher is better</p>
       <svg id="fig-base" viewBox="0 0 820 240" role="img" aria-label="Dot plot of baseline throughput. The same ghostty binary reaches about 41 megabytes per second on Starling, about 32 on Hyprland, and about 32 on GNOME."></svg>
     </div>
-    <figcaption><b>Fig 1.</b> The same ghostty binary runs ~27% faster on Starling&rsquo;s
-      compositor than on GNOME or Hyprland (40.4 vs 31.8 / 32.5 MB/s, mean of run baselines) —
-      at 90% of the cell count, which accounts for at most a third of the gap. Whatever a
-      compositor&rsquo;s frame-callback cadence, damage handling, and buffer turnaround are
-      worth, they are worth it here: this workload&rsquo;s ceiling is set by how fast the
-      compositor lets the client draw.</figcaption>
+    <figcaption><b>Fig 1.</b> The same ghostty binary moves ~27% more data per second on
+      Starling than on GNOME or Hyprland (40.4 vs 31.8 / 32.5 MB/s, mean of run baselines) —
+      at 90% of the cell count, which accounts for at most a third of the gap. The mechanism
+      is not raw compositor speed — the table below shows GNOME and Hyprland deliver
+      <em>more</em> frame callbacks per second — but pacing: Starling hands the client fewer,
+      larger frames, and a throughput-bound app spends the difference parsing instead of
+      re-rendering.</figcaption>
   </figure>
+
+  <div class="prose">
+    <p>The conventional compositor probes make the tradeoff explicit — and two of the three
+      go against us. A minimal client measuring its own frame-callback intervals
+      (<code>cbjitter.c</code>, 45&nbsp;s), and glmark2&rsquo;s unthrottled GL score:</p>
+    <div class="tablewrap" style="margin: 18px 0;">
+      <table>
+        <thead><tr><th>Probe</th><th>Starling</th><th>GNOME</th><th>Hyprland</th></tr></thead>
+        <tbody>
+          <tr><td class="t">Frame-callback cadence (mean)</td><td>19.9 ms (50 fps)</td><td>11.2 ms (90 fps)</td><td>11.1 ms (90 fps)</td></tr>
+          <tr><td class="t">Cadence p99 / worst</td><td>33.8 / 34.2 ms</td><td>12.3 / 48.4 ms</td><td>12.3 / 12.7 ms</td></tr>
+          <tr><td class="t">glmark2 (unthrottled GL)</td><td>3,125</td><td>12,194</td><td>11,724</td></tr>
+          <tr><td class="t">ghostty throughput</td><td><b>40.4 MB/s</b></td><td>31.8</td><td>32.5</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Read together: GNOME and Hyprland run the frame loop at the panel&rsquo;s full 90&nbsp;Hz
+      and turn unthrottled commits around ~4× faster; Starling paces clients near 50&nbsp;fps
+      with a hard 33&nbsp;ms ceiling (bounded jitter — its worst interval over 45&nbsp;s was
+      34&nbsp;ms, where GNOME&rsquo;s was 48). For an app whose work is producing content —
+      this terminal, a compiler log, anything throughput-bound — Starling&rsquo;s pacing wins:
+      more of each second goes to the work and less to redrawing it. For an app that wants a
+      frame at every vsync, the others&rsquo; cadence wins. This report&rsquo;s headline is the
+      throughput column; the reader should know the whole table.</p>
+  </div>
 
   <div class="prose">
     <h2>3 · Then: record the screen while it renders</h2>
@@ -355,6 +381,12 @@
           <em>its own</em> baseline, so the grid difference divides out of the slowdown
           comparison (it does not divide out of the §2 baseline comparison, where it is
           accounted for in the text).</li>
+        <li><b>Two conventional probes favor the other compositors.</b> GNOME and Hyprland
+          deliver frame callbacks at the panel&rsquo;s full 90&nbsp;Hz where Starling paces
+          near 50&nbsp;fps, and both score ~4× higher on unthrottled glmark2 — see the table
+          in §2. Latency-sensitive and animation-heavy workloads may prefer that behavior;
+          input-to-photon latency was not measured. Starling&rsquo;s advantages in this report
+          are app throughput and recording behavior, not frame-loop rate.</li>
         <li><b>The baseline comparison (§2) carries a confound the slowdown numbers do
           not.</b> Baselines were measured in different login sessions hours apart, and
           ghostty&rsquo;s session-to-session spread on GNOME reached several MB/s in
@@ -391,7 +423,7 @@ xxd /dev/urandom</code></pre>
       mechanism live with <code>MUTTER_DEBUG=screen-cast</code> and count
       &ldquo;Recording full frame&rdquo; lines. Full harness scripts:
       <code>screencast-bench.py</code>, <code>starling-rec-bench.py</code>,
-      <code>hypr-rec-bench.py</code>, <code>ab-capture.py</code> — checked into the Starling
+      <code>hypr-rec-bench.py</code>, <code>ab-capture.py</code>, <code>cbjitter.c</code> (the frame-callback probe) — checked into the Starling
       repo under <code>docs/perf/recording-cost-2026-08-04/</code> beside this report
       (~150 lines each, no dependencies beyond PyGObject).</p>
     <p style="margin-top:26px; padding-top:14px; border-top:1px solid var(--line); font-size:13.5px; color:var(--ink-3);">
