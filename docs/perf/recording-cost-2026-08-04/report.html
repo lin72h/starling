@@ -125,13 +125,12 @@
   <header>
     <div class="eyebrow">Starling Desktop · Performance Report</div>
     <h1>What screen recording costs the app on screen</h1>
-    <p class="standfirst">One application — the ghostty terminal — runs on three Wayland
-      desktops on the same machine. While a screen recording runs, GNOME slows it ~6% and
-      Hyprland ~11%; Starling slows it ~4% and still delivers the frames GNOME drops. Before
-      any recording starts, the same app simply runs faster on Starling&rsquo;s compositor
-      (41 vs ~32&nbsp;MB/s) — and Starling&rsquo;s native terminal, riding the platform&rsquo;s
-      own app path instead of the Wayland protocol, is faster still. Numbers, mechanism, and
-      the defect this method found in our own path, below.</p>
+    <p class="standfirst">One application, one binary — the ghostty terminal — runs on three
+      Wayland desktops on the same machine. While a screen recording runs, GNOME slows it ~6%
+      and Hyprland ~11%; Starling slows it ~4% and still delivers the frames GNOME drops. And
+      before any recording starts, the same binary simply runs ~28% faster on Starling&rsquo;s
+      compositor (41 vs ~32&nbsp;MB/s). Numbers, mechanism, and the defect this method found
+      in our own path, below.</p>
     <div class="meta">
       <span>2026-08-04</span>
       <span>Ubuntu 26.04 · kernel 7.0.0-28</span>
@@ -145,9 +144,8 @@
     <div class="tile hero">
       <div class="who"><span class="dotk" style="background:var(--c-star)"></span>Starling</div>
       <div class="big">−4.1%</div>
-      <div class="sub">workload slowdown · same terminal as the others (ghostty), n=3, sd 0.7 ·
-        native terminal −2.6% · 28.8 fps delivered · and the fastest baseline of the three
-        (§2)</div>
+      <div class="sub">workload slowdown · same ghostty binary as the others, n=3, sd 0.7 ·
+        28.8 fps delivered · and the fastest baseline of the three (§2)</div>
     </div>
     <div class="tile">
       <div class="who"><span class="dotk" style="background:var(--c-gnome)"></span>GNOME</div>
@@ -192,11 +190,9 @@
     </div>
     <figcaption><b>Fig 1.</b> Loss of workload throughput while a screen recording runs —
       final protocol, 120&nbsp;s windows, n=3 per configuration. The cross-desktop comparison
-      is <em>the same terminal emulator (ghostty)</em>: Starling −4.1% vs GNOME −6.3% and
-      Hyprland −11.4%. Starling&rsquo;s native terminal — recently optimized to out-run ghostty
-      on this workload (48 vs 41 MB/s) — pays −2.6%. All Starling runs include the
-      capture-rate fix described in §3; pre-fix and short-window runs are in the data
-      table.</figcaption>
+      is <em>the same ghostty binary on all three</em>: Starling −4.1% vs GNOME −6.3% and
+      Hyprland −11.4%. All Starling runs include the capture-rate fix described in §4;
+      pre-fix and short-window runs are in the data table.</figcaption>
   </figure>
 
   <figure>
@@ -208,8 +204,7 @@
     <figcaption><b>Fig 2.</b> Same recordings, measured from the files. GNOME&rsquo;s pipeline
       undershoots its own 30&nbsp;fps cap (27.2–27.4) because its capture throttle keys off
       jittery idle-callback timestamps. Hyprland delivers a perfect 30.0 — and Fig&nbsp;1 shows
-      the client paying for every one of those frames. Starling&rsquo;s native terminal records
-      at 29.9; ghostty at 28.8.</figcaption>
+      the client paying for every one of those frames. Starling delivers 28.8.</figcaption>
   </figure>
 
   <figure>
@@ -240,15 +235,14 @@
     <div class="figbox">
       <p class="figtitle">Baseline throughput — same app, no recording</p>
       <p class="figunit">MB/s the terminal accepts from an unthrottled producer · dot = one run's baseline (mean of its two 120 s windows) · higher is better</p>
-      <svg id="fig-base" viewBox="0 0 820 240" role="img" aria-label="Dot plot of baseline throughput. Ghostty on Starling about 41 megabytes per second, on Hyprland about 32, on GNOME about 32. Starling's native terminal about 48."></svg>
+      <svg id="fig-base" viewBox="0 0 820 240" role="img" aria-label="Dot plot of baseline throughput. The same ghostty binary reaches about 41 megabytes per second on Starling, about 32 on Hyprland, and about 32 on GNOME."></svg>
     </div>
-    <figcaption><b>Fig 4.</b> Ghostty runs ~28% faster on Starling&rsquo;s compositor than on
-      GNOME or Hyprland (40.9 vs 31.8 / 32.5 MB/s mean of run baselines) — at 90% of the cell
-      count, which accounts for at most a third of the gap. The fourth lane is
-      Starling&rsquo;s <em>native</em> terminal: a first-party app on the platform&rsquo;s own
-      compositing path rather than the Wayland protocol, out-running the fastest Wayland
-      terminal we tested. It is a different program at a different grid, so this is evidence
-      the native path has headroom, not a controlled protocol comparison — see limits.</figcaption>
+    <figcaption><b>Fig 4.</b> The same ghostty binary runs ~28% faster on Starling&rsquo;s
+      compositor than on GNOME or Hyprland (40.9 vs 31.8 / 32.5 MB/s, mean of run baselines) —
+      at 90% of the cell count, which accounts for at most a third of the gap. Whatever a
+      compositor&rsquo;s frame-callback cadence, damage handling, and buffer turnaround are
+      worth, they are worth it here: this workload&rsquo;s ceiling is set by how fast the
+      compositor lets the client draw.</figcaption>
   </figure>
 
   <div class="prose">
@@ -325,17 +319,9 @@
       full-resolution copy. Capping capture at the source (engine <code>f9c06aee0b3</code>,
       shell <code>0908f9d</code>: presents inside the interval skip capture before touching the
       GPU) improved the short-window measurement from −4.7% to −3.4%; at the final two-minute
-      protocol the cost is <b>−4.1%</b> with ghostty and <b>−2.6%</b> with the native terminal.
-      The remainder is the capped 30/s blit itself in the present path. Notably, the native
-      terminal was heavily optimized between the exploratory and final runs (13.9 →
-      48&nbsp;MB/s on this workload) — as a slow client it had measured within noise; as a fast
-      one it pays the same per-present tax the model predicts. Both configurations avoid the
-      term that dominates on GNOME — there is no second composition of the scene, ever.</p>
-    <p>Taken together with §2, the native path wins on both sides of the ledger: it posts the
-      highest raw throughput on the box (48&nbsp;MB/s, Fig&nbsp;4) <em>and</em> the lowest
-      recording tax (−2.6%, Fig&nbsp;1) — a first-party app compositing through the
-      platform&rsquo;s own texture path rather than the Wayland protocol gives up nothing to
-      get recorded.</p>
+      protocol the cost is <b>−4.1%</b>. The remainder is the capped 30/s blit itself in the
+      present path. What Starling never pays is the term that dominates on GNOME — there is no
+      second composition of the scene, ever.</p>
 
     <h2>5 · Full data</h2>
     <div class="tablewrap">
@@ -344,11 +330,8 @@
           <tr><th>Desktop / config</th><th>Run</th><th>Slowdown</th><th>Delivered fps</th><th>Encoder CPU</th><th>Bitrate</th></tr>
         </thead>
         <tbody>
-          <tr><td class="t" colspan="6" style="font-weight:600; background:var(--panel);">Final protocol — 120 s windows</td></tr>
-          <tr><td class="t">Starling · native terminal</td><td>1</td><td>−2.8%</td><td>29.9</td><td>+0.06 cores¹</td><td>18.8 Mbps</td></tr>
-          <tr><td class="t"></td><td>2</td><td>−2.7%</td><td>29.9</td><td>+0.06</td><td>18.8</td></tr>
-          <tr><td class="t"></td><td>3</td><td>−2.2%</td><td>30.0</td><td>+0.06</td><td>18.8</td></tr>
-          <tr><td class="t">Starling · ghostty</td><td>1</td><td>−3.8%</td><td>28.8</td><td>+0.03</td><td>19.0</td></tr>
+          <tr><td class="t" colspan="6" style="font-weight:600; background:var(--panel);">Final protocol — 120 s windows, same ghostty binary</td></tr>
+          <tr><td class="t">Starling · ghostty</td><td>1</td><td>−3.8%</td><td>28.8</td><td>+0.03 cores¹</td><td>19.0 Mbps</td></tr>
           <tr><td class="t"></td><td>2</td><td>−3.6%</td><td>28.8</td><td>+0.01</td><td>18.9</td></tr>
           <tr><td class="t"></td><td>3</td><td>−5.0%</td><td>28.9</td><td>+0.06</td><td>19.0</td></tr>
           <tr><td class="t">GNOME · ghostty (hw H.264)</td><td>1</td><td>−6.1%</td><td>27.2</td><td>±0.00</td><td>23.2</td></tr>
@@ -368,10 +351,6 @@
           <tr><td class="t"></td><td>3</td><td>−6.6%</td><td>28.9</td><td>+0.01</td><td>19.2</td></tr>
           <tr><td class="t"></td><td>4</td><td>−7.8%</td><td>29.1</td><td>+0.02</td><td>19.3</td></tr>
           <tr><td class="t"></td><td>5</td><td>−5.1%</td><td>28.8</td><td>+0.02</td><td>19.0</td></tr>
-          <tr><td class="t">Starling · native terminal</td><td>1</td><td>−0.1%</td><td>30.0</td><td>+0.07 cores¹</td><td>19.8 Mbps</td></tr>
-          <tr><td class="t"></td><td>2</td><td>+1.2%</td><td>29.6</td><td>+0.04</td><td>19.4</td></tr>
-          <tr><td class="t"></td><td>3</td><td>−4.7%</td><td>28.3</td><td>+0.07</td><td>18.7</td></tr>
-          <tr><td class="t"></td><td>4</td><td>−0.9%</td><td>28.9</td><td>+0.03</td><td>19.1</td></tr>
           <tr><td class="t">GNOME (hw H.264)</td><td>1</td><td>−15.8%</td><td>27.3</td><td>~0.02</td><td>23.3 Mbps</td></tr>
           <tr><td class="t"></td><td>2</td><td>−17.4%</td><td>—³</td><td>~0.02</td><td>—</td></tr>
           <tr><td class="t"></td><td>3</td><td>−15.4%</td><td>—</td><td>~0.02</td><td>—</td></tr>
@@ -401,19 +380,20 @@
         <li><b>Grids are matched, not identical.</b> The same terminal (ghostty 1.3.0) ran on
           all three desktops for the headline comparison, at 8,500 cells on GNOME/Hyprland and
           7,644 cells (90%) on Starling — the closest its cell-quantized sizing allows at the
-          panel&rsquo;s scale. The native-terminal configuration (5,694 cells, ~90% screen
-          coverage) is reported separately. The metric is each configuration&rsquo;s change
-          against <em>its own</em> baseline, so terminal and grid differences divide out of
-          the comparison.</li>
-        <li><b>The baseline comparison (§2) carries two confounds the slowdown numbers do
-          not.</b> Cross-session variance: baselines were measured in different login sessions
-          hours apart, and ghostty&rsquo;s session-to-session spread on GNOME reached several
-          MB/s in exploratory runs — though Starling&rsquo;s worst session baseline (39.2)
-          still exceeded GNOME&rsquo;s and Hyprland&rsquo;s best. And the native-terminal lane
-          is a <em>different program</em> at a smaller grid: it demonstrates the native app
-          path out-running the best Wayland terminal on this box, not a controlled
-          protocol-vs-protocol measurement. The controlled version — one renderer, two
-          transports — is future work.</li>
+          panel&rsquo;s scale. The metric is each configuration&rsquo;s change against
+          <em>its own</em> baseline, so the grid difference divides out of the slowdown
+          comparison (it does not divide out of the §2 baseline comparison, where it is
+          accounted for in the text).</li>
+        <li><b>The baseline comparison (§2) carries a confound the slowdown numbers do
+          not.</b> Baselines were measured in different login sessions hours apart, and
+          ghostty&rsquo;s session-to-session spread on GNOME reached several MB/s in
+          exploratory runs. Across every session measured on this box, Starling&rsquo;s ghostty baselines
+          stayed in a 39.4–44&nbsp;MB/s band; GNOME&rsquo;s best exploratory session reached
+          ~39.6 with the rest at 31–38, and Hyprland&rsquo;s peaked at 36.5 — the
+          distributions overlap only at their extremes, and the matched final runs
+          (Fig&nbsp;4) show the gap under the cleanest conditions. A same-session A/B
+          (one login each, back to back) would remove this confound entirely and is cheap to
+          run.</li>
         <li><b>Window length changes the answer.</b> 20–25&nbsp;s windows measured GNOME at
           −12% and Hyprland at −13.9%; two-minute windows give −6.3% and −11.4%. Short windows
           overstate cost (warm-up and drift dominate) — which is why the final protocol is two
@@ -476,8 +456,7 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-slow");
     const W = 820, L = 150, R = 40, T = 18, laneH = 62;
     const lanes = [
-      { name: "Starling · native", cls: "star", runs: [2.8, 2.7, 2.2], mean: 2.6 },
-      { name: "Starling · ghostty", cls: "star", runs: [3.8, 3.6, 5.0], mean: 4.1 },
+      { name: "Starling", cls: "star", runs: [3.8, 3.6, 5.0], mean: 4.1 },
       { name: "GNOME", cls: "gnome", runs: [6.1, 6.3, 6.6], mean: 6.3 },
       { name: "Hyprland", cls: "hypr", runs: [14.5, 10.3, 9.4], mean: 11.4 },
     ];
@@ -511,8 +490,7 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-fps");
     const W = 820, L = 190, R = 40, T = 18, laneH = 44;
     const lanes = [
-      { name: "Starling · native", cls: "star", runs: [29.94, 29.93, 29.95] },
-      { name: "Starling · ghostty", cls: "star", runs: [28.77, 28.76, 28.85] },
+      { name: "Starling", cls: "star", runs: [28.77, 28.76, 28.85] },
       { name: "Hyprland", cls: "hypr", runs: [30.01, 30.0, 30.01] },
       { name: "GNOME · hw", cls: "gnome", runs: [27.2, 27.27, 27.37] },
       { name: "GNOME · default", cls: "gnome", runs: [25.3] },
@@ -543,10 +521,9 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-base");
     const W = 820, L = 250, R = 60, T = 18, laneH = 46;
     const lanes = [
-      { name: "Starling · ghostty · 7,644 cells", cls: "star", runs: [40.89, 40.76, 40.98] },
-      { name: "Hyprland · ghostty · 8,500 cells", cls: "hypr", runs: [33.64, 32.06, 31.68] },
-      { name: "GNOME · ghostty · 8,500 cells", cls: "gnome", runs: [31.93, 31.79, 31.77] },
-      { name: "Starling · native app · 5,694 cells", cls: "star", runs: [48.88, 48.35, 48.17] },
+      { name: "Starling · 7,644 cells", cls: "star", runs: [40.89, 40.76, 40.98] },
+      { name: "Hyprland · 8,500 cells", cls: "hypr", runs: [33.64, 32.06, 31.68] },
+      { name: "GNOME · 8,500 cells", cls: "gnome", runs: [31.93, 31.79, 31.77] },
     ];
     const min = 0, max = 52;
     const x = v => L + (v - min) / (max - min) * (W - L - R);
