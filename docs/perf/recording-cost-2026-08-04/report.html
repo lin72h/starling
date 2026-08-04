@@ -126,37 +126,38 @@
     <div class="eyebrow">Starling Desktop · Performance Report</div>
     <h1>What screen recording costs the app on screen</h1>
     <p class="standfirst">Three Wayland desktops record the same workload — the same terminal
-      emulator, the same machine. Recording costs the recorded application ~12–14% of its
-      throughput on GNOME and Hyprland, and ~3% on Starling; with Starling&rsquo;s native
-      terminal the cost disappears into noise. This report shows the numbers, traces the
-      mechanism to compositor source — and, applying the same method to Starling&rsquo;s own
-      residual, found and fixed part of it.</p>
+      emulator, the same machine, two-minute measurement windows. Recording costs the recorded
+      application ~6% of its throughput on GNOME and ~11% on Hyprland, against ~4% on Starling
+      (~3% with its native terminal) — and Starling delivers the frames GNOME drops. This
+      report shows the numbers, traces the mechanism to compositor source — and, applying the
+      same method to Starling&rsquo;s own residual, found and fixed part of it.</p>
     <div class="meta">
       <span>2026-08-04</span>
       <span>Ubuntu 26.04 · kernel 7.0.0-28</span>
       <span>Ryzen 7 7735HS · Radeon 680M</span>
       <span>eDP-1 2560×1600 @ 90 Hz</span>
-      <span>GNOME 50.1 · Hyprland 0.53.3 · Starling main@0908f9d</span>
+      <span>GNOME 50.1 · Hyprland 0.53.3 · Starling main@e185737</span>
     </div>
   </header>
 
   <div class="tiles" role="group" aria-label="Headline results: workload slowdown while recording">
     <div class="tile hero">
       <div class="who"><span class="dotk" style="background:var(--c-star)"></span>Starling</div>
-      <div class="big">−3.4%</div>
-      <div class="sub">workload slowdown · same terminal as the others (ghostty), n=5 ·
-        was −4.7% before a capture-rate fix this report motivated ·
-        native terminal: −1.1% (n=4), within noise</div>
+      <div class="big">−4.1%</div>
+      <div class="sub">workload slowdown · same terminal as the others (ghostty), n=3, sd 0.7 ·
+        native terminal −2.6% · 28.8 fps delivered</div>
     </div>
     <div class="tile">
       <div class="who"><span class="dotk" style="background:var(--c-gnome)"></span>GNOME</div>
-      <div class="big">−12.0%</div>
-      <div class="sub">workload slowdown · n=7, range −5.8 to −17.4 · hardware encode</div>
+      <div class="big">−6.3%</div>
+      <div class="sub">workload slowdown · n=3, sd 0.3 · hardware encode ·
+        27.3 fps delivered of the 30 requested</div>
     </div>
     <div class="tile">
       <div class="who"><span class="dotk" style="background:var(--c-hypr)"></span>Hyprland</div>
-      <div class="big">−13.9%</div>
-      <div class="sub">workload slowdown · n=1 · hardware encode (wf-recorder)</div>
+      <div class="big">−11.4%</div>
+      <div class="sub">workload slowdown · n=3, sd 2.7 · hardware encode (wf-recorder) ·
+        full 30.0 fps delivered — every frame captured, and the client pays for it</div>
     </div>
   </div>
 
@@ -169,12 +170,16 @@
       <code>wchar</code> counter in <code>/proc</code>) is a live probe of how fast the
       whole display path is running. If recording slows the desktop&rsquo;s frame delivery,
       throughput falls — even when no process looks CPU-bound.</p>
-    <p>Each run is three 20–25&nbsp;s windows: baseline, recording, baseline again. The cost of
-      recording is the throughput drop in the middle window against the mean of the flanking
-      baselines; runs with high baseline drift report it. All recordings target 30&nbsp;fps at
-      2560×1600 with <strong>hardware H.264 (VAAPI) on every desktop</strong> — GNOME&rsquo;s
-      out-of-the-box software-VP8 configuration is shown separately, because it is what users
-      actually get by default.</p>
+    <p>Each run is three <strong>120&nbsp;s windows</strong>: baseline, recording, baseline
+      again. The cost of recording is the throughput drop in the middle window against the mean
+      of the flanking baselines; every run reports its baseline drift (≤0.01 cores in almost
+      all final runs). All recordings target 30&nbsp;fps at 2560×1600 with <strong>hardware
+      H.264 (VAAPI) on every desktop</strong> — GNOME&rsquo;s out-of-the-box software-VP8
+      configuration is shown separately, because it is what users actually get by default.
+      Earlier exploratory runs used 20–25&nbsp;s windows; those systematically
+      <em>overstated</em> GNOME&rsquo;s cost (−12% apparent vs −6.3% at two minutes), because
+      pipeline warm-up and session-settling drift occupy a large fraction of a short window.
+      They are retained in the data table, labeled, and superseded.</p>
   </div>
 
   <figure>
@@ -183,14 +188,13 @@
       <p class="figunit">% of baseline throughput lost during the recording window · dot = one run · thick tick = mean</p>
       <svg id="fig-slow" viewBox="0 0 820 240" role="img" aria-label="Strip plot of throughput loss per run. Starling four runs near zero, GNOME seven runs between 5.8 and 17.4 percent, Hyprland one run at 13.9 percent."></svg>
     </div>
-    <figcaption><b>Fig 1.</b> Loss of workload throughput while a screen recording runs, per run.
-      The primary comparison is the top lane against GNOME and Hyprland: <em>the same terminal
-      emulator (ghostty) on all three desktops</em> — Starling mean −3.4% (n=5) vs −12.0% (n=7)
-      and −13.9% (n=1). The Starling runs include the capture-rate fix described in §3 (−4.7%
-      before it; both sets in the data table). With Starling&rsquo;s native terminal (second
-      lane) the cost is −1.1% (n=4), indistinguishable from zero against baseline drift; the
-      native terminal produces frames at a lower rate, which keeps the recorder&rsquo;s
-      per-present copy out of its way.</figcaption>
+    <figcaption><b>Fig 1.</b> Loss of workload throughput while a screen recording runs —
+      final protocol, 120&nbsp;s windows, n=3 per configuration. The cross-desktop comparison
+      is <em>the same terminal emulator (ghostty)</em>: Starling −4.1% vs GNOME −6.3% and
+      Hyprland −11.4%. Starling&rsquo;s native terminal — recently optimized to out-run ghostty
+      on this workload (48 vs 41 MB/s) — pays −2.6%. All Starling runs include the
+      capture-rate fix described in §3; pre-fix and short-window runs are in the data
+      table.</figcaption>
   </figure>
 
   <figure>
@@ -200,9 +204,10 @@
       <svg id="fig-fps" viewBox="0 0 820 220" role="img" aria-label="Dot plot of delivered frame rate. Starling 28.3 to 30.0, Hyprland 30.0, GNOME hardware 27.2 to 27.3, GNOME default 25.3, against a 30 fps target line."></svg>
     </div>
     <figcaption><b>Fig 2.</b> Same recordings, measured from the files. GNOME&rsquo;s pipeline
-      undershoots its own 30&nbsp;fps cap (27.2–27.3) because its capture throttle keys off
-      jittery idle-callback timestamps; Hyprland and Starling deliver the target
-      (Starling 28.3–30.0 across runs).</figcaption>
+      undershoots its own 30&nbsp;fps cap (27.2–27.4) because its capture throttle keys off
+      jittery idle-callback timestamps. Hyprland delivers a perfect 30.0 — and Fig&nbsp;1 shows
+      the client paying for every one of those frames. Starling&rsquo;s native terminal records
+      at 29.9; ghostty at 28.8.</figcaption>
   </figure>
 
   <figure>
@@ -213,10 +218,11 @@
     </div>
     <figcaption><b>Fig 3.</b> With VAAPI available, encode cost collapses to noise on every
       desktop — the AMD VCN block does the work. The slowdown in Fig&nbsp;1 therefore is
-      <em>not</em> encoder contention: GNOME loses 12% with an encoder costing 0.02 cores and
+      <em>not</em> encoder contention: GNOME loses 6.3% with an encoder costing 0.02 cores and
       ~13 CPU cores idle. Note the default Ubuntu GNOME install lacks
       <code>gstreamer1.0-plugins-bad</code> and silently falls back to software VP8 at 7.55
-      cores — and a −54% workload hit.</figcaption>
+      cores — and a −54% workload hit (short-window measurement, not re-run at two
+      minutes; the encoder cores are what matter here).</figcaption>
   </figure>
 
   <div class="prose">
@@ -286,18 +292,19 @@
       new CPU consumer visible on the whole system is a kernel VCN worker
       (<code>kworker/…vcn_enc</code>) and ~0.02–0.07 cores of bookkeeping.</p>
     <p>The copy is cheap, not free: it rides the engine&rsquo;s presenting thread ahead of the
-      swap, and against a client that produces frames as fast as ghostty does, it showed up as a
-      residual ~5%. Applying this report&rsquo;s own method to that residual found a defect:
-      the capture ran once per <em>present</em> with no rate cap of its own — the shell held the
-      encoded rate to 30&nbsp;fps by discarding frames downstream, after each had already paid
-      for its full-resolution copy. Capping capture at the source (engine
-      <code>f9c06aee0b3</code>, shell <code>0908f9d</code>: presents inside the interval skip
-      capture before touching the GPU) took the measured cost from −4.7% to
-      <b>−3.4%</b> (n=5 each, fps unchanged). The remainder is the capped 30/s blit itself in
-      the present path. Against Starling&rsquo;s own terminal, which produces frames at a lower
-      rate, the effect stays below measurement noise (−1.1&nbsp;±&nbsp;2.4%). Both
-      configurations avoid the term that dominates on GNOME — there is no second composition of
-      the scene, ever.</p>
+      swap, and against a fast client it showed up as a residual ~5%. Applying this
+      report&rsquo;s own method to that residual found a defect: the capture ran once per
+      <em>present</em> with no rate cap of its own — the shell held the encoded rate to
+      30&nbsp;fps by discarding frames downstream, after each had already paid for its
+      full-resolution copy. Capping capture at the source (engine <code>f9c06aee0b3</code>,
+      shell <code>0908f9d</code>: presents inside the interval skip capture before touching the
+      GPU) improved the short-window measurement from −4.7% to −3.4%; at the final two-minute
+      protocol the cost is <b>−4.1%</b> with ghostty and <b>−2.6%</b> with the native terminal.
+      The remainder is the capped 30/s blit itself in the present path. Notably, the native
+      terminal was heavily optimized between the exploratory and final runs (13.9 →
+      48&nbsp;MB/s on this workload) — as a slow client it had measured within noise; as a fast
+      one it pays the same per-present tax the model predicts. Both configurations avoid the
+      term that dominates on GNOME — there is no second composition of the scene, ever.</p>
 
     <h2>4 · Full data</h2>
     <div class="tablewrap">
@@ -306,6 +313,20 @@
           <tr><th>Desktop / config</th><th>Run</th><th>Slowdown</th><th>Delivered fps</th><th>Encoder CPU</th><th>Bitrate</th></tr>
         </thead>
         <tbody>
+          <tr><td class="t" colspan="6" style="font-weight:600; background:var(--panel);">Final protocol — 120 s windows</td></tr>
+          <tr><td class="t">Starling · native terminal</td><td>1</td><td>−2.8%</td><td>29.9</td><td>+0.06 cores¹</td><td>18.8 Mbps</td></tr>
+          <tr><td class="t"></td><td>2</td><td>−2.7%</td><td>29.9</td><td>+0.06</td><td>18.8</td></tr>
+          <tr><td class="t"></td><td>3</td><td>−2.2%</td><td>30.0</td><td>+0.06</td><td>18.8</td></tr>
+          <tr><td class="t">Starling · ghostty</td><td>1</td><td>−3.8%</td><td>28.8</td><td>+0.03</td><td>19.0</td></tr>
+          <tr><td class="t"></td><td>2</td><td>−3.6%</td><td>28.8</td><td>+0.01</td><td>18.9</td></tr>
+          <tr><td class="t"></td><td>3</td><td>−5.0%</td><td>28.9</td><td>+0.06</td><td>19.0</td></tr>
+          <tr><td class="t">GNOME · ghostty (hw H.264)</td><td>1</td><td>−6.1%</td><td>27.2</td><td>±0.00</td><td>23.2</td></tr>
+          <tr><td class="t"></td><td>2</td><td>−6.3%</td><td>27.3</td><td>±0.00</td><td>23.3</td></tr>
+          <tr><td class="t"></td><td>3</td><td>−6.6%</td><td>27.4</td><td>±0.00</td><td>23.4</td></tr>
+          <tr><td class="t">Hyprland · ghostty (hw H.264)</td><td>1</td><td>−14.5%²</td><td>30.0</td><td>+0.03</td><td>50.7</td></tr>
+          <tr><td class="t"></td><td>2</td><td>−10.3%</td><td>30.0</td><td>+0.03</td><td>50.8</td></tr>
+          <tr><td class="t"></td><td>3</td><td>−9.4%</td><td>30.0</td><td>+0.03</td><td>50.7</td></tr>
+          <tr><td class="t" colspan="6" style="font-weight:600; background:var(--panel);">Exploratory — 20–25 s windows (superseded; overstates cost)</td></tr>
           <tr><td class="t">Starling · ghostty, capture-rate cap (§3)</td><td>1</td><td>+0.2%</td><td>29.2</td><td>+0.06 cores¹</td><td>19.3 Mbps</td></tr>
           <tr><td class="t"></td><td>2</td><td>−2.4%</td><td>29.1</td><td>+0.07</td><td>19.3</td></tr>
           <tr><td class="t"></td><td>3</td><td>−5.9%</td><td>29.0</td><td>+0.01</td><td>19.0</td></tr>
@@ -321,7 +342,7 @@
           <tr><td class="t"></td><td>3</td><td>−4.7%</td><td>28.3</td><td>+0.07</td><td>18.7</td></tr>
           <tr><td class="t"></td><td>4</td><td>−0.9%</td><td>28.9</td><td>+0.03</td><td>19.1</td></tr>
           <tr><td class="t">GNOME (hw H.264)</td><td>1</td><td>−15.8%</td><td>27.3</td><td>~0.02</td><td>23.3 Mbps</td></tr>
-          <tr><td class="t"></td><td>2</td><td>−17.4%</td><td>—²</td><td>~0.02</td><td>—</td></tr>
+          <tr><td class="t"></td><td>2</td><td>−17.4%</td><td>—³</td><td>~0.02</td><td>—</td></tr>
           <tr><td class="t"></td><td>3</td><td>−15.4%</td><td>—</td><td>~0.02</td><td>—</td></tr>
           <tr><td class="t"></td><td>4</td><td>−14.2%</td><td>—</td><td>~0.02</td><td>—</td></tr>
           <tr><td class="t"></td><td>5</td><td>−5.8%</td><td>—</td><td>~0.02</td><td>—</td></tr>
@@ -333,9 +354,12 @@
       </table>
     </div>
     <p style="font-size:13.5px; color:var(--ink-2); margin-top:10px;">
-      ¹ Starling&rsquo;s figure is whole-system CPU delta (shell +0.03–0.04 of it); encode runs on the VCN block.
-      ² fps is measured by decoding the file; the per-rep GNOME benchmark overwrote its output, so only two files were probed.
-      ³ wf-recorder&rsquo;s default VAAPI rate control is untuned; bitrates are not quality-normalized (see limits).</p>
+      ¹ Starling&rsquo;s figure is whole-system CPU delta; encode runs on the VCN block.
+      ² First run after a session switch; its windows carried 0.13 cores of settling drift, the
+      most of any final run. Reported, not discarded.
+      ³ wf-recorder&rsquo;s default VAAPI rate control is untuned; bitrates are not
+      quality-normalized (see limits). In the exploratory rows, missing fps values are runs
+      whose output the harness overwrote before probing.</p>
 
     <h2>5 · What this report does not claim</h2>
     <div class="callout">
@@ -346,11 +370,15 @@
         <li><b>Grids are matched, not identical.</b> The same terminal (ghostty 1.3.0) ran on
           all three desktops for the headline comparison, at 8,500 cells on GNOME/Hyprland and
           7,644 cells (90%) on Starling — the closest its cell-quantized sizing allows at the
-          panel&rsquo;s scale. The native-terminal configuration (6,601 cells) is reported
-          separately. The metric is each configuration&rsquo;s change against <em>its own</em>
-          baseline, so terminal and grid differences divide out of the comparison.</li>
-        <li><b>Hyprland is a single run</b>, included as an architectural cross-check, not a
-          characterized distribution.</li>
+          panel&rsquo;s scale. The native-terminal configuration (5,694 cells, ~90% screen
+          coverage) is reported separately. The metric is each configuration&rsquo;s change
+          against <em>its own</em> baseline, so terminal and grid differences divide out of
+          the comparison.</li>
+        <li><b>Window length changes the answer.</b> 20–25&nbsp;s windows measured GNOME at
+          −12% and Hyprland at −13.9%; two-minute windows give −6.3% and −11.4%. Short windows
+          overstate cost (warm-up and drift dominate) — which is why the final protocol is two
+          minutes, and why both sets are published. The mechanism evidence (Fig&nbsp;4, the
+          debug-log repaints) is unaffected.</li>
         <li><b>One machine.</b> AMD iGPU, 90 Hz HiDPI panel. Ratios will differ elsewhere;
           the mechanism (per-frame recomposition on the shared GPU/main thread) will not.</li>
         <li><b>GNOME&rsquo;s numbers are its best case</b> — hardware encode was installed and
@@ -408,10 +436,10 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-slow");
     const W = 820, L = 150, R = 40, T = 18, laneH = 62;
     const lanes = [
-      { name: "Starling · ghostty", cls: "star", runs: [-0.2, 2.4, 5.9, 3.3, 5.8], mean: 3.4 },
-      { name: "Starling · native", cls: "star", runs: [0.1, -1.2, 4.7, 0.9], mean: 1.1 },
-      { name: "GNOME", cls: "gnome", runs: [15.8, 17.4, 15.4, 14.2, 5.8, 6.3, 9.4], mean: 12.0 },
-      { name: "Hyprland", cls: "hypr", runs: [13.9], mean: 13.9 },
+      { name: "Starling · native", cls: "star", runs: [2.8, 2.7, 2.2], mean: 2.6 },
+      { name: "Starling · ghostty", cls: "star", runs: [3.8, 3.6, 5.0], mean: 4.1 },
+      { name: "GNOME", cls: "gnome", runs: [6.1, 6.3, 6.6], mean: 6.3 },
+      { name: "Hyprland", cls: "hypr", runs: [14.5, 10.3, 9.4], mean: 11.4 },
     ];
     const min = -4, max = 20;
     const x = v => L + (v - min) / (max - min) * (W - L - R);
@@ -443,10 +471,10 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-fps");
     const W = 820, L = 190, R = 40, T = 18, laneH = 44;
     const lanes = [
-      { name: "Starling · ghostty", cls: "star", runs: [29.2, 29.1, 29.0, 28.9, 28.9] },
-      { name: "Starling · native", cls: "star", runs: [30.0, 29.6, 28.3, 28.9] },
-      { name: "Hyprland", cls: "hypr", runs: [30.0] },
-      { name: "GNOME · hw", cls: "gnome", runs: [27.3, 27.2] },
+      { name: "Starling · native", cls: "star", runs: [29.94, 29.93, 29.95] },
+      { name: "Starling · ghostty", cls: "star", runs: [28.77, 28.76, 28.85] },
+      { name: "Hyprland", cls: "hypr", runs: [30.01, 30.0, 30.01] },
+      { name: "GNOME · hw", cls: "gnome", runs: [27.2, 27.27, 27.37] },
       { name: "GNOME · default", cls: "gnome", runs: [25.3] },
     ];
     const min = 24, max = 31;
