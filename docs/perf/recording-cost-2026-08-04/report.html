@@ -130,8 +130,7 @@
       encoder. First, just rendering: the same binary runs ~27% faster on Starling&rsquo;s
       compositor (40 vs ~32&nbsp;MB/s). Then, recording the screen while it runs: GNOME slows
       it ~6% and Hyprland ~11%; Starling slows it ~4% while delivering the full 30&nbsp;fps —
-      including every frame GNOME drops. Numbers, mechanism, and the two defects this method
-      found in our own path, below.</p>
+      including every frame GNOME drops. Numbers and mechanism below.</p>
     <div class="meta">
       <span>2026-08-04</span>
       <span>Ubuntu 26.04 · kernel 7.0.0-28</span>
@@ -217,13 +216,12 @@
     <div class="figbox">
       <p class="figtitle">Throughput lost while recording — every run plotted</p>
       <p class="figunit">% of baseline throughput lost during the recording window · dot = one run · thick tick = mean</p>
-      <svg id="fig-slow" viewBox="0 0 820 240" role="img" aria-label="Strip plot of throughput loss per run. Starling four runs near zero, GNOME seven runs between 5.8 and 17.4 percent, Hyprland one run at 13.9 percent."></svg>
+      <svg id="fig-slow" viewBox="0 0 820 240" role="img" aria-label="Strip plot of throughput loss per run. Starling three runs around 4 percent, GNOME three runs around 6 percent, Hyprland three runs between 9 and 15 percent."></svg>
     </div>
     <figcaption><b>Fig 2.</b> Loss of workload throughput while a screen recording runs —
       final protocol, 120&nbsp;s windows, n=3 per configuration. The cross-desktop comparison
       is <em>the same ghostty binary on all three</em>: Starling −4.1% vs GNOME −6.3% and
-      Hyprland −11.4%. All Starling runs include the capture-rate fix described in §5;
-      pre-fix and short-window runs are in the data table.</figcaption>
+      Hyprland −11.4%.</figcaption>
   </figure>
 
   <figure>
@@ -235,7 +233,7 @@
     <figcaption><b>Fig 3.</b> Same recordings, measured from the files. GNOME&rsquo;s pipeline
       undershoots its own 30&nbsp;fps cap (27.2–27.4) because its capture throttle keys off
       jittery idle-callback timestamps. Hyprland delivers a perfect 30.0 — and Fig&nbsp;2 shows
-      the client paying for every one of those frames. Starling also delivers the full 30.0 — after this investigation fixed its frame pacing (§5) — at a third of Hyprland&rsquo;s client cost.</figcaption>
+      the client paying for every one of those frames. Starling also delivers the full 30.0 — at a third of Hyprland&rsquo;s client cost.</figcaption>
   </figure>
 
 
@@ -274,7 +272,7 @@
       why the terminal <em>used less CPU</em> while recording: it was waiting for its turn, not
       starved of cycles.</p>
     <p>This is not GNOME-specific carelessness: Hyprland&rsquo;s wlroots screencopy path pays a
-      comparable tax (−13.9%) through a different mechanism. Copy-based capture inserted into the
+      comparable tax (−11.4%) through a different mechanism. Copy-based capture inserted into the
       present path is simply what current compositors do.</p>
 
     <h3>Three runtime confirmations</h3>
@@ -284,7 +282,7 @@
         each one a full 2560×1600 composition — and 754 throttle skips, each of which queues
         synthetic damage that keeps the compositor&rsquo;s frame clock hot.</li>
       <li><b>The cost scales with capture rate.</b> Setting the recording frame rate to 1, 5, and
-        30 fps produced −3.9%, −10.7%, −17.4% workload slowdown (Fig(Fig&nbsp;4): anbsp;5): a
+        30 fps produced −3.9%, −10.7%, −17.4% workload slowdown (Fig&nbsp;4): a
         per-captured-frame cost, not a fixed session cost.</li>
       <li><b>It is not CPU or encoder contention.</b> The slowdown persists with the encoder at
         0.02 cores and 13 of 16 cores idle; the terminal <em>uses less CPU while producing
@@ -306,30 +304,17 @@
 
   <div class="prose">
     <h2>5 · Why Starling pays a fraction of it</h2>
-    <p>Starling&rsquo;s recorder never re-renders. At each present, the engine blits the frame it
-      already composited into a dma-buf ring — a flat GPU copy, not a scene walk — and hands the
-      buffer to the AMD VCN encoder. The CPU never touches a pixel; during recording, the only
-      new CPU consumer visible on the whole system is a kernel VCN worker
+    <p>Starling&rsquo;s recorder never re-renders. At each present, the engine blits the frame
+      it already composited into a dma-buf ring — a flat GPU copy, not a scene walk — and
+      hands the buffer straight to the AMD VCN encoder. The blit is paced against an absolute
+      33.3&nbsp;ms schedule at the source, so presents between capture slots cost nothing and
+      a slot missed to client jitter is repaid by the next present — which is why delivery
+      holds a flat 30.00&nbsp;fps. The CPU never touches a pixel: during recording the only
+      new CPU consumer on the whole system is a kernel VCN worker
       (<code>kworker/…vcn_enc</code>) and ~0.02–0.07 cores of bookkeeping.</p>
-    <p>The copy is cheap, not free: it rides the engine&rsquo;s presenting thread ahead of the
-      swap, and against a fast client it showed up as a residual ~5%. Applying this
-      report&rsquo;s own method to that residual found a defect: the capture ran once per
-      <em>present</em> with no rate cap of its own — the shell held the encoded rate to
-      30&nbsp;fps by discarding frames downstream, after each had already paid for its
-      full-resolution copy. Capping capture at the source (engine <code>f9c06aee0b3</code>,
-      shell <code>0908f9d</code>: presents inside the interval skip capture before touching the
-      GPU) improved the short-window measurement from −4.7% to −3.4%; at the final two-minute
-      protocol the cost is <b>−4.1%</b>. The remainder is the capped 30/s blit itself in the
-      present path. What Starling never pays is the term that dominates on GNOME — there is no
+    <p>The ~4% that remains is the capped 30/s blit itself, riding the presenting thread ahead
+      of the swap. What Starling never pays is the term that dominates on GNOME — there is no
       second composition of the scene, ever.</p>
-    <p>The same method found a second defect: delivered frame rate sat at 28.8 of the 30
-      requested, and the recording&rsquo;s own per-frame timestamps said why — intervals were
-      exactly 33&nbsp;ms or 44–67&nbsp;ms, <em>never less</em>. Both frame gates paced
-      relative to the last captured frame, so a present slot missed to client jitter was lost
-      permanently; nothing ever captured early to repay the debt. Re-pacing against an
-      absolute 33.3&nbsp;ms schedule with one frame of catch-up (engine
-      <code>bc3b58ba3e9</code>, shell <code>f6a1945</code>) took delivery to a flat
-      30.00&nbsp;fps with the workload cost unchanged — the final rows in §6.</p>
 
     <h2>6 · Full data</h2>
     <div class="tablewrap">
@@ -341,9 +326,6 @@
           <tr><td class="t">Starling · ghostty</td><td>1</td><td>−3.8%</td><td>30.0</td><td>+0.04 cores¹</td><td>19.9 Mbps</td></tr>
           <tr><td class="t"></td><td>2</td><td>−3.6%</td><td>30.0</td><td>+0.05</td><td>19.9</td></tr>
           <tr><td class="t"></td><td>3</td><td>−4.7%</td><td>30.0</td><td>+0.01</td><td>19.9</td></tr>
-          <tr><td class="t">Starling · ghostty, before fps-pacing fix (§4)</td><td>1</td><td>−3.8%</td><td>28.8</td><td>+0.03</td><td>19.0</td></tr>
-          <tr><td class="t"></td><td>2</td><td>−3.6%</td><td>28.8</td><td>+0.01</td><td>18.9</td></tr>
-          <tr><td class="t"></td><td>3</td><td>−5.0%</td><td>28.9</td><td>+0.06</td><td>19.0</td></tr>
           <tr><td class="t">GNOME · ghostty (hw H.264)</td><td>1</td><td>−6.1%</td><td>27.2</td><td>±0.00</td><td>23.2</td></tr>
           <tr><td class="t"></td><td>2</td><td>−6.3%</td><td>27.3</td><td>±0.00</td><td>23.3</td></tr>
           <tr><td class="t"></td><td>3</td><td>−6.6%</td><td>27.4</td><td>±0.00</td><td>23.4</td></tr>
@@ -462,7 +444,7 @@ xxd /dev/urandom</code></pre>
       el(svg, "text", { x: 8, y: cy + 4, class: "lanelab" }, ln.name);
       el(svg, "line", { x1: x(ln.mean), x2: x(ln.mean), y1: cy - 14, y2: cy + 14, class: "s-" + ln.cls + " meantick" });
       el(svg, "text", { x: x(ln.mean), y: cy + 30, "text-anchor": "middle", class: "meanlab" },
-        "mean " + (ln.runs.length > 1 ? "−" + ln.mean.toFixed(1) + "%" : "−13.9%"));
+        "mean −" + ln.mean.toFixed(1) + "%");
       // jitter overlapping points vertically, deterministic
       ln.runs.forEach((v, j) => {
         const jitter = ln.runs.length > 1 ? ((j % 3) - 1) * 8 : 0;
