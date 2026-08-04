@@ -50,6 +50,12 @@ class _VideoPlayerState: State<StatefulWidget> {
     private var decodeH = 0
     /// True while a resize respawn is waiting out its debounce.
     private var resizeRespawnPending = false
+    /// Playback position last shown by a rebuild. The texture updates itself
+    /// (the engine re-composites on the frame the update schedules), so the
+    /// widget tree only needs rebuilding when the CHROME changes — the clock
+    /// and the scrubber thumb — which nobody can read faster than this.
+    private var lastShownPosition: Double = -1
+    private static let kChromeUpdateInterval = 0.1
     #if os(Linux)
     /// Whether THIS file decodes on the GPU. Decided per file at open, by
     /// trying — hardware support is a property of the codec and the device,
@@ -157,6 +163,7 @@ class _VideoPlayerState: State<StatefulWidget> {
         let wasPlaying = isPlaying
         _stopRun()
         setState { position = t }
+        lastShownPosition = -1
         _startPlayback(from: t, pauseOnFirstFrame: !wasPlaying)
     }
 
@@ -275,10 +282,9 @@ class _VideoPlayerState: State<StatefulWidget> {
                     gpuDmaBufRendererState?.updateExternalTexturePixels(
                         texId, pixels: frame, width: Int32(vw), height: Int32(vh))
                     #endif
-                    self.setState {
-                        self.frameCount += 1
-                        self.position = pos
-                    }
+                    self.frameCount += 1
+                    self.position = pos
+                    self._rebuildChromeIfDue(pos)
                     // A paused seek wants exactly this one frame on screen;
                     // stopping bumps the generation, so the reader's later
                     // hops (and its EOF loop) all evaporate.
@@ -379,10 +385,9 @@ class _VideoPlayerState: State<StatefulWidget> {
                         offset0: f.offset0, pitch0: f.pitch0,
                         offset1: f.offset1, pitch1: f.pitch1,
                         release: { src.release(token) })
-                    self.setState {
-                        self.frameCount += 1
-                        self.position = pos
-                    }
+                    self.frameCount += 1
+                    self.position = pos
+                    self._rebuildChromeIfDue(pos)
                     if pauseOnFirstFrame && thisFrame == 1 {
                         self._stopRun()
                         self.setState { self.position = pos }
@@ -411,6 +416,20 @@ class _VideoPlayerState: State<StatefulWidget> {
         reader.start()
     }
     #endif
+
+    /// Rebuild only when the visible chrome would actually change. The first
+    /// frame always rebuilds — it is the one that swaps "Loading…" for the
+    /// texture — and after that a rebuild is worth it at most ten times a
+    /// second, which is finer than the clock's one-second resolution and
+    /// finer than the eye reads a moving thumb.
+    private func _rebuildChromeIfDue(_ pos: Double) {
+        if frameCount > 1,
+           abs(pos - lastShownPosition) < Self.kChromeUpdateInterval {
+            return
+        }
+        lastShownPosition = pos
+        setState {}
+    }
 
     private func _togglePlay() {
         if isPlaying {

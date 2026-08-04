@@ -493,11 +493,17 @@ static int decode_sample(H264Decoder* d, uint32_t index, int slot) {
     return 0;
 }
 
+static int fill_frame_from_desc(H264Decoder* d, Surface* s, H264Frame* out);
+
 static int export_surface(H264Decoder* d, int slot, H264Frame* out) {
     Surface* s = &d->surfaces[slot];
+    // Exported once per surface, not once per frame. A surface's underlying
+    // buffer does not change when it is reused, so re-exporting only churns
+    // fds and driver state — and at 60fps that churn, plus the EGLImage
+    // import it forces downstream, was most of the player's CPU.
     if (s->exported) {
-        for (uint32_t k = 0; k < s->desc.num_objects; k++) close(s->desc.objects[k].fd);
-        s->exported = 0;
+        fill_frame_from_desc(d, s, out);
+        return 0;
     }
     VAStatus st = vaExportSurfaceHandle(
         d->dpy, s->id, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
@@ -505,7 +511,11 @@ static int export_surface(H264Decoder* d, int slot, H264Frame* out) {
         &s->desc);
     if (st != VA_STATUS_SUCCESS) { vd_err(d, "vaExportSurfaceHandle", st); return -1; }
     s->exported = 1;
+    return fill_frame_from_desc(d, s, out);
+}
 
+/// Map an already-exported surface descriptor onto the caller's frame.
+static int fill_frame_from_desc(H264Decoder* d, Surface* s, H264Frame* out) {
     // NV12 comes back either as one layer of two planes or as two
     // single-plane layers; radeonsi does the latter (R8 then GR88).
     const VADRMPRIMESurfaceDescriptor* desc = &s->desc;

@@ -139,6 +139,14 @@ public final class GpuRendererState: @unchecked Sendable {
         /// references this one's dma-buf, and letting the decoder reuse the
         /// surface early means it overwrites a frame still being sampled.
         var heldRelease: (@Sendable () -> Void)? = nil
+        /// EGLImages already imported for this texture, keyed by the dma-buf
+        /// they wrap. A decoder cycles a small pool of surfaces, so the same
+        /// handful of buffers arrives over and over; importing each once and
+        /// rebinding is far cheaper than an eglCreateImageKHR and destroy per
+        /// frame. Same reasoning — and the same inode key — as the shell's
+        /// LinuxTextureRegistry.imageCache.
+        var nv12Cache: [UInt64: UnsafeMutableRawPointer] = [:]
+        var nv12CacheOrder: [UInt64] = []
         var width: Int32 = 0
         var height: Int32 = 0
         var stride: Int32 = 0
@@ -181,6 +189,9 @@ public final class GpuRendererState: @unchecked Sendable {
         _texLock.unlock()
         if let entry = removed {
             if entry.pendingFd >= 0 { Glibc.close(entry.pendingFd) }
+            for img in entry.nv12Cache.values {
+                dmabuf_destroy_egl_image(eglDisplay, img)
+            }
             // Both the queued and the bound surface are owed a release, or the
             // decoder never gets those frames back.
             entry.pendingNV12?.release?()
@@ -260,6 +271,12 @@ public final class GpuRendererState: @unchecked Sendable {
 
         if let eng = engine {
             FlutterEngineMarkExternalTextureFrameAvailable(eng, id)
+            // Mark alone says "the texture changed"; it does not by itself
+            // get a frame composited. The producer used to setState on every
+            // frame, which scheduled one as a side effect — at 60fps that
+            // rebuilt the entire widget tree to show a picture the engine
+            // could have re-composited on its own.
+            FlutterEngineScheduleFrame(eng)
         }
     }
 
@@ -337,12 +354,40 @@ public final class GpuRendererState: @unchecked Sendable {
         _texLock.unlock()
 
         let external = DMABUF_GL_TEXTURE_EXTERNAL_OES
-        guard let img = dmabuf_import_nv12_egl_image(
+        // Identify the buffer itself, not the fd number: fds get recycled, and
+        // an inode is what makes two handles to one dma-buf compare equal.
+        var st = stat()
+        let key: UInt64? = fstat(nv.fd, &st) == 0
+            ? (UInt64(st.st_dev) &* 1_000_003 &+ UInt64(st.st_ino)) : nil
+        var cached: UnsafeMutableRawPointer? = nil
+        if let key {
+            _texLock.lock()
+            cached = _texEntries[id]?.nv12Cache[key]
+            _texLock.unlock()
+        }
+        guard let img = cached ?? dmabuf_import_nv12_egl_image(
             eglDisplay, nv.fd, nv.width, nv.height, nv.modifier,
             nv.offset0, nv.pitch0, nv.offset1, nv.pitch1)
         else {
             nv.release?()
             return
+        }
+        if cached == nil, let key {
+            var evicted: [UnsafeMutableRawPointer] = []
+            _texLock.lock()
+            if _texEntries[id] != nil {
+                _texEntries[id]!.nv12Cache[key] = img
+                _texEntries[id]!.nv12CacheOrder.append(key)
+                while _texEntries[id]!.nv12CacheOrder.count > 12 {
+                    let old = _texEntries[id]!.nv12CacheOrder.removeFirst()
+                    if old == key { _texEntries[id]!.nv12CacheOrder.append(old); break }
+                    if let img = _texEntries[id]!.nv12Cache.removeValue(forKey: old) {
+                        evicted.append(img)
+                    }
+                }
+            }
+            _texLock.unlock()
+            for e in evicted { dmabuf_destroy_egl_image(eglDisplay, e) }
         }
 
         // A texture name's target is fixed by its first bind, so one that was
@@ -359,9 +404,8 @@ public final class GpuRendererState: @unchecked Sendable {
             return
         }
 
-        if let oldImg = entry.eglImage {
-            dmabuf_destroy_egl_image(eglDisplay, oldImg)
-        }
+        // The previous image belongs to nv12Cache now; destroying it here
+        // would free a buffer the decoder's pool is still cycling.
         _texLock.lock()
         _texEntries[id]?.glTexName = tex
         _texEntries[id]?.glTarget = external
