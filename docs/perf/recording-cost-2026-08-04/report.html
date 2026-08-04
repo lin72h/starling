@@ -127,25 +127,25 @@
     <h1>What screen recording costs the app on screen</h1>
     <p class="standfirst">One application, one binary — the ghostty terminal — runs on three
       Wayland desktops on the same machine. While a screen recording runs, GNOME slows it ~6%
-      and Hyprland ~11%; Starling slows it ~4% and still delivers the frames GNOME drops. And
-      before any recording starts, the same binary simply runs ~28% faster on Starling&rsquo;s
-      compositor (41 vs ~32&nbsp;MB/s). Numbers, mechanism, and the defect this method found
-      in our own path, below.</p>
+      and Hyprland ~11%; Starling slows it ~4% while delivering the full 30&nbsp;fps —
+      including every frame GNOME drops. And before any recording starts, the same binary
+      simply runs ~27% faster on Starling&rsquo;s compositor (40 vs ~32&nbsp;MB/s). Numbers,
+      mechanism, and the two defects this method found in our own path, below.</p>
     <div class="meta">
       <span>2026-08-04</span>
       <span>Ubuntu 26.04 · kernel 7.0.0-28</span>
       <span>Ryzen 7 7735HS · Radeon 680M</span>
       <span>eDP-1 2560×1600 @ 90 Hz</span>
-      <span>GNOME 50.1 · Hyprland 0.53.3 · Starling main@e185737</span>
+      <span>GNOME 50.1 · Hyprland 0.53.3 · Starling main@f6a1945</span>
     </div>
   </header>
 
   <div class="tiles" role="group" aria-label="Headline results: workload slowdown while recording">
     <div class="tile hero">
       <div class="who"><span class="dotk" style="background:var(--c-star)"></span>Starling</div>
-      <div class="big">−4.1%</div>
-      <div class="sub">workload slowdown · same ghostty binary as the others, n=3, sd 0.7 ·
-        28.8 fps delivered · and the fastest baseline of the three (§2)</div>
+      <div class="big">−4.0%</div>
+      <div class="sub">workload slowdown · same ghostty binary as the others, n=3, sd 0.6 ·
+        a full 30.0 fps delivered · and the fastest baseline of the three (§2)</div>
     </div>
     <div class="tile">
       <div class="who"><span class="dotk" style="background:var(--c-gnome)"></span>GNOME</div>
@@ -204,7 +204,7 @@
     <figcaption><b>Fig 2.</b> Same recordings, measured from the files. GNOME&rsquo;s pipeline
       undershoots its own 30&nbsp;fps cap (27.2–27.4) because its capture throttle keys off
       jittery idle-callback timestamps. Hyprland delivers a perfect 30.0 — and Fig&nbsp;1 shows
-      the client paying for every one of those frames. Starling delivers 28.8.</figcaption>
+      the client paying for every one of those frames. Starling also delivers the full 30.0 — after this investigation fixed its frame pacing (§4) — at a third of Hyprland&rsquo;s client cost.</figcaption>
   </figure>
 
   <figure>
@@ -238,7 +238,7 @@
       <svg id="fig-base" viewBox="0 0 820 240" role="img" aria-label="Dot plot of baseline throughput. The same ghostty binary reaches about 41 megabytes per second on Starling, about 32 on Hyprland, and about 32 on GNOME."></svg>
     </div>
     <figcaption><b>Fig 4.</b> The same ghostty binary runs ~28% faster on Starling&rsquo;s
-      compositor than on GNOME or Hyprland (40.9 vs 31.8 / 32.5 MB/s, mean of run baselines) —
+      compositor than on GNOME or Hyprland (40.4 vs 31.8 / 32.5 MB/s, mean of run baselines) —
       at 90% of the cell count, which accounts for at most a third of the gap. Whatever a
       compositor&rsquo;s frame-callback cadence, damage handling, and buffer turnaround are
       worth, they are worth it here: this workload&rsquo;s ceiling is set by how fast the
@@ -322,6 +322,14 @@
       protocol the cost is <b>−4.1%</b>. The remainder is the capped 30/s blit itself in the
       present path. What Starling never pays is the term that dominates on GNOME — there is no
       second composition of the scene, ever.</p>
+    <p>The same method found a second defect: delivered frame rate sat at 28.8 of the 30
+      requested, and the recording&rsquo;s own per-frame timestamps said why — intervals were
+      exactly 33&nbsp;ms or 44–67&nbsp;ms, <em>never less</em>. Both frame gates paced
+      relative to the last captured frame, so a present slot missed to client jitter was lost
+      permanently; nothing ever captured early to repay the debt. Re-pacing against an
+      absolute 33.3&nbsp;ms schedule with one frame of catch-up (engine
+      <code>bc3b58ba3e9</code>, shell <code>f6a1945</code>) took delivery to a flat
+      30.00&nbsp;fps with the workload cost unchanged — the final rows in §5.</p>
 
     <h2>5 · Full data</h2>
     <div class="tablewrap">
@@ -331,7 +339,10 @@
         </thead>
         <tbody>
           <tr><td class="t" colspan="6" style="font-weight:600; background:var(--panel);">Final protocol — 120 s windows, same ghostty binary</td></tr>
-          <tr><td class="t">Starling · ghostty</td><td>1</td><td>−3.8%</td><td>28.8</td><td>+0.03 cores¹</td><td>19.0 Mbps</td></tr>
+          <tr><td class="t">Starling · ghostty</td><td>1</td><td>−3.8%</td><td>30.0</td><td>+0.04 cores¹</td><td>19.9 Mbps</td></tr>
+          <tr><td class="t"></td><td>2</td><td>−3.6%</td><td>30.0</td><td>+0.05</td><td>19.9</td></tr>
+          <tr><td class="t"></td><td>3</td><td>−4.7%</td><td>30.0</td><td>+0.01</td><td>19.9</td></tr>
+          <tr><td class="t">Starling · ghostty, before fps-pacing fix (§4)</td><td>1</td><td>−3.8%</td><td>28.8</td><td>+0.03</td><td>19.0</td></tr>
           <tr><td class="t"></td><td>2</td><td>−3.6%</td><td>28.8</td><td>+0.01</td><td>18.9</td></tr>
           <tr><td class="t"></td><td>3</td><td>−5.0%</td><td>28.9</td><td>+0.06</td><td>19.0</td></tr>
           <tr><td class="t">GNOME · ghostty (hw H.264)</td><td>1</td><td>−6.1%</td><td>27.2</td><td>±0.00</td><td>23.2</td></tr>
@@ -456,7 +467,7 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-slow");
     const W = 820, L = 150, R = 40, T = 18, laneH = 62;
     const lanes = [
-      { name: "Starling", cls: "star", runs: [3.8, 3.6, 5.0], mean: 4.1 },
+      { name: "Starling", cls: "star", runs: [3.8, 3.6, 4.7], mean: 4.0 },
       { name: "GNOME", cls: "gnome", runs: [6.1, 6.3, 6.6], mean: 6.3 },
       { name: "Hyprland", cls: "hypr", runs: [14.5, 10.3, 9.4], mean: 11.4 },
     ];
@@ -490,7 +501,7 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-fps");
     const W = 820, L = 190, R = 40, T = 18, laneH = 44;
     const lanes = [
-      { name: "Starling", cls: "star", runs: [28.77, 28.76, 28.85] },
+      { name: "Starling", cls: "star", runs: [30.0, 30.0, 30.0] },
       { name: "Hyprland", cls: "hypr", runs: [30.01, 30.0, 30.01] },
       { name: "GNOME · hw", cls: "gnome", runs: [27.2, 27.27, 27.37] },
       { name: "GNOME · default", cls: "gnome", runs: [25.3] },
@@ -521,7 +532,7 @@ xxd /dev/urandom</code></pre>
     const svg = document.getElementById("fig-base");
     const W = 820, L = 250, R = 60, T = 18, laneH = 46;
     const lanes = [
-      { name: "Starling · 7,644 cells", cls: "star", runs: [40.89, 40.76, 40.98] },
+      { name: "Starling · 7,644 cells", cls: "star", runs: [40.38, 40.23, 40.47] },
       { name: "Hyprland · 8,500 cells", cls: "hypr", runs: [33.64, 32.06, 31.68] },
       { name: "GNOME · 8,500 cells", cls: "gnome", runs: [31.93, 31.79, 31.77] },
     ];
