@@ -125,12 +125,13 @@
   <header>
     <div class="eyebrow">Starling Desktop · Performance Report</div>
     <h1>What screen recording costs the app on screen</h1>
-    <p class="standfirst">Three Wayland desktops record the same workload — the same terminal
-      emulator, the same machine, two-minute measurement windows. Recording costs the recorded
-      application ~6% of its throughput on GNOME and ~11% on Hyprland, against ~4% on Starling
-      (~3% with its native terminal) — and Starling delivers the frames GNOME drops. This
-      report shows the numbers, traces the mechanism to compositor source — and, applying the
-      same method to Starling&rsquo;s own residual, found and fixed part of it.</p>
+    <p class="standfirst">One application — the ghostty terminal — runs on three Wayland
+      desktops on the same machine. While a screen recording runs, GNOME slows it ~6% and
+      Hyprland ~11%; Starling slows it ~4% and still delivers the frames GNOME drops. Before
+      any recording starts, the same app simply runs faster on Starling&rsquo;s compositor
+      (41 vs ~32&nbsp;MB/s) — and Starling&rsquo;s native terminal, riding the platform&rsquo;s
+      own app path instead of the Wayland protocol, is faster still. Numbers, mechanism, and
+      the defect this method found in our own path, below.</p>
     <div class="meta">
       <span>2026-08-04</span>
       <span>Ubuntu 26.04 · kernel 7.0.0-28</span>
@@ -145,7 +146,8 @@
       <div class="who"><span class="dotk" style="background:var(--c-star)"></span>Starling</div>
       <div class="big">−4.1%</div>
       <div class="sub">workload slowdown · same terminal as the others (ghostty), n=3, sd 0.7 ·
-        native terminal −2.6% · 28.8 fps delivered</div>
+        native terminal −2.6% · 28.8 fps delivered · and the fastest baseline of the three
+        (§2)</div>
     </div>
     <div class="tile">
       <div class="who"><span class="dotk" style="background:var(--c-gnome)"></span>GNOME</div>
@@ -226,7 +228,31 @@
   </figure>
 
   <div class="prose">
-    <h2>2 · The mechanism, traced to source</h2>
+    <h2>2 · Before recording anything: the same app, three compositors</h2>
+    <p>The baseline windows of the same runs answer a second question: with no recording at
+      all, how fast does the same application run on each desktop? A Wayland client&rsquo;s
+      throughput on this workload is set by how quickly the compositor turns commits around —
+      frame callbacks are the clock the client draws by. Same ghostty build, same machine,
+      same panel and refresh rate:</p>
+  </div>
+
+  <figure>
+    <div class="figbox">
+      <p class="figtitle">Baseline throughput — same app, no recording</p>
+      <p class="figunit">MB/s the terminal accepts from an unthrottled producer · dot = one run's baseline (mean of its two 120 s windows) · higher is better</p>
+      <svg id="fig-base" viewBox="0 0 820 240" role="img" aria-label="Dot plot of baseline throughput. Ghostty on Starling about 41 megabytes per second, on Hyprland about 32, on GNOME about 32. Starling's native terminal about 48."></svg>
+    </div>
+    <figcaption><b>Fig 4.</b> Ghostty runs ~28% faster on Starling&rsquo;s compositor than on
+      GNOME or Hyprland (40.9 vs 31.8 / 32.5 MB/s mean of run baselines) — at 90% of the cell
+      count, which accounts for at most a third of the gap. The fourth lane is
+      Starling&rsquo;s <em>native</em> terminal: a first-party app on the platform&rsquo;s own
+      compositing path rather than the Wayland protocol, out-running the fastest Wayland
+      terminal we tested. It is a different program at a different grid, so this is evidence
+      the native path has headroom, not a controlled protocol comparison — see limits.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h2>3 · The mechanism, traced to source</h2>
     <p>Why does the recorded app slow down when the encoder is nearly free and CPUs are idle?
       Because on GNOME, <strong>every captured frame re-renders the entire screen a second
       time</strong>, inside the compositor, on the same GPU and main thread the app depends on.</p>
@@ -264,7 +290,7 @@
         each one a full 2560×1600 composition — and 754 throttle skips, each of which queues
         synthetic damage that keeps the compositor&rsquo;s frame clock hot.</li>
       <li><b>The cost scales with capture rate.</b> Setting the recording frame rate to 1, 5, and
-        30 fps produced −3.9%, −10.7%, −17.4% workload slowdown (Fig&nbsp;4): a
+        30 fps produced −3.9%, −10.7%, −17.4% workload slowdown (Fig(Fig&nbsp;4): anbsp;5): a
         per-captured-frame cost, not a fixed session cost.</li>
       <li><b>It is not CPU or encoder contention.</b> The slowdown persists with the encoder at
         0.02 cores and 13 of 16 cores idle; the terminal <em>uses less CPU while producing
@@ -278,14 +304,14 @@
       <p class="figunit">workload throughput lost (%) vs requested capture rate (fps) · hardware encode</p>
       <svg id="fig-sweep" viewBox="0 0 820 230" role="img" aria-label="Line chart: 1 fps costs 3.9 percent, 5 fps costs 10.7 percent, 30 fps costs 17.4 percent."></svg>
     </div>
-    <figcaption><b>Fig 4.</b> The discriminating experiment. If recording cost were a fixed
+    <figcaption><b>Fig 5.</b> The discriminating experiment. If recording cost were a fixed
       mode-switch, the line would be flat; if purely per-frame, linear through zero. It rises
       with rate and saturates as the capture pipeline itself falls behind — per-frame compositor
       work, plus fixed scheduling overhead.</figcaption>
   </figure>
 
   <div class="prose">
-    <h2>3 · Why Starling pays a fraction of it</h2>
+    <h2>4 · Why Starling pays a fraction of it</h2>
     <p>Starling&rsquo;s recorder never re-renders. At each present, the engine blits the frame it
       already composited into a dma-buf ring — a flat GPU copy, not a scene walk — and hands the
       buffer to the AMD VCN encoder. The CPU never touches a pixel; during recording, the only
@@ -305,8 +331,13 @@
       48&nbsp;MB/s on this workload) — as a slow client it had measured within noise; as a fast
       one it pays the same per-present tax the model predicts. Both configurations avoid the
       term that dominates on GNOME — there is no second composition of the scene, ever.</p>
+    <p>Taken together with §2, the native path wins on both sides of the ledger: it posts the
+      highest raw throughput on the box (48&nbsp;MB/s, Fig&nbsp;4) <em>and</em> the lowest
+      recording tax (−2.6%, Fig&nbsp;1) — a first-party app compositing through the
+      platform&rsquo;s own texture path rather than the Wayland protocol gives up nothing to
+      get recorded.</p>
 
-    <h2>4 · Full data</h2>
+    <h2>5 · Full data</h2>
     <div class="tablewrap">
       <table>
         <thead>
@@ -327,7 +358,7 @@
           <tr><td class="t"></td><td>2</td><td>−10.3%</td><td>30.0</td><td>+0.03</td><td>50.8</td></tr>
           <tr><td class="t"></td><td>3</td><td>−9.4%</td><td>30.0</td><td>+0.03</td><td>50.7</td></tr>
           <tr><td class="t" colspan="6" style="font-weight:600; background:var(--panel);">Exploratory — 20–25 s windows (superseded; overstates cost)</td></tr>
-          <tr><td class="t">Starling · ghostty, capture-rate cap (§3)</td><td>1</td><td>+0.2%</td><td>29.2</td><td>+0.06 cores¹</td><td>19.3 Mbps</td></tr>
+          <tr><td class="t">Starling · ghostty, capture-rate cap (§4)</td><td>1</td><td>+0.2%</td><td>29.2</td><td>+0.06 cores¹</td><td>19.3 Mbps</td></tr>
           <tr><td class="t"></td><td>2</td><td>−2.4%</td><td>29.1</td><td>+0.07</td><td>19.3</td></tr>
           <tr><td class="t"></td><td>3</td><td>−5.9%</td><td>29.0</td><td>+0.01</td><td>19.0</td></tr>
           <tr><td class="t"></td><td>4</td><td>−3.3%</td><td>28.9</td><td>+0.03</td><td>19.2</td></tr>
@@ -361,7 +392,7 @@
       quality-normalized (see limits). In the exploratory rows, missing fps values are runs
       whose output the harness overwrote before probing.</p>
 
-    <h2>5 · What this report does not claim</h2>
+    <h2>6 · What this report does not claim</h2>
     <div class="callout">
       <ul style="margin:0;">
         <li><b>Not a visual-quality comparison.</b> Each run recorded different random content, so
@@ -374,6 +405,15 @@
           coverage) is reported separately. The metric is each configuration&rsquo;s change
           against <em>its own</em> baseline, so terminal and grid differences divide out of
           the comparison.</li>
+        <li><b>The baseline comparison (§2) carries two confounds the slowdown numbers do
+          not.</b> Cross-session variance: baselines were measured in different login sessions
+          hours apart, and ghostty&rsquo;s session-to-session spread on GNOME reached several
+          MB/s in exploratory runs — though Starling&rsquo;s worst session baseline (39.2)
+          still exceeded GNOME&rsquo;s and Hyprland&rsquo;s best. And the native-terminal lane
+          is a <em>different program</em> at a smaller grid: it demonstrates the native app
+          path out-running the best Wayland terminal on this box, not a controlled
+          protocol-vs-protocol measurement. The controlled version — one renderer, two
+          transports — is future work.</li>
         <li><b>Window length changes the answer.</b> 20–25&nbsp;s windows measured GNOME at
           −12% and Hyprland at −13.9%; two-minute windows give −6.3% and −11.4%. Short windows
           overstate cost (warm-up and drift dominate) — which is why the final protocol is two
@@ -386,7 +426,7 @@
       </ul>
     </div>
 
-    <h2>6 · Reproduce it</h2>
+    <h2>7 · Reproduce it</h2>
     <p>Load, on the desktop under test (unthrottled by design — measure throughput, not CPU%):</p>
     <pre><code># fullscreen terminal
 xxd /dev/urandom</code></pre>
@@ -496,6 +536,39 @@ xxd /dev/urandom</code></pre>
     for (let g = 24; g <= 31; g++)
       el(svg, "text", { x: x(g), y: ax, "text-anchor": "middle", class: "axis" }, g);
     svg.setAttribute("viewBox", "0 0 " + W + " " + (ax + 8));
+  })();
+
+  /* ---- Fig 4: baseline throughput ---- */
+  (function () {
+    const svg = document.getElementById("fig-base");
+    const W = 820, L = 250, R = 60, T = 18, laneH = 46;
+    const lanes = [
+      { name: "Starling · ghostty · 7,644 cells", cls: "star", runs: [40.89, 40.76, 40.98] },
+      { name: "Hyprland · ghostty · 8,500 cells", cls: "hypr", runs: [33.64, 32.06, 31.68] },
+      { name: "GNOME · ghostty · 8,500 cells", cls: "gnome", runs: [31.93, 31.79, 31.77] },
+      { name: "Starling · native app · 5,694 cells", cls: "star", runs: [48.88, 48.35, 48.17] },
+    ];
+    const min = 0, max = 52;
+    const x = v => L + (v - min) / (max - min) * (W - L - R);
+    for (let g = 0; g <= 50; g += 10)
+      el(svg, "line", { x1: x(g), x2: x(g), y1: T, y2: T + lanes.length * laneH, class: "gridline" });
+    lanes.forEach((ln, i) => {
+      const cy = T + i * laneH + laneH / 2;
+      el(svg, "text", { x: 8, y: cy + 4, class: "lanelab" }, ln.name);
+      const mean = ln.runs.reduce((a, b) => a + b, 0) / ln.runs.length;
+      ln.runs.forEach((v, j) => {
+        const jitter = ((j % 3) - 1) * 7;
+        const c = el(svg, "circle", { cx: x(v), cy: cy + jitter, r: 6.5, class: "pt f-" + ln.cls });
+        bindTip(c, "<b>" + ln.name + "</b><br>" + v.toFixed(1) + " MB/s baseline");
+      });
+      el(svg, "text", { x: x(Math.max(...ln.runs)) + 14, y: cy + 4, class: "vallab" },
+        mean.toFixed(1));
+    });
+    const ax = T + lanes.length * laneH + 14;
+    for (let g = 0; g <= 50; g += 10)
+      el(svg, "text", { x: x(g), y: ax, "text-anchor": "middle", class: "axis" }, g);
+    el(svg, "text", { x: (L + W - R) / 2, y: ax + 16, "text-anchor": "middle", class: "axis" }, "MB/s accepted (baseline, no recording)");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + (ax + 22));
   })();
 
   /* ---- Fig 3: encoder CPU bars ---- */
