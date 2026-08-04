@@ -740,7 +740,87 @@ void dmabuf_rebind_gl_texture(uint32_t tex, void* egl_image) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+#ifndef GL_TEXTURE_EXTERNAL_OES
+#define GL_TEXTURE_EXTERNAL_OES 0x8D65
+#endif
+
+void* dmabuf_import_nv12_egl_image(void* egl_display, int fd,
+                                    int width, int height, uint64_t modifier,
+                                    uint32_t offset0, uint32_t pitch0,
+                                    uint32_t offset1, uint32_t pitch1) {
+    ensure_egl_loaded();
+    if (!s_eglCreateImageKHR) {
+        fprintf(stderr, "[DmaBufBridge] eglCreateImageKHR not available\n");
+        return NULL;
+    }
+
+    const uint64_t MOD_INVALID = (1ULL << 56) - 1;
+    const EGLint DRM_FORMAT_NV12 = 0x3231564e;  /* 'NV12' */
+
+    EGLint a[36];
+    int i = 0;
+    a[i++] = EGL_WIDTH;                        a[i++] = width;
+    a[i++] = EGL_HEIGHT;                       a[i++] = height;
+    a[i++] = 0x3271 /* EGL_LINUX_DRM_FOURCC_EXT */;  a[i++] = DRM_FORMAT_NV12;
+
+    a[i++] = 0x3272 /* PLANE0_FD_EXT     */;   a[i++] = fd;
+    a[i++] = 0x3273 /* PLANE0_OFFSET_EXT */;   a[i++] = (EGLint)offset0;
+    a[i++] = 0x3274 /* PLANE0_PITCH_EXT  */;   a[i++] = (EGLint)pitch0;
+    a[i++] = 0x3275 /* PLANE1_FD_EXT     */;   a[i++] = fd;
+    a[i++] = 0x3276 /* PLANE1_OFFSET_EXT */;   a[i++] = (EGLint)offset1;
+    a[i++] = 0x3277 /* PLANE1_PITCH_EXT  */;   a[i++] = (EGLint)pitch1;
+
+    // Both planes live in one tiled buffer, so both need the modifier — an
+    // import that names it for plane 0 only is rejected.
+    if (modifier != MOD_INVALID) {
+        a[i++] = 0x3443 /* PLANE0_MODIFIER_LO_EXT */;
+        a[i++] = (EGLint)(modifier & 0xFFFFFFFF);
+        a[i++] = 0x3444 /* PLANE0_MODIFIER_HI_EXT */;
+        a[i++] = (EGLint)(modifier >> 32);
+        a[i++] = 0x3445 /* PLANE1_MODIFIER_LO_EXT */;
+        a[i++] = (EGLint)(modifier & 0xFFFFFFFF);
+        a[i++] = 0x3446 /* PLANE1_MODIFIER_HI_EXT */;
+        a[i++] = (EGLint)(modifier >> 32);
+    }
+    a[i++] = EGL_NONE;
+
+    EGLImageKHR image = s_eglCreateImageKHR(
+        (EGLDisplay)egl_display, EGL_NO_CONTEXT,
+        0x3270 /* EGL_LINUX_DMA_BUF_EXT */, (EGLClientBuffer)NULL, a);
+    if (image == EGL_NO_IMAGE_KHR) {
+        fprintf(stderr,
+                "[DmaBufBridge] NV12 import failed: 0x%x (%dx%d mod=0x%llx "
+                "p0=%u/%u p1=%u/%u)\n",
+                eglGetError(), width, height, (unsigned long long)modifier,
+                offset0, pitch0, offset1, pitch1);
+        return NULL;
+    }
+    return (void*)image;
+}
+
+uint32_t dmabuf_bind_external_texture(uint32_t tex, void* egl_image) {
+    ensure_egl_loaded();
+    if (!s_glEGLImageTargetTexture2DOES) return 0;
+    GLuint t = (GLuint)tex;
+    if (t == 0) {
+        glGenTextures(1, &t);
+        if (t == 0) return 0;
+    }
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, t);
+    s_glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES,
+                                   (GLeglImageOES)egl_image);
+    // External textures take no mipmaps and must clamp; NEAREST vs LINEAR is
+    // the usual quality tradeoff and the video quad is scaled, so LINEAR.
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    return (uint32_t)t;
+}
+
 uint32_t dmabuf_upload_rgba_texture(uint32_t tex, int width, int height,
+                                     int reuse_storage,
                                      const uint8_t* pixels) {
     if (width <= 0 || height <= 0 || !pixels) {
         return 0;
@@ -751,6 +831,7 @@ uint32_t dmabuf_upload_rgba_texture(uint32_t tex, int width, int height,
         if (t == 0) {
             return 0;
         }
+        reuse_storage = 0;  // nothing allocated yet
         glBindTexture(GL_TEXTURE_2D, t);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -760,8 +841,13 @@ uint32_t dmabuf_upload_rgba_texture(uint32_t tex, int width, int height,
         glBindTexture(GL_TEXTURE_2D, t);
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (reuse_storage) {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
     return (uint32_t)t;
 }

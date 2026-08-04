@@ -57,10 +57,19 @@ var targets: [Target] = []
 
 #if os(Linux)
 targets += [
+    // Hardware decode: our own MP4 demuxer and H.264 header parsing straight
+    // into VA-API. libva is MIT and ships on every desktop, so it is linked
+    // like any other system library — the dlopen dance existed for libav,
+    // which is not here at all any more.
+    .target(
+        name: "CH264Decoder",
+        linkerSettings: [.linkedLibrary("va"), .linkedLibrary("va-drm")]
+    ),
     .executableTarget(
         name: "VideoPlayerApp",
         dependencies: [
             .product(name: "FlutterShared", package: "FlutterSwift"),
+            "CH264Decoder",
         ],
         swiftSettings: [
             .interoperabilityMode(.Cxx),

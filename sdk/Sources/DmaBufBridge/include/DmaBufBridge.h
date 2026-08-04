@@ -218,13 +218,50 @@ uint32_t dmabuf_import_as_gl_texture(void* egl_display, int fd,
 /// Rebind an EGLImage to an existing GL texture.
 void dmabuf_rebind_gl_texture(uint32_t tex, void* egl_image);
 
+/// GL_TEXTURE_EXTERNAL_OES — the target an NV12 image must be sampled
+/// through. Exposed so Swift can hand it to the embedder as the external
+/// texture's target without redeclaring the constant.
+#define DMABUF_GL_TEXTURE_EXTERNAL_OES 0x8D65u
+
+/// Import a two-plane NV12 DMA-BUF (both planes in ONE buffer, at their own
+/// offsets — what a VA-API decoder hands back) as an EGLImage.
+///
+/// Kept apart from the single-plane import rather than folded into it: the
+/// planes carry different formats and pitches, the result is only samplable
+/// through GL_TEXTURE_EXTERNAL_OES, and the driver — not us — does the
+/// YUV→RGB conversion and detiles it. Decoded surfaces are tiled, not linear
+/// (radeonsi returns modifier 0x2000000104…), so there is no CPU-readable
+/// layout here to fall back on. NULL on failure.
+void* dmabuf_import_nv12_egl_image(void* egl_display, int fd,
+                                    int width, int height, uint64_t modifier,
+                                    uint32_t offset0, uint32_t pitch0,
+                                    uint32_t offset1, uint32_t pitch1);
+
+/// Bind an EGLImage to a texture through GL_TEXTURE_EXTERNAL_OES, creating
+/// the texture when |tex| is 0. Returns the texture name, or 0 on failure.
+///
+/// A texture object's target is fixed by its first bind, so a name already
+/// used as GL_TEXTURE_2D cannot be reused here — pass 0 (and delete the old
+/// name) when switching a texture from the RGBA path to this one.
+uint32_t dmabuf_bind_external_texture(uint32_t tex, void* egl_image);
+
+
 /// Upload CPU RGBA pixels into a GL texture (creating it when |tex| is 0).
 /// The CPU-pixel counterpart of dmabuf_import_as_gl_texture, for content
 /// decoded in ordinary memory — e.g. video frames read from a pipe.
 /// Rows must be tightly packed (stride == width * 4). Requires a current
 /// GL context (call on the raster thread). Returns the texture name, or 0
 /// on failure.
+///
+/// |reuse_storage| refills the existing allocation (glTexSubImage2D) instead
+/// of allocating a fresh one (glTexImage2D); the caller passes it only when
+/// |tex| is already allocated at exactly this width and height. Video runs
+/// this once per frame, and allocating a multi-megabyte texture 30 times a
+/// second — orphaning the one before it each time — degrades: the driver's
+/// allocator falls further and further behind, the upload gets slower, and a
+/// player that started clean is dropping frames minutes later.
 uint32_t dmabuf_upload_rgba_texture(uint32_t tex, int width, int height,
+                                     int reuse_storage,
                                      const uint8_t* pixels);
 
 // ─── GPU texture copy (compositor buffer independence) ──────────────────

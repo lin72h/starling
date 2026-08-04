@@ -91,29 +91,81 @@ final class PipeDecoder: @unchecked Sendable {
         return info
     }
 
+    /// The frame size ffmpeg is asked for: the source, shrunk to fit
+    /// `maxWidth`×`maxHeight` with the aspect ratio kept, and never enlarged
+    /// (upscaling here would cost bytes on the wire to add nothing).
+    ///
+    /// A player must not decode more pixels than it shows. The desktop's own
+    /// screen recordings are the whole screen — 2560x1600 — and the player
+    /// window is a fraction of that, so decoding at the source size pushed
+    /// 16MB of RGBA per frame down the pipe and then into `glTexImage2D`, for
+    /// a picture drawn into 1708x1020. That upload is what made the window
+    /// FLICKER: it runs on the raster thread, and the shell composites the
+    /// app's single shared buffer zero-copy, so every millisecond the buffer
+    /// spends cleared-but-not-yet-drawn is a millisecond the shell may sample
+    /// it as black. Measured on the dev box: 40% of the shell's presented
+    /// frames showed the window fully black at the source size, 0.7% at the
+    /// window size.
+    static func outputSize(for info: VideoInfo, maxWidth: Int, maxHeight: Int)
+        -> (width: Int, height: Int)
+    {
+        guard info.width > 0, info.height > 0, maxWidth > 0, maxHeight > 0 else {
+            return (info.width, info.height)
+        }
+        let scale = min(Double(maxWidth) / Double(info.width),
+                        Double(maxHeight) / Double(info.height))
+        guard scale < 1 else { return (info.width, info.height) }
+        // Even dimensions — swscale is happiest there, and half a pixel is
+        // not visible at these sizes.
+        let w = max(2, Int((Double(info.width) * scale).rounded()) & ~1)
+        let h = max(2, Int((Double(info.height) * scale).rounded()) & ~1)
+        return (w, h)
+    }
+
     let startPosition: Double
+    /// The size of the frames this run actually emits — `outputSize` applied
+    /// to the caller's cap. The reader sizes its buffers from this, NOT from
+    /// `info`, which still describes the file.
+    let outWidth: Int
+    let outHeight: Int
     private let process = Process()
     private let out = Pipe()
     private var stopped = false
 
     /// Spawn ffmpeg decoding `path` from `start` seconds, RGBA on stdout,
-    /// as fast as the pipe drains — the READER paces playback. Not `-re`:
-    /// -ss lands on the previous keyframe and decodes forward to the
-    /// target, and -re throttles that pre-roll to realtime too, so a seek
-    /// landing 7s past a keyframe showed its first frame 7 real seconds
-    /// later — indistinguishable from seeking not working at all.
-    init?(path: String, start: Double, info: VideoInfo) {
+    /// scaled to fit `maxWidth`×`maxHeight`, as fast as the pipe drains — the
+    /// READER paces playback. Not `-re`: -ss lands on the previous keyframe
+    /// and decodes forward to the target, and -re throttles that pre-roll to
+    /// realtime too, so a seek landing 7s past a keyframe showed its first
+    /// frame 7 real seconds later — indistinguishable from seeking not
+    /// working at all.
+    init?(path: String, start: Double, info: VideoInfo,
+          maxWidth: Int, maxHeight: Int) {
         guard let ffmpeg = FfmpegPaths.find("ffmpeg") else { return nil }
         startPosition = max(0, start)
+        let size = Self.outputSize(for: info, maxWidth: maxWidth, maxHeight: maxHeight)
+        outWidth = size.width
+        outHeight = size.height
+
+        // `scale` BEFORE `fps`: fps duplicates frames to reach CFR, and on a
+        // sparse screen recording that is most of them (297 real frames
+        // become 1219 at 30fps). Scaling first scales the frames the file
+        // has; scaling after would scale the copies too.
+        var filters: [String] = []
+        if size.width != info.width || size.height != info.height {
+            filters.append("scale=\(size.width):\(size.height)")
+        }
+        // Exact CFR at the rate the reader paces (info.fps — see probe).
+        // Without this the rawvideo muxer picks its own CFR rate, and a
+        // reader pacing at a different one plays fast or frozen-slow.
+        filters.append(String(format: "fps=%.4f", info.fps))
+
         process.executableURL = URL(fileURLWithPath: ffmpeg)
         process.arguments = [
             "-hide_banner", "-loglevel", "error",
             "-ss", String(format: "%.3f", startPosition),
             "-i", path,
-            // Exact CFR at the rate the reader paces (info.fps — see probe).
-            // Without this the rawvideo muxer picks its own CFR rate, and a
-            // reader pacing at a different one plays fast or frozen-slow.
-            "-vf", String(format: "fps=%.4f", info.fps),
+            "-vf", filters.joined(separator: ","),
             "-f", "rawvideo", "-pix_fmt", "rgba", "-an",
             "pipe:1",
         ]

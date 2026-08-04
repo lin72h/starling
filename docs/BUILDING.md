@@ -215,6 +215,7 @@ sudo apt-get install -y \
     libx11-dev libxcb1-dev libpixman-1-dev libpipewire-0.3-dev
 sudo apt-get install -y \
     libavcodec-dev libavutil-dev libavformat-dev libavfilter-dev
+sudo apt-get install -y libva-dev
 sudo apt-get install -y \
     netpbm ffmpeg mesa-va-drivers seatd
 ```
@@ -228,7 +229,10 @@ every Ubuntu desktop install as the audio stack). Third: the ffmpeg
 headers the zero-copy screen recorder compiles against (`record/`'s
 `CVaapiEncoder`) — headers only; at runtime the libraries are `dlopen`'d,
 pinned to the sonames these headers describe, and their absence just means
-recording falls back to piping frames to the `ffmpeg` binary.
+recording falls back to piping frames to the `ffmpeg` binary. Fourth:
+`libva-dev`, which the video player's `CH264Decoder` links directly — libva is
+MIT and present wherever VA-API is, so it needs none of the dlopen dance libav
+gets.
 
 Fourth: nothing compiles against these, so the build succeeds without them and
 each one instead fails later, at run time, in a way that does not name the

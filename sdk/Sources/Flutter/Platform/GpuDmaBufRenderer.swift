@@ -113,9 +113,32 @@ public final class GpuRendererState: @unchecked Sendable {
 
     // ─── External Texture Registry ──────────────────────────────────────────
 
+    /// A hardware-decoded NV12 surface waiting to be imported: both planes in
+    /// one DMA-BUF, at their own offsets. The fd is NOT owned — it belongs to
+    /// the decoder's frame, which the producer keeps alive until it sees the
+    /// import happen.
+    struct PendingNV12 {
+        var fd: Int32
+        var width: Int32
+        var height: Int32
+        var modifier: UInt64
+        var offset0: UInt32, pitch0: UInt32
+        var offset1: UInt32, pitch1: UInt32
+        var release: (@Sendable () -> Void)?
+    }
+
     struct ExternalTextureEntry {
         var pendingFd: Int32 = -1       // New DMA-BUF fd from main thread
         var pendingPixels: [UInt8]? = nil  // OR new CPU RGBA frame (exclusive)
+        var pendingNV12: PendingNV12? = nil  // OR a decoded surface (exclusive)
+        /// Texture target the engine must sample this through. GL_TEXTURE_2D
+        /// for RGBA; GL_TEXTURE_EXTERNAL_OES once an NV12 image is bound,
+        /// since that is the only target such an image can live on.
+        var glTarget: UInt32 = 0x0DE1
+        /// Kept alive until the NEXT surface is bound: the texture still
+        /// references this one's dma-buf, and letting the decoder reuse the
+        /// surface early means it overwrites a frame still being sampled.
+        var heldRelease: (@Sendable () -> Void)? = nil
         var width: Int32 = 0
         var height: Int32 = 0
         var stride: Int32 = 0
@@ -124,6 +147,12 @@ public final class GpuRendererState: @unchecked Sendable {
         var glTexName: UInt32 = 0       // GL texture (raster thread)
         var eglImage: UnsafeMutableRawPointer? = nil  // Current EGLImage
         var dirty: Bool = false
+        /// Size the GL texture's own storage is allocated at, or 0 when it has
+        /// none of its own (fresh, or currently bound to an EGLImage). A CPU
+        /// frame of exactly this size refills that storage instead of
+        /// replacing it.
+        var texWidth: Int32 = 0
+        var texHeight: Int32 = 0
     }
 
     private let _texLock = NSLock()
@@ -148,10 +177,15 @@ public final class GpuRendererState: @unchecked Sendable {
             FlutterEngineUnregisterExternalTexture(eng, id)
         }
         _texLock.lock()
-        if let entry = _texEntries.removeValue(forKey: id) {
-            if entry.pendingFd >= 0 { Glibc.close(entry.pendingFd) }
-        }
+        let removed = _texEntries.removeValue(forKey: id)
         _texLock.unlock()
+        if let entry = removed {
+            if entry.pendingFd >= 0 { Glibc.close(entry.pendingFd) }
+            // Both the queued and the bound surface are owed a release, or the
+            // decoder never gets those frames back.
+            entry.pendingNV12?.release?()
+            entry.heldRelease?()
+        }
     }
 
     /// Called from main thread: store new DMA-BUF fd for the raster thread.
@@ -186,6 +220,49 @@ public final class GpuRendererState: @unchecked Sendable {
         }
     }
 
+    /// Called from the main thread: hand over a hardware-decoded NV12 surface
+    /// for the raster thread to import. Nothing is copied — the compositor
+    /// samples the decoder's own buffer.
+    ///
+    /// `release` runs once the texture has moved on to a later surface, on
+    /// the raster thread. Return the frame to the decoder's pool there and
+    /// not before: the pool will hand the surface straight back to the
+    /// decoder, which writes the next frame into memory still bound to a live
+    /// EGLImage.
+    public func updateExternalTextureNV12(
+        _ id: Int64, fd: Int32, width: Int32, height: Int32, modifier: UInt64,
+        offset0: UInt32, pitch0: UInt32, offset1: UInt32, pitch1: UInt32,
+        release: (@Sendable () -> Void)? = nil
+    ) {
+        _texLock.lock()
+        guard var entry = _texEntries[id] else {
+            _texLock.unlock()
+            release?()
+            return
+        }
+        // A surface queued but never imported still owes its release.
+        let superseded = entry.pendingNV12?.release
+        if entry.pendingFd >= 0 {
+            Glibc.close(entry.pendingFd)
+            entry.pendingFd = -1
+        }
+        entry.pendingPixels = nil
+        entry.pendingNV12 = PendingNV12(
+            fd: fd, width: width, height: height, modifier: modifier,
+            offset0: offset0, pitch0: pitch0, offset1: offset1, pitch1: pitch1,
+            release: release)
+        entry.width = width
+        entry.height = height
+        entry.dirty = true
+        _texEntries[id] = entry
+        _texLock.unlock()
+        superseded?()
+
+        if let eng = engine {
+            FlutterEngineMarkExternalTextureFrameAvailable(eng, id)
+        }
+    }
+
     /// Called from main thread: store a CPU RGBA frame for the raster thread
     /// to upload — the pixel counterpart of updateExternalTexture(fd:), for
     /// content decoded into ordinary memory (e.g. video frames off a pipe).
@@ -215,49 +292,174 @@ public final class GpuRendererState: @unchecked Sendable {
         }
     }
 
+    /// Hands every CPU frame delivered since the last frame to the GPU, with
+    /// the render context already current. Called from `make_current`, which
+    /// is to say BEFORE the rasterizer touches the shared buffer.
+    ///
+    /// Uploading from `populateExternalTexture` instead — during the paint —
+    /// is what made a video window FLICKER. The child renders into ONE
+    /// DMA-BUF that the parent shell samples zero-copy and unsynchronised, so
+    /// the buffer is on screen the whole time; a frame is a clear followed by
+    /// the paint, and a multi-megabyte `glTexImage2D` wedged between them
+    /// flushes the clear to the GPU and then holds the buffer empty for as
+    /// long as the upload takes. The shell sampling in that gap composites
+    /// the window as pure black — 40% of its presented frames, at 2560x1600.
+    /// Hoisted here the upload runs while the buffer still holds the last
+    /// complete frame, and clear and paint land together.
+    /// A hardware-decoded surface costs almost nothing here (an EGLImage
+    /// import and a bind, no pixels move), but it is drained in the same pass
+    /// so both kinds of frame become visible at the same point in the cycle.
+    func uploadPendingPixels() {
+        _texLock.lock()
+        let ids = _texEntries.compactMap {
+            ($0.value.pendingPixels != nil || $0.value.pendingNV12 != nil)
+                ? $0.key : nil
+        }
+        _texLock.unlock()
+        for id in ids {
+            importPendingNV12(id)
+            uploadPendingPixels(id)
+        }
+    }
+
+    /// One texture's pending decoded surface, imported and bound. The
+    /// previous surface is released here and not earlier — the texture
+    /// referenced it until this bind replaced it.
+    private func importPendingNV12(_ id: Int64) {
+        _texLock.lock()
+        guard var entry = _texEntries[id], let nv = entry.pendingNV12 else {
+            _texLock.unlock()
+            return
+        }
+        entry.pendingNV12 = nil
+        entry.dirty = false
+        _texEntries[id] = entry
+        _texLock.unlock()
+
+        let external = DMABUF_GL_TEXTURE_EXTERNAL_OES
+        guard let img = dmabuf_import_nv12_egl_image(
+            eglDisplay, nv.fd, nv.width, nv.height, nv.modifier,
+            nv.offset0, nv.pitch0, nv.offset1, nv.pitch1)
+        else {
+            nv.release?()
+            return
+        }
+
+        // A texture name's target is fixed by its first bind, so one that was
+        // serving RGBA cannot be re-pointed at an external image — retire it.
+        var name = entry.glTexName
+        if entry.glTarget != external, name != 0 {
+            dmabuf_delete_gl_texture(name)
+            name = 0
+        }
+        let tex = dmabuf_bind_external_texture(name, img)
+        guard tex != 0 else {
+            dmabuf_destroy_egl_image(eglDisplay, img)
+            nv.release?()
+            return
+        }
+
+        if let oldImg = entry.eglImage {
+            dmabuf_destroy_egl_image(eglDisplay, oldImg)
+        }
+        _texLock.lock()
+        _texEntries[id]?.glTexName = tex
+        _texEntries[id]?.glTarget = external
+        _texEntries[id]?.eglImage = img
+        _texEntries[id]?.texWidth = 0     // storage belongs to the image
+        _texEntries[id]?.texHeight = 0
+        let previous = _texEntries[id]?.heldRelease
+        _texEntries[id]?.heldRelease = nv.release
+        _texLock.unlock()
+        previous?()
+    }
+
+    /// One texture's pending CPU frame, uploaded and cleared. No-op when
+    /// nothing is pending. Caller must hold a current GL context.
+    private func uploadPendingPixels(_ id: Int64) {
+        _texLock.lock()
+        guard var entry = _texEntries[id], let px = entry.pendingPixels else {
+            _texLock.unlock()
+            return
+        }
+        let w = entry.width, h = entry.height
+        entry.pendingPixels = nil
+        entry.dirty = false
+        _texEntries[id] = entry
+        _texLock.unlock()
+
+        // The upload replaces whatever EGLImage-backed storage was there — a
+        // texture flips between sources cleanly because it orphans the
+        // previous storage. Drop the stored pointer in the same breath as
+        // destroying it: a failed upload must not leave a dangling one behind
+        // for the next call to destroy again.
+        // Refill the existing allocation when it already fits — see the
+        // header note on dmabuf_upload_rgba_texture. An EGLImage-bound
+        // texture has no storage of its own, so it never qualifies.
+        let reuse = entry.eglImage == nil && entry.glTexName != 0
+            && entry.texWidth == w && entry.texHeight == h
+            && entry.glTarget == 0x0DE1
+        if let oldImg = entry.eglImage {
+            dmabuf_destroy_egl_image(eglDisplay, oldImg)
+            _texLock.lock()
+            _texEntries[id]?.eglImage = nil
+            _texEntries[id]?.texWidth = 0
+            _texEntries[id]?.texHeight = 0
+            _texLock.unlock()
+        }
+        // Coming back from a decoded surface (a hardware file followed by one
+        // the GPU cannot decode): an external name cannot hold RGBA, and the
+        // surface it referenced is free the moment it is unbound.
+        var name = entry.glTexName
+        if entry.glTarget != 0x0DE1 {
+            if name != 0 { dmabuf_delete_gl_texture(name) }
+            name = 0
+            _texLock.lock()
+            let held = _texEntries[id]?.heldRelease
+            _texEntries[id]?.heldRelease = nil
+            _texLock.unlock()
+            held?()
+        }
+        let tex = px.withUnsafeBufferPointer {
+            dmabuf_upload_rgba_texture(name, w, h, reuse ? 1 : 0, $0.baseAddress)
+        }
+        guard tex != 0 else { return }
+        _texLock.lock()
+        _texEntries[id]?.glTexName = tex
+        _texEntries[id]?.glTarget = 0x0DE1
+        _texEntries[id]?.texWidth = w
+        _texEntries[id]?.texHeight = h
+        _texLock.unlock()
+    }
+
     /// Called from raster thread (via gl_external_texture_frame_callback).
     func populateExternalTexture(_ id: Int64,
                                   textureOut: UnsafeMutablePointer<FlutterOpenGLTexture>) -> Bool {
+        // Normally already done in `make_current`; this catches a frame that
+        // landed after it, so a late arrival is shown rather than held.
+        importPendingNV12(id)
+        uploadPendingPixels(id)
+
         _texLock.lock()
         guard var entry = _texEntries[id] else {
             _texLock.unlock()
             return false
         }
         let fd = entry.pendingFd
-        let pixels = entry.pendingPixels
         let dirty = entry.dirty
         let w = entry.width, h = entry.height
         let st = entry.stride
         let fourcc = entry.fourcc, mod = entry.modifier
         if dirty {
             entry.pendingFd = -1
-            entry.pendingPixels = nil
             entry.dirty = false
             _texEntries[id] = entry
         }
         _texLock.unlock()
 
-        if dirty, let px = pixels {
-            // CPU path: upload replaces whatever EGLImage-backed texture was
-            // there — a texture flips between sources cleanly because the
-            // upload orphans the previous storage.
-            if let oldImg = entry.eglImage {
-                dmabuf_destroy_egl_image(eglDisplay, oldImg)
-                entry.eglImage = nil
-            }
-            let tex = px.withUnsafeBufferPointer {
-                dmabuf_upload_rgba_texture(entry.glTexName, w, h, $0.baseAddress)
-            }
-            if tex != 0 {
-                entry.glTexName = tex
-                entry.width = w
-                entry.height = h
-                _texLock.lock()
-                _texEntries[id]?.glTexName = tex
-                _texEntries[id]?.eglImage = nil
-                _texLock.unlock()
-            }
-        } else if dirty && fd >= 0 {
+        // Pixels were taken by uploadPendingPixels above; only the DMA-BUF fd
+        // path is left to resolve here.
+        if dirty && fd >= 0 {
             if let oldImg = entry.eglImage {
                 dmabuf_destroy_egl_image(eglDisplay, oldImg)
             }
@@ -284,12 +486,21 @@ public final class GpuRendererState: @unchecked Sendable {
             _texLock.lock()
             _texEntries[id]?.glTexName = entry.glTexName
             _texEntries[id]?.eglImage = entry.eglImage
+            // The texture's storage is the image's now, not its own.
+            _texEntries[id]?.texWidth = 0
+            _texEntries[id]?.texHeight = 0
             _texLock.unlock()
         }
 
         guard entry.glTexName != 0 else { return false }
 
-        textureOut.pointee.target = 0x0DE1  // GL_TEXTURE_2D
+        // GL_TEXTURE_2D for RGBA, GL_TEXTURE_EXTERNAL_OES for a decoded NV12
+        // surface — the engine hands this straight to Skia as the backend
+        // texture's target, and an external image is only samplable there.
+        _texLock.lock()
+        let target = _texEntries[id]?.glTarget ?? 0x0DE1
+        _texLock.unlock()
+        textureOut.pointee.target = target
         textureOut.pointee.name = entry.glTexName
         textureOut.pointee.format = 0x8058  // GL_RGBA8
         textureOut.pointee.width = Int(entry.width)
@@ -366,7 +577,7 @@ public class GpuDmaBufRenderer {
     /// renders on, then any other render node, then the primary nodes (which
     /// is where a GPU-less software stack has to allocate). A non-empty
     /// `STARLING_APP_DRM_DEVICE` replaces the list outright.
-    static func drmCandidates() -> [String] {
+    public static func drmCandidates() -> [String] {
         let env = ProcessInfo.processInfo.environment
         if let forced = env["STARLING_APP_DRM_DEVICE"], !forced.isEmpty {
             return [forced]
@@ -902,7 +1113,13 @@ public class GpuDmaBufRenderer {
         rendererConfig.open_gl.make_current = { userData -> Bool in
             guard let userData = userData else { return false }
             let s = Unmanaged<GpuRendererState>.fromOpaque(userData).takeUnretainedValue()
-            return dmabuf_egl_make_current(s.eglDisplay, s.mainContext) != 0
+            guard dmabuf_egl_make_current(s.eglDisplay, s.mainContext) != 0 else {
+                return false
+            }
+            // Before the rasterizer touches the shared buffer, never during
+            // the paint — see uploadPendingPixels for why that flickers.
+            s.uploadPendingPixels()
+            return true
         }
 
         rendererConfig.open_gl.clear_current = { userData -> Bool in

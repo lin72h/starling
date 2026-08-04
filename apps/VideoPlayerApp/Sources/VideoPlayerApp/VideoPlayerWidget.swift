@@ -44,6 +44,19 @@ class _VideoPlayerState: State<StatefulWidget> {
     private var scrubPosition: Double? = nil
     /// The scrubber's laid-out width, from MeasureSize — drag x → seconds.
     private var scrubberW: Double = 0
+    /// Frame size the running decoder emits, which is the window size at the
+    /// time it was spawned (see PipeDecoder.outputSize), not the file's.
+    private var decodeW = 0
+    private var decodeH = 0
+    /// True while a resize respawn is waiting out its debounce.
+    private var resizeRespawnPending = false
+    #if os(Linux)
+    /// Whether THIS file decodes on the GPU. Decided per file at open, by
+    /// trying — hardware support is a property of the codec and the device,
+    /// not of the machine.
+    private var useHardware = false
+    private var hwSource: H264Source? = nil
+    #endif
 
     private static let kVideoExtensions = [
         "mp4", "mkv", "avi", "mov", "webm", "m4v", "mpg", "mpeg", "ts",
@@ -74,6 +87,13 @@ class _VideoPlayerState: State<StatefulWidget> {
         decoder = nil
         DispatchQueue.global(qos: .utility).async { dec?.stop() }
         #if os(Linux)
+        // Unregistering the texture below hands back every surface still
+        // bound, so this stop is what closes the decoder behind them.
+        let hw = hwSource
+        hwSource = nil
+        hw?.stop()
+        #endif
+        #if os(Linux)
         if hasTexture, let rendererState = gpuDmaBufRendererState {
             rendererState.unregisterExternalTexture(textureId)
         }
@@ -85,8 +105,14 @@ class _VideoPlayerState: State<StatefulWidget> {
     /// texture, probes the file, and starts playing from the beginning.
     private func _openVideo(_ path: String) {
         _stopRun()
-        guard let probed = PipeDecoder.probe(path: path),
-              probed.width > 0, probed.height > 0 else {
+        // The MP4 index answers dimensions and duration for free; ffprobe
+        // is the fallback for everything the narrow demuxer does not read.
+        var probed: VideoInfo? = nil
+        #if os(Linux)
+        probed = H264Source.probe(path: path)
+        #endif
+        if probed == nil { probed = PipeDecoder.probe(path: path) }
+        guard let probed, probed.width > 0, probed.height > 0 else {
             setState {
                 currentPath = ""
                 info = VideoInfo()
@@ -94,6 +120,9 @@ class _VideoPlayerState: State<StatefulWidget> {
             }
             return
         }
+        #if os(Linux)
+        useHardware = H264Source.canDecode(path: path)
+        #endif
         setState {
             currentPath = path
             info = probed
@@ -110,6 +139,14 @@ class _VideoPlayerState: State<StatefulWidget> {
         let dec = decoder
         decoder = nil
         DispatchQueue.global(qos: .utility).async { dec?.stop() }
+        #if os(Linux)
+        // Only unblock the reader — the decoder itself is torn down by its
+        // last reference going away, which may be a release closure the
+        // compositor is still holding for a surface it has bound.
+        let hw = hwSource
+        hwSource = nil
+        hw?.stop()
+        #endif
     }
 
     /// Jump to `target`. Playing: restart the stream there. Paused: decode
@@ -123,17 +160,81 @@ class _VideoPlayerState: State<StatefulWidget> {
         _startPlayback(from: t, pauseOnFirstFrame: !wasPlaying)
     }
 
+    /// The window in physical pixels — the video texture covers all of it, so
+    /// that is exactly the resolution worth decoding at. Nil before the view
+    /// exists, which means "don't cap yet".
+    private func _windowPixels() -> (width: Int, height: Int)? {
+        guard let view = PlatformDispatcher.instance.implicitView else { return nil }
+        let s = view.physicalSize
+        guard s.width >= 2, s.height >= 2 else { return nil }
+        return (Int(s.width.rounded()), Int(s.height.rounded()))
+    }
+
+    /// Whether the window has grown enough past the running decode to be
+    /// visibly upscaling it. A few percent of slack keeps a resize drag from
+    /// respawning ffmpeg for a change nobody can see; once the source itself
+    /// is the cap, `outputSize` stops growing and this stays false.
+    private func _windowOutgrewDecode() -> Bool {
+        guard let px = _windowPixels() else { return false }
+        let want = PipeDecoder.outputSize(for: info, maxWidth: px.width,
+                                          maxHeight: px.height)
+        return want.width * 32 > decodeW * 33 || want.height * 32 > decodeH * 33
+    }
+
+    /// A window that has grown past the frames feeding it is showing an
+    /// upscaled picture, so respawn ffmpeg at the new size — from the current
+    /// position, keeping play/pause. Shrinking is left alone; the extra detail
+    /// costs nothing to keep until the run ends on its own.
+    ///
+    /// Waits for the size to hold still first: a drag walks through dozens of
+    /// sizes and each respawn is a process launch plus a keyframe seek. The
+    /// arm is one-shot — re-arming on every call would be no debounce at all,
+    /// because playback rebuilds ~30 times a second and each rebuild would
+    /// cancel the pending respawn before it could ever fire.
+    private func _matchDecodeToWindow() {
+        guard !resizeRespawnPending, decoder != nil, decodeW > 0,
+              let armedAt = _windowPixels(), _windowOutgrewDecode() else { return }
+        resizeRespawnPending = true
+        let respawn: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.resizeRespawnPending = false
+            guard self.decoder != nil, self._windowOutgrewDecode(),
+                  let now = self._windowPixels() else { return }
+            // Still moving — leave it to the next rebuild to arm again rather
+            // than decode into a size that is about to change.
+            guard now == armedAt else { return }
+            self._seek(to: self.position)
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 0.4,
+            execute: unsafeBitCast(respawn, to: (@Sendable () -> Void).self))
+    }
+
     private func _startPlayback(from start: Double,
                                 pauseOnFirstFrame: Bool = false) {
         guard !currentPath.isEmpty, info.width > 0, hasTexture else { return }
+
+        #if os(Linux)
+        if useHardware {
+            _startHardwarePlayback(from: start, pauseOnFirstFrame: pauseOnFirstFrame)
+            return
+        }
+        #endif
+
         generation += 1
         let gen = generation
-        guard let dec = PipeDecoder(path: currentPath, start: start,
-                                    info: info) else { return }
+        let cap = _windowPixels() ?? (info.width, info.height)
+        guard let dec = PipeDecoder(path: currentPath, start: start, info: info,
+                                    maxWidth: cap.width,
+                                    maxHeight: cap.height) else { return }
         decoder = dec
         isPlaying = !pauseOnFirstFrame
 
-        let vw = info.width, vh = info.height
+        // The pipe carries dec's frames, which are the window's size, not the
+        // file's — sizing the read buffer from `info` would tear every frame.
+        let vw = dec.outWidth, vh = dec.outHeight
+        decodeW = vw
+        decodeH = vh
         let fps = info.fps
         let texId = textureId
         let inFlight = DispatchSemaphore(value: 2)
@@ -205,6 +306,112 @@ class _VideoPlayerState: State<StatefulWidget> {
         reader.start()
     }
 
+    #if os(Linux)
+    /// The zero-copy run: the GPU decodes into a DMA-BUF and the compositor
+    /// samples it. Same shape as the pipe reader above — same pacing clock,
+    /// same generation checks, same two-frames-in-flight bound — but a frame
+    /// is a buffer handle rather than 16MB of RGBA, so nothing is read, copied
+    /// or uploaded.
+    ///
+    /// Decoding happens at the file's own resolution here. Scaling to the
+    /// window exists to shrink an upload that no longer occurs; the GPU
+    /// samples whatever size the surface is for free.
+    private func _startHardwarePlayback(from start: Double,
+                                        pauseOnFirstFrame: Bool) {
+        generation += 1
+        let gen = generation
+        guard let src = H264Source(path: currentPath, start: start) else {
+            // The device or the codec dropped out from under us; the software
+            // path still works, so fall back rather than show nothing.
+            useHardware = false
+            _startPlayback(from: start, pauseOnFirstFrame: pauseOnFirstFrame)
+            return
+        }
+        hwSource = src
+        isPlaying = !pauseOnFirstFrame
+        decodeW = info.width
+        decodeH = info.height
+
+        let fps = info.fps
+        let texId = textureId
+        let inFlight = DispatchSemaphore(value: 2)
+
+        let readerBody: () -> Void = { [weak self] in
+            var startedAt = timespec()
+            clock_gettime(CLOCK_MONOTONIC, &startedAt)
+            let t0 = Double(startedAt.tv_sec) + Double(startedAt.tv_nsec) / 1e9
+            var framesRead = 0
+            while true {
+                guard let f = src.next() else { break }
+                // Paced against the frame's OWN timestamp, not a frame
+                // count: this path hands over the file's real frames rather
+                // than ffmpeg's CFR resampling of them, and on a screen
+                // recording the gaps between them are real — 297 frames
+                // spread unevenly over 40s. Counting would play those at a
+                // uniform rate and lose the timing entirely.
+                let pos = f.position > 0 ? f.position
+                    : src.startPosition + Double(framesRead) / fps
+                if framesRead > 0 {
+                    var now = timespec()
+                    clock_gettime(CLOCK_MONOTONIC, &now)
+                    let elapsed = Double(now.tv_sec) + Double(now.tv_nsec) / 1e9 - t0
+                    let due = pos - src.startPosition
+                    if due > elapsed {
+                        usleep(useconds_t(min(due - elapsed, 1.0) * 1_000_000))
+                    }
+                }
+                framesRead += 1
+                let thisFrame = framesRead
+                inFlight.wait()
+                let token = f.token
+                let deliver: () -> Void = { [weak self] in
+                    defer { inFlight.signal() }
+                    guard let self, self.generation == gen else {
+                        src.release(token)
+                        return
+                    }
+                    // `release` runs on the raster thread once a later surface
+                    // has been bound. Capturing `src` strongly is what keeps
+                    // the decoder alive for exactly that long.
+                    gpuDmaBufRendererState?.updateExternalTextureNV12(
+                        texId, fd: f.fd, width: f.width, height: f.height,
+                        modifier: f.modifier,
+                        offset0: f.offset0, pitch0: f.pitch0,
+                        offset1: f.offset1, pitch1: f.pitch1,
+                        release: { src.release(token) })
+                    self.setState {
+                        self.frameCount += 1
+                        self.position = pos
+                    }
+                    if pauseOnFirstFrame && thisFrame == 1 {
+                        self._stopRun()
+                        self.setState { self.position = pos }
+                    }
+                }
+                DispatchQueue.main.async(
+                    execute: unsafeBitCast(deliver, to: (@Sendable () -> Void).self))
+            }
+            // The run is over however it ended — end of file or a stop that
+            // was already signalled. Marking it closes the decoder as soon as
+            // the compositor gives the last surface back, which for a loop is
+            // the moment the next run's first frame binds. Without this an
+            // EOF-ended run would keep its VA-API context for good.
+            src.stop()
+            let loop: () -> Void = { [weak self] in
+                guard let self, self.generation == gen, self.isPlaying
+                else { return }
+                self._startPlayback(from: 0)
+            }
+            DispatchQueue.main.async(
+                execute: unsafeBitCast(loop, to: (@Sendable () -> Void).self))
+        }
+        let reader = Thread(
+            block: unsafeBitCast(readerBody, to: (@Sendable () -> Void).self))
+        reader.name = "video-reader-hw"
+        reader.start()
+    }
+    #endif
+
     private func _togglePlay() {
         if isPlaying {
             setState { _stopRun() }
@@ -216,6 +423,10 @@ class _VideoPlayerState: State<StatefulWidget> {
     }
 
     override func build(_ context: any BuildContext) -> Widget {
+        // A window resize rebuilds; playback rebuilds every frame anyway. The
+        // check is two comparisons and only the growth case does any work.
+        _matchDecodeToWindow()
+
         var children: [Widget] = []
 
         if hasTexture && frameCount > 0 {
