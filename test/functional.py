@@ -1272,9 +1272,33 @@ def check_recording_motion() -> None:
 
     # Random hex: every line differs, so a repeated frame is unambiguous.
     flood = "while true; do head -c 1200 /dev/urandom | xxd | head -30; done"
+
     def flooding() -> bool:
-        return subprocess.run(["pgrep", "-x", "xxd"],
-                              capture_output=True).returncode == 0
+        """Is the terminal actually churning?
+
+        Not `pgrep xxd`: each iteration is `head -c 1200 | xxd | head -30`,
+        which lives for microseconds — sampled 40 times across a running
+        flood it matched ZERO times, so it reports "no flood" while the
+        screen scrolls. Measure the terminal's own CPU instead. Idle it is
+        ~0 ticks; rendering the flood it was ~25 ticks/s on the dev box and
+        stays far above the threshold on a slow VM.
+        """
+        pids = subprocess.run(["pgrep", "-x", "TerminalApp"],
+                              capture_output=True, text=True).stdout.split()
+        if not pids:
+            return False
+        def ticks() -> int:
+            try:
+                parts = open(f"/proc/{pids[0]}/stat").read().rsplit(") ", 1)[1].split()
+                return int(parts[11]) + int(parts[12])
+            except (OSError, IndexError):
+                return -1
+        a = ticks()
+        if a < 0:
+            return False
+        time.sleep(0.8)
+        b = ticks()
+        return b >= 0 and (b - a) >= 3
 
     # And CONFIRM it started. Keystrokes go to whatever holds focus, and a
     # window that has mapped does not always hold it yet — when the typing
@@ -1285,18 +1309,12 @@ def check_recording_motion() -> None:
     for _ in range(3):
         drive(f"type {flood}")
         drive("key enter")
-        if any(flooding() or time.sleep(0.5) is None and flooding()
-               for _ in range(8)):
+        if flooding():
             break
     assert flooding(), (
-        "the terminal never started the flood — the typed line did not run, "
-        "so there was nothing moving to record. Known on the gate VM: keys "
-        "from the driver's uinput keyboard reach SHELL surfaces (the "
-        "Launchpad filter check passes) but not client windows, while QEMU's "
-        "own send-key reaches both — so the desktop is fine and the synthetic "
-        "keyboard is not. Cause not yet identified; ruled out are the "
-        "recorder, the libseat backend (seatd installed, no open failures) "
-        "and the host render node")
+        "the terminal is idle after three attempts to start the flood — the "
+        "typed line never ran, so there is nothing moving to record and the "
+        "motion assertion below would blame the recorder for it")
     time.sleep(3)
     try:
         drive("key ctrl+shift+r")
