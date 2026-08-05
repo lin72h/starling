@@ -304,6 +304,8 @@
         <a href="#first-login">First login</a>
         <a href="#dock">The dock</a>
         <a href="#launchpad">Launchpad</a>
+        <a href="#menubar">Menu bar</a>
+        <a href="#recording">Recording</a>
         <a href="#windows">Windows</a>
         <a href="#spaces">Spaces &amp; Mission Control</a>
         <a href="#shortcuts">Shortcuts</a>
@@ -340,7 +342,7 @@
         a right-click on the wallpaper.</p>
       </div>
       <figure>
-        <img src="img/guide/desktop.jpg" alt="The Starling desktop: a menu bar with the clock across the top, a wallpaper of the Golden Gate Bridge at dusk, and a floating glass dock at the bottom holding six app icons.">
+        <img src="img/guide/desktop.jpg" alt="The Starling desktop: a menu bar with the clock across the top, a wallpaper of the Golden Gate Bridge at dusk, and a floating glass dock at the bottom holding eight app icons.">
         <figcaption>The Starling desktop — menu bar, wallpaper, and the dock.</figcaption>
       </figure>
     </div>
@@ -353,10 +355,11 @@
         <h2>Your apps, along the bottom</h2>
       </div>
       <div class="prose">
-        <p>Out of the box the dock holds the six first-party apps, in order:
+        <p>Out of the box the dock holds the first-party apps, in order:
         <strong>Launchpad</strong>, <strong>Settings</strong>,
         <strong>Files</strong>, <strong>Terminal</strong>,
-        <strong>Calculator</strong>, and the <strong>App Store</strong>.</p>
+        <strong>Text Editor</strong>, <strong>Calculator</strong>,
+        the <strong>App Store</strong>, and <strong>Video Player</strong>.</p>
       </div>
       <ul class="feats">
         <li><strong>Click</strong> an icon to launch or focus that app.</li>
@@ -383,9 +386,51 @@
         <li>Click empty space or press <kbd>Esc</kbd> to dismiss it.</li>
       </ul>
       <figure>
-        <img src="img/guide/launchpad.jpg" alt="The Launchpad: a search box at the top and a grid of app icons — Settings, Files, Terminal, Calculator, App Store, Chrome, VS Code, Blender, GIMP and IntelliJ IDEA — over a blurred wallpaper.">
+        <img src="img/guide/launchpad.jpg" alt="The Launchpad: a search box at the top and a grid of app icons — Settings, Files, Image Viewer, Video Player, Terminal, Text Editor, Calculator, Task Manager, App Store, Chrome and VS Code — over a blurred wallpaper.">
         <figcaption>The Launchpad. First-party apps and any installed third-party apps, searchable.</figcaption>
       </figure>
+    </div>
+  </section>
+
+  <section id="menubar">
+    <div class="wrap">
+      <div class="kicker">Menu bar</div>
+      <div class="sec-head">
+        <h2>The bar across the top</h2>
+        <p>The clock and date sit on the left; on the right are the Wi-Fi and
+        battery indicators, a <strong>bell</strong>, and the
+        <strong>control centre</strong>.</p>
+      </div>
+      <ul class="feats">
+        <li><strong>Wi-Fi</strong> — join a network without opening Settings.</li>
+        <li><strong>Dark Mode</strong> — switches the whole desktop and every first-party app.</li>
+        <li><strong>Tiling</strong> — retiles the current space; toggle it off to restore floating windows.</li>
+        <li><strong>Muted</strong> — mute or unmute output, with <strong>volume</strong> and <strong>brightness</strong> sliders below the tiles.</li>
+        <li><strong>Record</strong> and <strong>Record App</strong> — see <a href="#recording">recording</a>.</li>
+      </ul>
+      <p class="note">The <strong>bell</strong> collects notifications instead of
+      interrupting you with banners: nothing steals focus, and you read what
+      happened when you choose to.</p>
+    </div>
+  </section>
+
+  <section id="recording">
+    <div class="wrap">
+      <div class="kicker">Recording</div>
+      <div class="sec-head">
+        <h2>The desktop records itself</h2>
+        <p>No extra software, and nothing to configure.</p>
+      </div>
+      <ul class="feats">
+        <li><strong>Record</strong> — from the control centre, or <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>, captures the whole screen.</li>
+        <li><strong>Record App</strong> — opens Mission Control and asks which window you want. It captures that window’s own content, not the patch of screen it sits in, so windows stacked on top never appear and moving or resizing it mid-recording doesn’t spoil the take.</li>
+        <li>A <strong>red dot and a running clock</strong> sit in the menu bar for the whole recording, so one can never be going unnoticed.</li>
+      </ul>
+      <p class="note">Recordings land in <code>~/Videos</code> as MP4, and the
+      Video Player opens them. Where the machine has a hardware H.264 encoder the
+      composited frame goes straight to it as a dma-buf and the CPU never touches
+      a pixel — about 0.05 of a core on a modern laptop. Machines without one
+      fall back to a software encoder, which works but costs more.</p>
     </div>
   </section>
 
@@ -399,7 +444,7 @@
         <li>Windows carry <strong>macOS-style colored circle buttons</strong> on the left of the title bar — close, minimize, maximize.</li>
         <li><strong>Drag the title bar</strong> to move a window; <strong>drag an edge or corner</strong> to resize.</li>
         <li><strong>Double-click the title bar</strong> to toggle maximized.</li>
-        <li>Windows <strong>float</strong> by default. Flip the whole desktop to a <strong>tiling</strong> (dwm-style master-and-stack) layout with the <strong>Tiling Windows</strong> switch in Settings — toggling back restores your floating layout.</li>
+        <li>Windows <strong>float</strong> by default. Flip the whole desktop to a <strong>tiling</strong> (dwm-style master-and-stack) layout with the <strong>Tiling</strong> tile in the <a href="#menubar">control centre</a> or the <strong>Tiling Windows</strong> switch in Settings — toggling back restores your floating layout.</li>
       </ul>
     </div>
   </section>
@@ -442,6 +487,7 @@
         <tr><td><kbd>Ctrl</kbd> + <kbd>Tab</kbd></td><td>Cycle spaces</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>↑</kbd></td><td>Mission Control</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>↓</kbd></td><td>AI Space</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd></td><td>Start / stop screen recording</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>Space</kbd></td><td>Toggle the input method (fcitx5, for CJK and other IME input)</td></tr>
         <tr><td><kbd>Esc</kbd></td><td>Close Mission Control</td></tr>
         <tr><td>Double-click title bar</td><td>Maximize / restore a window</td></tr>
@@ -453,25 +499,28 @@
     <div class="wrap">
       <div class="kicker">The apps</div>
       <div class="sec-head">
-        <h2>Five first-party apps</h2>
+        <h2>Nine first-party apps</h2>
         <p>All written against Starling's own Swift framework.</p>
       </div>
       <div class="apps-grid">
         <div class="app-card"><h3>Settings</h3><p>Appearance, displays, network, sound, and system information — see below.</p></div>
         <div class="app-card"><h3>Files</h3><p>Browse your home directory and the filesystem.</p></div>
         <div class="app-card"><h3>Terminal</h3><p>A real terminal with a PTY, running your login shell. TUI programs like <code>vim</code> and <code>htop</code> work.</p></div>
+        <div class="app-card"><h3>Text Editor</h3><p>A plain-text editor.</p></div>
         <div class="app-card"><h3>Calculator</h3><p>A basic calculator.</p></div>
+        <div class="app-card"><h3>Task Manager</h3><p>CPU, memory, disk and network with live sparklines, a sortable process table, and End Process.</p></div>
+        <div class="app-card"><h3>Video Player</h3><p>Plays your recordings and other video. For Starling’s own recordings it decodes on the GPU and never copies a frame through the CPU.</p></div>
+        <div class="app-card"><h3>Image Viewer</h3><p>Opens images from Files.</p></div>
         <div class="app-card"><h3>App Store</h3><p>Install more applications — see below.</p></div>
-        <div class="app-card"><h3>Settings sidebar</h3><p><strong>General</strong> (system info), <strong>Network</strong> (Wi-Fi), <strong>Displays</strong>, <strong>Appearance</strong> (Dark Mode, Tiling Windows, Sound), and <strong>About</strong>.</p></div>
+        <div class="app-card"><h3>Settings sidebar</h3><p><strong>General</strong> (system info), <strong>Network</strong> (Wi-Fi), <strong>Displays</strong>, <strong>Sound</strong>, <strong>Date &amp; Time</strong>, <strong>Default Apps</strong>, <strong>Appearance</strong> (Dark Mode, Tiling Windows, Notifications), <strong>Power</strong>, and <strong>About</strong>.</p></div>
       </div>
       <figure>
-        <img src="img/guide/settings.jpg" alt="The Settings app: a sidebar with General, Network, Displays, Appearance and About; the General page shows System Information reading Starling OS Version 0.2, Ubuntu 26.04 LTS.">
+        <img src="img/guide/settings.jpg" alt="The Settings app: a sidebar with General, Network, Displays, Sound, Date &amp; Time, Default Apps, Appearance, Power and About; the General page shows System Information reading Starling OS Version 0.2.3-2, Ubuntu 26.04 LTS.">
         <figcaption>Settings — here on General, showing the system information.</figcaption>
       </figure>
       <p class="note"><strong>Scaling is pinned to 2.0</strong> in this release,
-      the <strong>Notifications</strong> toggle is inert (no notification
-      service yet), and there is no display-mode picker — the session uses the
-      connector's preferred mode.</p>
+      and there is no display-mode picker — the session uses the connector's
+      preferred mode.</p>
     </div>
   </section>
 
@@ -520,7 +569,6 @@
       </div>
       <ul class="feats">
         <li><strong>No screen lock or screensaver.</strong> Don't rely on it to secure an unattended machine.</li>
-        <li><strong>No notifications yet.</strong> The Settings toggle is inert.</li>
         <li><strong>Scaling is fixed at 2.0.</strong> Fractional scaling produced blurry text and isn't usable yet.</li>
         <li><strong>No display-mode picker.</strong> The session uses the connector's preferred mode.</li>
         <li><strong>Zoom runs with a caveat</strong> — it starts but reports <code>no pactl and pacmd found</code>, since nothing pulls in an audio stack yet.</li>
