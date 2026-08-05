@@ -147,9 +147,12 @@ deliberately outside `lint.py`'s scope: they are test doubles, not apps, and
 `test/vm.sh` builds the .deb, reverts the VM to its clean `desktop-ready`
 snapshot, installs the package the way the docs tell a user to, sets up a GDM
 login, reboots into it, and then runs the functional tier **against that
-session**. The harness itself stays at `$STARLING_VM` (default
-`~/starling-vm`) by decision — it carries multi-gigabyte disk images — so this
-script only orchestrates the `g1`/`g2`/`g3` scripts documented there.
+session**. The harness it drives — the launchers, `ssh-vm.sh`/`scp-vm.sh`, the
+in-guest `g1`/`g2`/`g3` steps and the QMP input helpers — is in
+`test/vm-harness/`. Only the VM **state** is outside the repo, at
+`$STARLING_VM` (default `~/starling-vm`): the disk images run to tens of
+gigabytes and the guest SSH key is a secret. `test/vm-harness/README.md`
+documents both, including how to build a state directory from scratch.
 
 It is the only tier that runs against the thing we actually ship, and the only
 one that can see privilege-path bugs. Two have already cost real time: the

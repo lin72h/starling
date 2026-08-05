@@ -186,7 +186,7 @@ Build / runtime:
   (Chromium refuses the setuid path as root), Spotify started seven processes
   and never drew a window (dconf could not write in the root-owned
   `XDG_RUNTIME_DIR`), and Teams' earlier `SIGILL` did not reproduce at all.
-  **Test user-facing app behaviour in the VM** (`starling-vm/`, apps run as
+  **Test user-facing app behaviour in the VM** (`test/vm-harness/`, apps run as
   `tester` through a real GDM login); use the dev box for GPU-specific
   questions — that is what confirmed the GTK4 crash is not a virgl artifact.
 - **Root mode also HIDES bugs, not just invents them** — and those are worse,

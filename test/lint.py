@@ -531,7 +531,11 @@ def check_result_builders() -> None:
 def check_script_syntax() -> None:
     check = "syntax"
     count = 0
-    for script in sorted((REPO / "build").glob("*.sh")):
+    # test/vm-harness is here for a reason: nothing runs those scripts except
+    # the release gate, so a typo in one would otherwise surface at release
+    # time, on a boot that takes half an hour to fail.
+    for script in sorted((REPO / "build").glob("*.sh")) + \
+                  sorted((REPO / "test/vm-harness").glob("*.sh")):
         # Check each script with the shell it actually declares: run-desktop.sh
         # and wechat-run.sh are bash and use arrays, which `sh -n` (dash)
         # rejects for syntax it simply does not have.
@@ -545,7 +549,8 @@ def check_script_syntax() -> None:
             ok(script.name)
         count += 1
     for script in sorted((REPO / "build").glob("*.py")) + \
-                  sorted((REPO / "test").glob("*.py")):
+                  sorted((REPO / "test").glob("*.py")) + \
+                  sorted((REPO / "test/vm-harness").glob("*.py")):
         result = subprocess.run([sys.executable, "-m", "py_compile", str(script)],
                                 capture_output=True, text=True)
         if result.returncode != 0:

@@ -20,13 +20,15 @@
 #     Store's Install and Remove buttons cannot work on the dev box and cannot
 #     be tested there.
 #
-# The VM harness itself lives OUTSIDE this repo, at $STARLING_VM (default
-# ~/starling-vm), by decision: it carries multi-gigabyte disk images. This
-# script only orchestrates it — see that directory's README.md for the manual
-# equivalent of every step below.
+# The harness this drives is in test/vm-harness/ — the launchers, ssh/scp, the
+# in-guest g1/g2/g3 steps, the QMP input helpers. Its *state* is not, and
+# cannot be: the disk images run to tens of gigabytes and the SSH key is a
+# secret, so those stay at $STARLING_VM (default ~/starling-vm). See
+# test/vm-harness/README.md for the manual equivalent of every step below.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+HARNESS="$REPO/test/vm-harness"
 VM="${STARLING_VM:-$HOME/starling-vm}"
 DEB=""
 KEEP=0
@@ -41,13 +43,19 @@ done
 fail() { echo; echo "FAIL — $*"; exit 1; }
 step() { echo; echo "══ $* ═══════════════════════════════════════════"; }
 
-[ -d "$VM" ] || fail "no VM harness at $VM (set STARLING_VM)"
-for f in launch-vm-2604.sh launch-vm-2604-nogl.sh ssh-vm.sh scp-vm.sh disk2604.qcow2 \
+for f in launch-vm-2604.sh launch-vm-2604-nogl.sh ssh-vm.sh scp-vm.sh \
          g1-install.sh g2-setup-login.sh g3-check.sh qmp-abs-click.py; do
-    [ -e "$VM/$f" ] || fail "$VM/$f is missing — harness incomplete"
+    [ -e "$HARNESS/$f" ] || fail "$HARNESS/$f is missing — harness incomplete"
+done
+# What the harness scripts expect to find in the state directory. A fresh
+# checkout has every script above and none of this: the images are built, not
+# cloned, and the key is machine-local.
+[ -d "$VM" ] || fail "no VM state directory at $VM (set STARLING_VM)"
+for f in disk2604.qcow2 seed2604.iso id_starling; do
+    [ -e "$VM/$f" ] || fail "$VM/$f is missing — see test/vm-harness/README.md"
 done
 
-ssh_vm() { "$VM/ssh-vm.sh" "$@"; }
+ssh_vm() { "$HARNESS/ssh-vm.sh" "$@"; }
 
 # The harness forwards a fixed port, so a second VM on it makes this gate test
 # the wrong machine. Refuse rather than guess.
@@ -77,7 +85,7 @@ step "revert to the clean snapshot and boot"
 pkill -f "qemu-system.*disk2604\.qcow2" 2>/dev/null && sleep 3
 (cd "$VM" && qemu-img snapshot -a desktop-ready disk2604.qcow2) \
     || fail "could not revert to the desktop-ready snapshot"
-(cd "$VM" && setsid bash launch-vm-2604.sh >/dev/null 2>&1 &)
+(setsid bash "$HARNESS/launch-vm-2604.sh" >/dev/null 2>&1 &)
 
 echo -n "waiting for ssh"
 for _ in $(seq 1 60); do
@@ -91,7 +99,7 @@ ssh_vm '. /etc/os-release; echo "guest: $PRETTY_NAME"'
 
 cleanup() {
     if [ "$KEEP" = 1 ]; then
-        echo "leaving the VM running (--keep); ssh with $VM/ssh-vm.sh"
+        echo "leaving the VM running (--keep); ssh with $HARNESS/ssh-vm.sh"
     else
         pkill -f "qemu-system.*disk2604\.qcow2" 2>/dev/null
     fi
@@ -100,9 +108,9 @@ trap cleanup EXIT INT TERM
 
 # ── 3. install exactly as the docs tell a user to ────────────────────────────
 step "install the .deb (g1)"
-"$VM/scp-vm.sh" "$DEB" '~/' >/dev/null || fail "scp of the .deb failed"
+"$HARNESS/scp-vm.sh" "$DEB" '~/' >/dev/null || fail "scp of the .deb failed"
 for g in g1-install.sh g2-setup-login.sh g3-check.sh; do
-    "$VM/scp-vm.sh" "$VM/$g" '~/' >/dev/null || fail "scp of $g failed"
+    "$HARNESS/scp-vm.sh" "$HARNESS/$g" '~/' >/dev/null || fail "scp of $g failed"
 done
 ssh_vm "bash ~/g1-install.sh $(basename "$DEB")" 2>&1 | tail -20
 ssh_vm 'dpkg -s starling >/dev/null 2>&1' \
@@ -157,15 +165,15 @@ step "functional checks, against the installed .deb"
 # install rather than set up behind the tests' back; installing is one of the
 # behaviours under test, not a precondition. This is the tier to do it in: a
 # clean snapshot, and a machine whose software we are free to change.
-"$VM/scp-vm.sh" "$REPO/test/functional.py" '~/' >/dev/null
+"$HARNESS/scp-vm.sh" "$REPO/test/functional.py" '~/' >/dev/null
 # The screencast check shells out to its portal client, resolved beside
 # functional.py — forget this file and the check fails as "portal handshake
 # failed" with a python traceback about a missing script.
-"$VM/scp-vm.sh" "$REPO/test/screencast_client.py" '~/' >/dev/null
-"$VM/scp-vm.sh" "$REPO/build/shell-drive.py" '~/' >/dev/null
+"$HARNESS/scp-vm.sh" "$REPO/test/screencast_client.py" '~/' >/dev/null
+"$HARNESS/scp-vm.sh" "$REPO/build/shell-drive.py" '~/' >/dev/null
 ssh_vm 'mkdir -p ~/fixtures'
 for f in "$REPO"/test/fixtures/*.app; do
-    "$VM/scp-vm.sh" "$f" '~/fixtures/' >/dev/null
+    "$HARNESS/scp-vm.sh" "$f" '~/fixtures/' >/dev/null
 done
 # The session is started by GDM, so the fixture catalog cannot be injected
 # through the environment. Drop the records into the installed catalog
@@ -208,7 +216,7 @@ pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null \
 # all (verified against the shell's own [Input] log: every injected click landed
 # on the untouched screen centre). The in-guest functional checks drive their
 # own uinput device and are indifferent to the extra tablet.
-(cd "$VM" && STARLING_VM_TABLET=1 setsid bash launch-vm-2604-nogl.sh >/dev/null 2>&1 &)
+(STARLING_VM_TABLET=1 setsid bash "$HARNESS/launch-vm-2604-nogl.sh" >/dev/null 2>&1 &)
 
 echo -n "waiting for the graphical boot"
 for _ in $(seq 1 60); do
@@ -266,7 +274,7 @@ got_scale=$(ssh_vm 'grep -ho "scale [0-9.]* for" /tmp/starling-session-*.log \
       at $expected_scale — re-measure them against a live desktop (gshot.py)
       before trusting this step"
 
-click() { (cd "$VM" && python3 qmp-abs-click.py "$1" "$2" 1280 800 >/dev/null); }
+click() { python3 "$HARNESS/qmp-abs-click.py" "$1" "$2" 1280 800 >/dev/null; }
 click 1252 17;  sleep 2   # power icon -> menu
 click 1123 165; sleep 2   # Shut Down… -> confirm panel
 click 1197 121            # confirm Shut Down
