@@ -445,6 +445,88 @@ def check_identity_is_not_incidental() -> None:
     wait_for(lambda: not apps()["gimp"]["process"], "gimp to exit")
 
 
+def _reinstall_and_launch(app_id: str, query: str, *procs: str,
+                          purge: str = "") -> None:
+    """Remove the app, install it for real, then launch it THROUGH THE SHELL.
+
+    The launch half is the point, and it must go through the Launchpad rather
+    than `app_run()`. Chrome and VS Code both segfaulted on launch from a real
+    GDM session while every other signal looked perfect: app-install returned
+    0, the record carried a correct WmClass, the launcher tile appeared, and
+    the process even started — it just died in ~2.4s without ever mapping a
+    window. app-run was passing GDM's GNOME_DESKTOP_SESSION_ID through, and
+    Chromium reads that as proof of a GNOME session whatever
+    XDG_CURRENT_DESKTOP says.
+
+    Nothing that launches app-run from a shell can see it: this tier's
+    environment has no GNOME_DESKTOP_SESSION_ID, and app-run's root branch
+    starts from `env -i`. Only the shell's own spawn carries the variable, so
+    only a launch driven through the desktop reproduces it.
+
+    Removing first is deliberate: the install is under test, so a machine that
+    happens to have the app already must exercise it rather than skip it.
+    """
+    if os.environ.get("STARLING_TEST_INSTALL") != "1":
+        raise Skip("set STARLING_TEST_INSTALL=1 to install a real app")
+
+    quit_app(*procs)
+    records = Path(os.environ.get("STARLING_APP_RECORDS",
+                                  "/var/lib/starling/installed.d"))
+
+    if apps().get(app_id, {}).get("installed"):
+        removed = subprocess.run(["sudo", str(APP_INSTALL), "--remove", app_id],
+                                 capture_output=True, text=True, timeout=900)
+        assert removed.returncode == 0, \
+            f"app-install --remove {app_id} failed: {removed.stderr.strip()[-200:]}"
+        wait_for(lambda: not apps()[app_id]["installed"],
+                 f"the shell to drop {app_id}")
+        log("removed first, so the install below is a real one")
+    # A leftover profile is not part of a fresh install, and for VS Code it
+    # decides what the launch even does (with one, it restores a window).
+    if purge:
+        subprocess.run(f"rm -rf {purge}", shell=True, capture_output=True)
+
+    installed = subprocess.run(["sudo", str(APP_INSTALL), app_id],
+                               capture_output=True, text=True, timeout=1800)
+    assert installed.returncode == 0, \
+        f"app-install {app_id} failed: {installed.stderr.strip()[-300:]}"
+    wait_for(lambda: apps()[app_id]["installed"],
+             f"the shell to show {app_id} installed", timeout=40)
+    record = (records / f"{app_id}.app").read_text()
+    assert "WmClass=" in record, f"no WmClass recorded:\n{record}"
+    log(record.strip().replace("\n", " | "))
+
+    drive("move 300 300", "dock launcher", "click")
+    try:
+        wait_for(lambda: ask("launcher_state")["open"], "Launchpad to open")
+        drive(f"type {query}")
+        wait_for(lambda: ask("launcher_state")["filtered"] == [app_id],
+                 f"the Launchpad to filter to exactly {app_id}")
+        drive("key enter")
+        wait_for(lambda: apps()[app_id]["process"], f"{app_id} process",
+                 timeout=60)
+        log("process started")
+        # The window, not the process, is the assertion that matters: the
+        # segfault above left a process alive for seconds and mapped nothing.
+        wait_for(lambda: apps()[app_id]["window"], f"{app_id} window",
+                 timeout=90)
+        log("window mapped and attributed to the app via app_id")
+    finally:
+        drive("key esc")
+        quit_app(*procs)
+
+
+@check("store: Chrome installs from scratch and launches from the Launchpad")
+def check_chrome_install_launch() -> None:
+    _reinstall_and_launch("chrome", "chrome", "chrome")
+
+
+@check("store: VS Code installs from scratch and launches from the Launchpad")
+def check_vscode_install_launch() -> None:
+    _reinstall_and_launch("vscode", "code", "code",
+                          purge="/tmp/vscode_wayland-*")
+
+
 @check("launch: clicking a dock icon starts a first-party app")
 def check_dock_launch() -> None:
     """Also covers dock geometry end to end: `dock settings` resolves the slot
