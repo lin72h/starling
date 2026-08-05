@@ -11,6 +11,25 @@ Preview locally:
 python3 -m http.server -d ui 8000    # then open http://localhost:8000
 ```
 
+The hero is the demo video (`video/starling-demo.mp4`), not a screenshot. It is
+a single unedited take captured with the desktop's own recorder and driven by a
+`build/shell-drive.py` script, then downsized for the web:
+
+```bash
+ffmpeg -i "~/Videos/Screen Recording ....mp4" -vf scale=1280:800:flags=lanczos \
+       -c:v libx264 -profile:v high -preset slow -crf 31 -pix_fmt yuv420p \
+       -movflags +faststart -an ui/video/starling-demo.mp4
+ffmpeg -ss 144 -i "~/Videos/Screen Recording ....mp4" -frames:v 1 \
+       -vf scale=1280:800:flags=lanczos -q:v 3 ui/img/demo-poster.jpg
+```
+
+`+faststart` puts the moov atom first so the file plays while it downloads, and
+the element carries `preload="none"` — the 19 MB is fetched only when someone
+presses play, so the hero still paints at the cost of the 94 KB poster. CRF 31
+was chosen by comparing 29 and 31 on the most text-dense frame; they were
+indistinguishable and 31 is a third smaller. Keep `img/desktop.jpg` — it is the
+fallback inside the `<video>` element for anything that cannot play MP4.
+
 Re-cut the screenshots after a UI change:
 
 ```bash

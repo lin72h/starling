@@ -227,6 +227,27 @@
     border-radius: 10px; border: 1px solid var(--line);
     box-shadow: 0 18px 50px rgba(0,0,0,0.45);
   }
+
+  /* ---------- hero video ---------- */
+  /* The hero carries the demo instead of a screenshot. preload="none" keeps
+     the 19 MB off the initial load — the poster is a 94 KB still, so the hero
+     paints as fast as the old <img> did and the video is fetched only when
+     someone presses play. */
+  /* The screenshot this replaced bled into the section below — square bottom,
+     no bottom border, shadow thrown upward. That reads as unfinished once a
+     caption sits underneath, so the video is a closed card instead. */
+  .shot.shot-video {
+    border-radius: 12px; border-bottom: 1px solid var(--line);
+    box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  }
+  .shot video {
+    display: block; width: 100%; height: auto;
+    background: var(--bg-sunk); border-radius: 11px;
+  }
+  .shot-note {
+    max-width: 62ch; margin: 18px auto 0; text-align: center;
+    font-size: 13.5px; line-height: 1.6; color: var(--ink-faint);
+  }
   figure.wide figcaption {
     font-size: 13.5px; color: var(--ink-faint); margin-top: 12px; text-align: center;
   }
@@ -368,10 +389,20 @@
       </div>
     </div>
     <div class="wrap">
-      <div class="shot">
-        <img src="img/desktop.jpg" width="2400" height="1350"
-             alt="The Starling desktop: the Files, Terminal and Settings apps open in a cascade over a Golden Gate Bridge wallpaper, with a menu bar on top and a glass dock along the bottom. Settings reads 'Starling OS, Version 0.1, Ubuntu 25.10'.">
+      <div class="shot shot-video">
+        <video controls preload="none" playsinline width="1280" height="800"
+               poster="img/demo-poster.jpg"
+               aria-label="A four-minute tour of the Starling desktop: a terminal, the file manager, tiling and dark mode, the App Store installing Chrome and VS Code, and both apps running afterwards.">
+          <source src="video/starling-demo.mp4" type="video/mp4">
+          <img src="img/desktop.jpg" width="2400" height="1350"
+               alt="The Starling desktop: the Files, Terminal and Settings apps open in a cascade over a Golden Gate Bridge wallpaper, with a menu bar on top and a glass dock along the bottom.">
+        </video>
       </div>
+      <p class="shot-note">
+        Four minutes, one take — recorded by the desktop itself, with its own
+        screen recorder. The App Store really downloads Chrome and VS Code and
+        installs them with apt; both then launch from the desktop's own launcher.
+      </p>
     </div>
   </div>
 
