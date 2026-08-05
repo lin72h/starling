@@ -147,8 +147,8 @@ framework:
 - **App Store** — install more applications. See
   [below](#installing-more-apps).
 
-Text Editor and Image Viewer also exist and build, but are not packaged in
-v0.2.
+Text Editor, Image Viewer and Video Player ship in the package too, and
+appear in the Launchpad alongside the rest.
 
 ---
 
@@ -214,7 +214,7 @@ desktop.
 
 ## Things to know in this release
 
-Starling is an early preview (v0.2). A few limits you will notice:
+Starling is an early preview (v0.2.3). A few limits you will notice:
 
 - **No screen lock or screensaver.** Do not rely on it to secure an unattended
   machine.
