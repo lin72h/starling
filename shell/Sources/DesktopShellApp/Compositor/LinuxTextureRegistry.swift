@@ -366,6 +366,18 @@ class LinuxTextureRegistry: @unchecked Sendable {
         if entry.ownsFd && entry.dmaFd >= 0 && entry.dmaFd != fd {
             entry.retiredFds.append(entry.dmaFd)
         }
+        // populateTexture drains retiredFds, but only when the engine
+        // actually samples this texture — a surface that keeps committing
+        // while its texture goes unsampled (occluded, mid-teardown, engine
+        // frame skipped) accumulates fds without bound, and a session was
+        // observed at 939 stranded dups with libwayland spinning on EMFILE.
+        // Close the oldest beyond a small window here instead: anything
+        // eight generations stale cannot be referenced by an in-flight
+        // populate, which only ever reads the current dmaFd (at most one
+        // generation back).
+        while entry.retiredFds.count > 8 {
+            Glibc.close(entry.retiredFds.removeFirst())
+        }
         entry.ownsFd = ownsFd
         entry.needsReimport = true
         entry.dmaFd = fd

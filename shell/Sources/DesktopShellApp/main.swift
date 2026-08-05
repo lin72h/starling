@@ -109,6 +109,27 @@ app.run()
 /// Must NOT be @MainActor — engine callbacks come from io/raster threads.
 /// @unchecked Sendable because we manually synchronize access (main thread
 /// for GLFW callbacks, NSLock for taskQueue).
+// A compositor legitimately holds many fds — one dup per live client
+// buffer, EGLImage-internal dups, the recorder's ring, input devices — and
+// the distro's 1024 soft limit is sized for none of that. Hitting it is
+// catastrophic in a specific way: libwayland's accept handler fails with
+// EMFILE, logs "failed to accept" in a hot loop, and no new client can
+// ever connect. Raise the soft limit to the hard limit (524288 here)
+// before anything opens.
+do {
+    // Glibc imports RLIMIT_NOFILE as the __rlimit_resource enum while
+    // get/setrlimit take the raw Int32 — bridge explicitly.
+    let nofile = __rlimit_resource_t(RLIMIT_NOFILE.rawValue)
+    var lim = rlimit()
+    if getrlimit(nofile, &lim) == 0 && lim.rlim_cur < lim.rlim_max {
+        lim.rlim_cur = lim.rlim_max
+        if setrlimit(nofile, &lim) != 0 {
+            FileHandle.standardError.write(
+                "[main] setrlimit(RLIMIT_NOFILE) failed — long sessions may exhaust fds\n".data(using: .utf8)!)
+        }
+    }
+}
+
 // Whether a first-party app counts as installed depends on where its binary
 // can be found, and only the shell knows all the layouts (staged, packaged,
 // sibling dev build). Hand that to the registry before anything reads it —
