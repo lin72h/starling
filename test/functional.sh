@@ -49,20 +49,29 @@ as_user() {
 
 CATALOG_DIR="${TMPDIR:-/tmp}/starling-test-catalog"
 RECORDS_DIR="${TMPDIR:-/tmp}/starling-test-records"
-rm -rf "$CATALOG_DIR" "$RECORDS_DIR"
-mkdir -p "$CATALOG_DIR" "$RECORDS_DIR"
-cp "$REPO"/registry/catalog.d/*.app "$CATALOG_DIR/"
-cp "$REPO"/test/fixtures/*.app "$CATALOG_DIR/"
-chmod 0755 "$CATALOG_DIR" "$RECORDS_DIR"
-# The shell writes app records here (app-install), and it no longer runs as
-# root — so root-owned 0755 would make every install check fail on EACCES
-# rather than on anything the test is about.
-if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
-    chown -R "$SUDO_USER" "$CATALOG_DIR" "$RECORDS_DIR"
+# The fixture catalog and records dir describe the shell THIS SCRIPT starts.
+# An attached shell was started by something else (usually the packaged GDM
+# session) and reads the real /var/lib/starling/installed.d — exporting the
+# fixture paths anyway made the checks look for records in a directory the
+# attached session never writes: app-install landed gimp in the real records
+# dir, the shell lit it up, and the check still failed with ENOENT on
+# /tmp/starling-test-records/gimp.app. Attach mode tests the session as it
+# is, fixture-free.
+if [ "$ATTACH" -eq 0 ]; then
+    rm -rf "$CATALOG_DIR" "$RECORDS_DIR"
+    mkdir -p "$CATALOG_DIR" "$RECORDS_DIR"
+    cp "$REPO"/registry/catalog.d/*.app "$CATALOG_DIR/"
+    cp "$REPO"/test/fixtures/*.app "$CATALOG_DIR/"
+    chmod 0755 "$CATALOG_DIR" "$RECORDS_DIR"
+    # The shell writes app records here (app-install), and it no longer runs as
+    # root — so root-owned 0755 would make every install check fail on EACCES
+    # rather than on anything the test is about.
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        chown -R "$SUDO_USER" "$CATALOG_DIR" "$RECORDS_DIR"
+    fi
+    export STARLING_CATALOG_DIR="$CATALOG_DIR"
+    export STARLING_APP_RECORDS="$RECORDS_DIR"
 fi
-
-export STARLING_CATALOG_DIR="$CATALOG_DIR"
-export STARLING_APP_RECORDS="$RECORDS_DIR"
 
 SHELL_PID=""
 cleanup() {
