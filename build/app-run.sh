@@ -358,12 +358,27 @@ if ! is_starling_os; then
             STARLING_APP_RUN="$SELF" \
             "$@"
     else
-        # Already the login user (dev invoking app-run directly, or the
-        # xdg-open shim relaunching a handoff from inside an app). Keep the
-        # caller's env but still scrub the Starling-Mesa vars.
+        # Already the login user — and this is the SHIPPED path: GDM starts
+        # the session as the user, so every app the launcher spawns comes
+        # through here. Keep the caller's env but scrub the Starling-Mesa
+        # vars, and GNOME_DESKTOP_SESSION_ID.
+        #
+        # That last one is not cosmetic. GDM exports it (literal value
+        # "this-is-deprecated") and the shell inherits it, so without the
+        # scrub every Chromium app SEGFAULTS on launch: base/nix/xdg_util.cc
+        # treats the variable as proof of a GNOME session regardless of our
+        # XDG_CURRENT_DESKTOP=Starling, and the GNOME-only path it then takes
+        # dies here. Chrome and VS Code both, on a stock install.
+        #
+        # It survived this long because every way we tested Chrome missed it:
+        # the root branch above starts from `env -i`, so `sudo app-run chrome`
+        # is clean, and a developer's ssh session has no GNOME_DESKTOP_
+        # SESSION_ID either. Only a real GDM login sets it — the one path
+        # nobody launches a browser from by hand.
         exec env \
             -u LD_LIBRARY_PATH -u MESA_LOADER_DRIVER_OVERRIDE \
             -u VK_ICD_FILENAMES -u GBM_BACKENDS_PATH \
+            -u GNOME_DESKTOP_SESSION_ID \
             PATH="$APPBIN:$PATH" \
             XDG_RUNTIME_DIR="$XDG_DIR" \
             WAYLAND_DISPLAY="$SOCKET" \
