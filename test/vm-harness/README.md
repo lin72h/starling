@@ -62,12 +62,14 @@ made by hand, once: install GDM (`g2-setup-login.sh` does exactly that work),
 `qemu-img snapshot -c desktop-ready disk2604.qcow2`.
 
 seatd is not optional. Without it libseat falls back to the logind backend,
-which refuses the uinput devices `shell-drive.py` creates for every keystroke
-and click — the shell logs `libseat_open_device(...) failed`, loses that
-keyboard for the rest of the session, and the suite fails wherever it types
-into a client window. It presents as a recording of a motionless desktop, not
-as an input error. The dev box has seatd because the shipping path wants it
-(see the repo CLAUDE.md); the VM image needs it for the same reason.
+which refuses the uinput devices `shell-drive.py` creates for every keystroke:
+the shell logs `libseat_open_device(...) failed` and loses that device.
+Installing seatd removes those failures (verified — the log goes clean). It
+does NOT by itself make the suite pass: as of 2026-08-05 keys from the
+driver's uinput keyboard still fail to reach client windows on the gate VM
+while reaching shell surfaces, and QEMU's own `send-key` reaches both. The dev
+box has seatd because the shipping path wants it (see the repo CLAUDE.md); the
+VM image needs it for the same reason.
 
 ## The VMs
 
