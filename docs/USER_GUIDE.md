@@ -40,9 +40,10 @@ Launchpad, or a right-click on the wallpaper.
 
 ## The dock
 
-The dock sits at the bottom of the screen. Out of the box it holds the six
+The dock sits at the bottom of the screen. Out of the box it holds the
 first-party apps, in order: **Launchpad**, **Settings**, **Files**,
-**Terminal**, **Calculator**, **App Store**.
+**Terminal**, **Text Editor**, **Calculator**, **App Store**, **Video
+Player**.
 
 - **Click** an icon to launch or focus that app.
 - A **running app shows an indicator** under its icon.
@@ -66,6 +67,52 @@ Starling knows about, over a blurred background.
 
 ---
 
+## The menu bar
+
+The bar along the top carries the clock and date on the left, and on the right
+the Wi-Fi and battery indicators, a **bell**, and the **control centre**.
+
+Click the control-centre icon for a panel of quick toggles:
+
+- **Wi-Fi** — join a network without opening Settings.
+- **Dark Mode** — switches the whole desktop and every first-party app.
+- **Tiling** — retiles the current space; toggle it off to restore floating
+  windows.
+- **Muted** — mute or unmute output, with **volume** and **brightness**
+  sliders below the tiles.
+- **Record** and **Record App** — see
+  [Recording the screen](#recording-the-screen).
+
+The **bell** collects notifications instead of interrupting you with banners:
+nothing steals focus, and you read what happened when you choose to. Click it
+for the list, **Esc** to dismiss.
+
+---
+
+## Recording the screen
+
+Starling records itself, with no extra software.
+
+- **Record** (control centre, or **Ctrl + Shift + R**) captures the whole
+  screen.
+- **Record App** opens Mission Control and asks which window you want. It
+  captures that window's own content, not the region of screen it sits in, so
+  windows stacked on top never appear and moving or resizing the window
+  mid-recording doesn't spoil the take. The pointer is drawn in and follows
+  the window.
+
+While a recording runs, a **red dot and a running clock** sit in the menu
+bar, so a recording can never be going unnoticed. Stop it the same way you
+started it.
+
+Recordings land in **`~/Videos`** as MP4, and the Video Player opens them.
+Where the machine has a hardware H.264 encoder, the frame the compositor
+already drew goes straight to it as a dma-buf and the CPU never touches a
+pixel — on a modern laptop that costs about 0.05 of a core. Machines without
+one fall back to a software encoder, which works but costs more.
+
+---
+
 ## Windows
 
 Windows have a title bar with three **macOS-style colored circle buttons** on
@@ -78,7 +125,8 @@ the left — close, minimize, maximize.
 
 By default windows **float** — you place them freely. You can switch the whole
 desktop to **tiling** (a dwm-style master-and-stack layout, where windows share
-the screen automatically) with the **Tiling Windows** switch in
+the screen automatically) with the **Tiling** tile in the
+[control centre](#the-menu-bar), or the **Tiling Windows** switch in
 [Settings](#settings). Toggling it back restores your floating layout.
 
 ---
@@ -127,6 +175,7 @@ Right-click anywhere on the wallpaper for the desktop menu:
 | **Ctrl + Tab** | Cycle spaces |
 | **Ctrl + ↑** | Mission Control |
 | **Ctrl + ↓** | AI Space |
+| **Ctrl + Shift + R** | Start / stop screen recording |
 | **Ctrl + Space** | Toggle the input method (fcitx5, for CJK and other IME input) |
 | **Esc** | Close Mission Control; release a taken-over agent window |
 | Double-click title bar | Maximize / restore a window |
@@ -135,7 +184,7 @@ Right-click anywhere on the wallpaper for the desktop menu:
 
 ## The apps
 
-Five first-party apps ship with Starling, all written against its Swift
+Nine first-party apps ship with Starling, all written against its Swift
 framework:
 
 - **Settings** — appearance, displays, network, sound, and system information.
@@ -143,12 +192,15 @@ framework:
 - **Files** — browse your home directory and the filesystem.
 - **Terminal** — a real terminal with a PTY; runs your login shell (`$SHELL`,
   falling back to bash). TUI programs like `vim` and `htop` work.
+- **Text Editor** — a plain-text editor.
 - **Calculator** — a basic calculator.
 - **App Store** — install more applications. See
   [below](#installing-more-apps).
-
-Text Editor, Image Viewer and Video Player ship in the package too, and
-appear in the Launchpad alongside the rest.
+- **Task Manager** — CPU, memory, disk and network with live sparklines, a
+  sortable process table, and End Process.
+- **Video Player** — plays your recordings and other video. For Starling's own
+  recordings it decodes on the GPU and never copies a frame through the CPU.
+- **Image Viewer** — opens images from Files.
 
 ---
 
@@ -164,7 +216,7 @@ The Settings app has five sections in its sidebar:
 - **Appearance** — the **Dark Mode** switch (the same light/dark choice as the
   desktop right-click menu), **Tiling Windows** to switch between floating and
   tiling window management, **Sound & Brightness**, and a **Notifications**
-  toggle (present but inert — there is no notification service behind it yet).
+  toggle — events collect behind the bell in the menu bar.
 - **About** — about the desktop.
 
 ---
@@ -218,7 +270,6 @@ Starling is an early preview (v0.2.3). A few limits you will notice:
 
 - **No screen lock or screensaver.** Do not rely on it to secure an unattended
   machine.
-- **No notifications yet.** The Settings toggle is inert.
 - **Scaling is fixed at 2.0.** Fractional scaling produced blurry text and is
   not usable yet.
 - **No display-mode picker.** The session uses the connector's preferred mode.

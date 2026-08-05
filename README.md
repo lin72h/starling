@@ -46,10 +46,11 @@ What follows is deliberately specific about what is and is not done, because
 | **Display** | DRM/KMS modeset, GBM/EGL, hardware cursor, flip-driven frame pacing, multi-output layout. Tested on AMD (Radeon 780M) and on virtio-gpu/virgl in a VM. |
 | **Compositor** | ~5,700 lines of C implementing `xdg-shell`, `linux-dmabuf` (zero-copy import), `viewporter`, `fractional-scale-v1`, `pointer-constraints`, `relative-pointer`, `text-input-v3`, `presentation-time`, `primary-selection`, `idle-inhibit`, `cursor-shape-v1`, `xdg-decoration`, `xdg-activation`, `xdg-output`, `wlr-data-control`. |
 | **Window management** | Floating and tiling (master-and-stack) behind one switch, spaces with a Mission Control overview, drag-move and drag-resize, a dock with running indicators and drag-to-reorder, and a Launchpad. |
-| **Apps** | Settings, Files, Terminal (a real PTY), Calculator, App Store — five first-party apps, all written against the Swift framework port. |
-| **Portals** | `xdg-desktop-portal` implementing `Settings`, `FileChooser` (OpenFile/SaveFile/SaveFiles, via a helper window) and `Request`. |
+| **Apps** | Settings, Files, Terminal (a real PTY), Text Editor, Calculator, App Store, Task Manager, Video Player, Image Viewer — nine first-party apps, all written against the Swift framework port. |
+| **Screen recording** | The desktop records itself — whole screen or a single window's own content — to MP4 in `~/Videos`. Hardware H.264 where the machine has an encoder: the composited frame goes to it as a dma-buf, so no frame is copied through the CPU (~0.05 of a core here); a software encoder otherwise. A red dot and a running clock sit in the menu bar for the duration. |
+| **Portals** | `xdg-desktop-portal` implementing `Settings`, `FileChooser` (OpenFile/SaveFile/SaveFiles, via a helper window), `ScreenCast` (the interface behind `getDisplayMedia` and OBS), `Session` and `Request`. |
 | **Third-party clients** | Launch and render as native Wayland clients: Chrome, VS Code, Slack, Discord, Teams, Telegram, IntelliJ IDEA, GIMP, Blender, GNOME Web, GNOME Text Editor — covering Chromium/Electron, Qt6, GTK3, GTK4, the JetBrains Runtime's Wayland toolkit, and Blender's own GHOST, which drives the viewport (EEVEE included) through our `linux-dmabuf`. Both buffer paths are live: GPU clients via `linux-dmabuf`, software clients via `wl_shm`. Zoom runs with a caveat (below). X11 clients run against the in-tree X server (DRI3/Present). |
-| **Packaging** | A 52.8 MB `.deb` that installs on a *minimal* 26.04 image, pulling 26 dependency packages; `Depends` is computed from the shipped binaries by `dpkg-shlibdeps`. |
+| **Packaging** | A 50.8 MB `.deb` that installs on a *minimal* 26.04 image, pulling 26 dependency packages; `Depends` is computed from the shipped binaries by `dpkg-shlibdeps`. |
 | **Framework port** | 137 test files under `sdk/Tests`. |
 
 ### Known limitations
@@ -61,14 +62,12 @@ What follows is deliberately specific about what is and is not done, because
   tracked per output, which is what fixing it needs.
 - **The portal is incomplete.** `Settings` and `FileChooser` work — GTK4 reads
   `org.freedesktop.appearance` through them, and both carry the `version`
-  property clients probe first — but `Inhibit`, `ScreenCast`, `Camera` and
+  property clients probe first — but `Inhibit`, `Camera` and
   `Print` are absent entirely. The session bus masks the stock
   `xdg-desktop-portal` rather than letting it fill those gaps: it has no
   backend for `Starling`, so it would serve only its backend-less interfaces
   while taking `org.freedesktop.portal.Desktop` away from the shell's own
   portal, breaking the two that do work.
-- **Settings' Notifications toggle does nothing** — there is no notification
-  service behind it yet.
 - **No screen lock or screensaver.**
 - **Scaling is effectively pinned to 2.0.** Fractional values produced blurry
   text and are not usable yet.
@@ -77,9 +76,6 @@ What follows is deliberately specific about what is and is not done, because
 - **The third-party app runtime is opt-in and unshipped.** `app-run` expects a
   debootstrap'd runtime under `/var/lib/starling-apps`; third-party apps are
   otherwise expected to use their native packaging.
-- **Not every in-tree app ships.** Text Editor and Image Viewer build but are
-  not packaged; the video player was removed because Ubuntu's FFmpeg build
-  carries GPL parts.
 - **The App Store catalog is small, and its tiles are deliberately generic.**
   Ten entries, all of which install and launch: Chrome and VS Code were driven
   through the store's own buttons, the other eight through `app-install` and
