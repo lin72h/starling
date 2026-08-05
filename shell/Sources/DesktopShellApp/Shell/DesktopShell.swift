@@ -656,6 +656,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if recordingService?.needsFramePump == true {
                 tick = true
                 recordingService?.checkWindowAlive()
+                recordingService?.refreshWindowRect()
             }
             // ScreenCast rides it the same way: presents feed the PipeWire
             // stream, and the tick observes the stop draining. Until the
@@ -1915,6 +1916,22 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 textureTopDown: topDown,
                 windowAlive: {
                     wm.windows.contains(where: { $0.id == winId })
+                },
+                // Where the window's content is RIGHT NOW, in physical px:
+                // the capture is window-space, so this is the only thing
+                // that can place the screen-space pointer. Same title-bar
+                // offset the texture size above uses — the texture is the
+                // client's content, and the bar is drawn by the shell.
+                // nil while the window is not on screen, so the cursor is
+                // left out instead of pinned to a stale spot.
+                windowRect: {
+                    guard let w = wm.windows.first(where: { $0.id == winId }),
+                          !w.isMinimized,
+                          w.spaceId == wm.activeSpace.id else { return nil }
+                    return (Int(w.rect.left * dpi),
+                            Int((w.rect.top + DesktopTheme.kTitleBarHeight) * dpi),
+                            Int(w.rect.width * dpi),
+                            Int((w.rect.height - DesktopTheme.kTitleBarHeight) * dpi))
                 },
                 windowLabel: label)
         }
