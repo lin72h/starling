@@ -106,6 +106,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Ubuntu's unattended-upgrade timers must not run during a gate. They fire on
+# their own schedule, they hold the dpkg lock the store's install path needs,
+# and — the way this actually bit — `systemctl poweroff` queues behind them:
+# apt-daily-upgrade.service ran for 2m43s (1.5G peak) at exactly the moment the
+# no-3D pass asked the guest to shut down, so the VM was still busy when the
+# 120s window expired and the whole gate failed on a machine where nothing was
+# wrong. Masking is what a test VM should have done from the start; adding a
+# vendor apt repo (VS Code) just made the daily job expensive enough to notice.
+step "mask the guest's unattended-upgrade timers"
+ssh_vm 'sudo systemctl mask --now apt-daily.timer apt-daily-upgrade.timer \
+        unattended-upgrades.service >/dev/null 2>&1;
+        sudo systemctl stop apt-daily.service apt-daily-upgrade.service >/dev/null 2>&1;
+        systemctl is-enabled apt-daily-upgrade.timer 2>&1 | tail -1'
+
 # ── 3. install exactly as the docs tell a user to ────────────────────────────
 step "install the .deb (g1)"
 "$HARNESS/scp-vm.sh" "$DEB" '~/' >/dev/null || fail "scp of the .deb failed"
@@ -204,12 +218,18 @@ functional=${PIPESTATUS[0]}
 # the GPU; what this pass is for is whether apps still render.
 step "reboot the same desktop with NO 3D acceleration (virtio-vga, llvmpipe)"
 ssh_vm 'sudo systemctl poweroff' >/dev/null 2>&1
-for _ in $(seq 1 40); do
+for _ in $(seq 1 60); do
     pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null || break
     sleep 3
 done
-pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null \
-    && fail "the VM did not power off for the no-3D pass"
+if pgrep -f "qemu-system.*disk2604\.qcow2" >/dev/null; then
+    # Say WHAT is holding it. A bare "did not power off" sent the last
+    # investigation to the guest's journal to discover an apt timer; the
+    # queue is one ssh away, and the guest usually still answers.
+    echo "  jobs still queued in the guest:"
+    ssh_vm 'systemctl list-jobs --no-pager 2>&1 | head -12' 2>&1 | sed 's/^/    /'
+    fail "the VM did not power off for the no-3D pass (180s)"
+fi
 # The tablet (an absolute pointing device) is for the power-menu check at the
 # end of this tier: QEMU can only click a given pixel through `input-send-event`
 # on an absolute device — relative PS/2 deltas never move Starling's pointer at
