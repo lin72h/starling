@@ -51,6 +51,26 @@ docs/plans/    design notes, including standalone-sdk.md — the framework's
 - Engine C++ change → rebuild in the **engine repo** (`ninja -C engine/src/out/host_debug
   libflutter_linux_drm.so libflutter_engine.so`) — no shell relink needed.
   Rebuild host_release too before packaging.
+- **A release build links against host_release, not host_debug.** The two
+  directories are not interchangeable: `shell/Package.swift` defaults
+  `engineOutDir` to `../engine/src/out/host_debug`, so that is the `-L` path
+  AND the baked rpath, while `build/stage.sh` stages `host_release` into the
+  package. Build a release with
+
+      ninja -C engine/src/out/host_release libflutter_engine.so libflutter_linux_drm.so
+      STARLING_ENGINE_OUT=$PWD/engine/src/out/host_release \
+          swift build -c release --package-path shell
+
+  and the shipped binary is linked against the library it will actually load.
+  Leave `STARLING_ENGINE_OUT` unset and you are building a release shell
+  against the *debug* engine, then shipping the release one beside it — fine
+  while the two export the same symbols, and a runtime `symbol lookup error`
+  on the first call the moment the engine's API grows. That failure surfaces
+  only when the new call is reached (lazy binding), so it looks like "the
+  feature crashes the shell", not "the build was wrong". Adding an engine
+  export and rebuilding only one output is the same trap from the other side:
+  host_debug missing it fails the *link*, host_release missing it fails at
+  *runtime*.
 - Run: `build/run-desktop.sh` — stages into `.stage/` then runs from there.
   Drive/screenshot with `sudo build/shell-drive.py …`.
 - Package: `build/package-desktop.sh` → .deb. It consumes `build/stage.sh`, which

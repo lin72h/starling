@@ -290,8 +290,22 @@ def app_run(app_id: str) -> subprocess.Popen:
 
 
 def quit_app(*names: str) -> None:
+    """Ask, then insist. SIGTERM alone is not enough: GIMP 3.2 CATCHES it
+    (SigCgt carries 0x4000) and keeps running, which left it owning the
+    screen for every later check — the removal check refused, the dock
+    click for the next app landed on GIMP's window, and the recording
+    check filmed a still GIMP instead of a scrolling terminal. Five
+    failures, one surviving process. Escalate rather than assume."""
     for name in names:
         subprocess.run(["pkill", "-x", name], capture_output=True)
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if not any(subprocess.run(["pgrep", "-x", n], capture_output=True).returncode == 0
+                   for n in names):
+            return
+        time.sleep(0.25)
+    for name in names:
+        subprocess.run(["pkill", "-KILL", "-x", name], capture_output=True)
 
 
 def check(name: str):
@@ -489,6 +503,12 @@ def check_remove_guard() -> None:
         return subprocess.run([str(APP_INSTALL), "--running", FAKE_ID],
                               capture_output=True, text=True).returncode
 
+    # The guard answers from the catalog, and the fixture app is only in the
+    # copy this suite builds — an attached session reads the shipped one and
+    # answers "cannot tell" (rc 2). That is the guard behaving correctly
+    # about an app it has never heard of, not a regression.
+    if running() == 2:
+        raise Skip("fixture catalog not present (attached session)")
     assert running() == 1, "reported running before anything started"
     proc = subprocess.Popen([str(FAKE_BIN), "60"])
     try:
@@ -1242,10 +1262,59 @@ def check_recording_motion() -> None:
     assert rec()["state"] == "idle", f"a recording is already {rec()['state']}"
 
     drive("dock terminal", "click")
-    time.sleep(5)
+    # Wait for the process, not a fixed sleep: after the checks above have
+    # opened and killed apps of their own, a freshly clicked dock icon can
+    # take noticeably longer to map than on an idle desktop.
+    wait_for(lambda: subprocess.run(["pgrep", "-x", "TerminalApp"],
+                                    capture_output=True).returncode == 0,
+             "the terminal process")
+    time.sleep(4)
+
     # Random hex: every line differs, so a repeated frame is unambiguous.
-    drive("type while true; do head -c 1200 /dev/urandom | xxd | head -30; done")
-    drive("key enter")
+    flood = "while true; do head -c 1200 /dev/urandom | xxd | head -30; done"
+
+    def flooding() -> bool:
+        """Is the terminal actually churning?
+
+        Not `pgrep xxd`: each iteration is `head -c 1200 | xxd | head -30`,
+        which lives for microseconds — sampled 40 times across a running
+        flood it matched ZERO times, so it reports "no flood" while the
+        screen scrolls. Measure the terminal's own CPU instead. Idle it is
+        ~0 ticks; rendering the flood it was ~25 ticks/s on the dev box and
+        stays far above the threshold on a slow VM.
+        """
+        pids = subprocess.run(["pgrep", "-x", "TerminalApp"],
+                              capture_output=True, text=True).stdout.split()
+        if not pids:
+            return False
+        def ticks() -> int:
+            try:
+                parts = open(f"/proc/{pids[0]}/stat").read().rsplit(") ", 1)[1].split()
+                return int(parts[11]) + int(parts[12])
+            except (OSError, IndexError):
+                return -1
+        a = ticks()
+        if a < 0:
+            return False
+        time.sleep(0.8)
+        b = ticks()
+        return b >= 0 and (b - a) >= 3
+
+    # And CONFIRM it started. Keystrokes go to whatever holds focus, and a
+    # window that has mapped does not always hold it yet — when the typing
+    # landed in the void the screen stayed still, the recording was of a
+    # motionless desktop, and this check blamed the recorder. That failure
+    # was intermittent on a slow machine and unreproducible on a fast one.
+    # Retry the line rather than race it, and say plainly which half broke.
+    for _ in range(3):
+        drive(f"type {flood}")
+        drive("key enter")
+        if flooding():
+            break
+    assert flooding(), (
+        "the terminal is idle after three attempts to start the flood — the "
+        "typed line never ran, so there is nothing moving to record and the "
+        "motion assertion below would blame the recorder for it")
     time.sleep(3)
     try:
         drive("key ctrl+shift+r")
