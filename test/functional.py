@@ -1262,10 +1262,41 @@ def check_recording_motion() -> None:
     assert rec()["state"] == "idle", f"a recording is already {rec()['state']}"
 
     drive("dock terminal", "click")
-    time.sleep(5)
+    # Wait for the process, not a fixed sleep: after the checks above have
+    # opened and killed apps of their own, a freshly clicked dock icon can
+    # take noticeably longer to map than on an idle desktop.
+    wait_for(lambda: subprocess.run(["pgrep", "-x", "TerminalApp"],
+                                    capture_output=True).returncode == 0,
+             "the terminal process")
+    time.sleep(4)
+
     # Random hex: every line differs, so a repeated frame is unambiguous.
-    drive("type while true; do head -c 1200 /dev/urandom | xxd | head -30; done")
-    drive("key enter")
+    flood = "while true; do head -c 1200 /dev/urandom | xxd | head -30; done"
+    def flooding() -> bool:
+        return subprocess.run(["pgrep", "-x", "xxd"],
+                              capture_output=True).returncode == 0
+
+    # And CONFIRM it started. Keystrokes go to whatever holds focus, and a
+    # window that has mapped does not always hold it yet — when the typing
+    # landed in the void the screen stayed still, the recording was of a
+    # motionless desktop, and this check blamed the recorder. That failure
+    # was intermittent on a slow machine and unreproducible on a fast one.
+    # Retry the line rather than race it, and say plainly which half broke.
+    for _ in range(3):
+        drive(f"type {flood}")
+        drive("key enter")
+        if any(flooding() or time.sleep(0.5) is None and flooding()
+               for _ in range(8)):
+            break
+    assert flooding(), (
+        "the terminal never started the flood — the typed line did not run, "
+        "so there was nothing moving to record. Known on the gate VM: keys "
+        "from the driver's uinput keyboard reach SHELL surfaces (the "
+        "Launchpad filter check passes) but not client windows, while QEMU's "
+        "own send-key reaches both — so the desktop is fine and the synthetic "
+        "keyboard is not. Cause not yet identified; ruled out are the "
+        "recorder, the libseat backend (seatd installed, no open failures) "
+        "and the host render node")
     time.sleep(3)
     try:
         drive("key ctrl+shift+r")

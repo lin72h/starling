@@ -58,12 +58,23 @@ bash <repo>/test/vm-harness/launch-vm-2604.sh     # first boot runs cloud-init
 
 That gives a booting guest. The `desktop-ready` snapshot the gate reverts to is
 made by hand, once: install GDM (`g2-setup-login.sh` does exactly that work),
-power the VM off, then `qemu-img snapshot -c desktop-ready disk2604.qcow2`.
+**`apt install seatd && systemctl enable --now seatd`**, power the VM off, then
+`qemu-img snapshot -c desktop-ready disk2604.qcow2`.
+
+seatd is not optional. Without it libseat falls back to the logind backend,
+which refuses the uinput devices `shell-drive.py` creates for every keystroke
+and click — the shell logs `libseat_open_device(...) failed`, loses that
+keyboard for the rest of the session, and the suite fails wherever it types
+into a client window. It presents as a recording of a motionless desktop, not
+as an input error. The dev box has seatd because the shipping path wants it
+(see the repo CLAUDE.md); the VM image needs it for the same reason.
 
 ## The VMs
 
 - `launch-vm-2604.sh` — the gate's first pass. virtio-vga-gl + egl-headless on
-  `/dev/dri/renderD128`, so the guest gets a virgl 3D GPU and QMP screendump
+  a **chosen** render node (amdgpu/i915/xe/radeon preferred over nouveau,
+  `STARLING_VM_RENDERNODE` overrides), so the guest gets a virgl 3D GPU and
+  QMP screendump
   reads back the accelerated scanout. SSH on 127.0.0.1:2222.
 - `launch-vm-2604-nogl.sh` — the SAME disk with **no 3D acceleration** (plain
   `virtio-vga`), which is what GNOME Boxes, VirtualBox and VMware give a guest
