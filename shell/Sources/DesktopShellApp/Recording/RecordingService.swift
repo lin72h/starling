@@ -294,6 +294,13 @@ final class RecordingService {
     /// may be minimized or covered — the capture doesn't care). Read on
     /// main by checkWindowAlive.
     private var windowAlive: (() -> Bool)? = nil
+    /// The recorded window's CONTENT rect on screen (physical px), or nil
+    /// while it isn't on screen at all — minimized, or parked on another
+    /// space. A window-space capture cannot place a screen-space pointer
+    /// without it, so this is what puts the cursor in an app recording;
+    /// pushed every frame tick so a drag or resize keeps it honest. Main
+    /// thread, like windowAlive.
+    private var windowRect: (() -> (Int, Int, Int, Int)?)? = nil
     /// The recorded window's display name (nil = whole screen).
     private(set) var windowLabel: String? = nil
 
@@ -305,6 +312,7 @@ final class RecordingService {
     func start(texture: Int64? = nil, width: Int = 0, height: Int = 0,
                textureTopDown: Bool = false,
                windowAlive alive: (() -> Bool)? = nil,
+               windowRect rect: (() -> (Int, Int, Int, Int)?)? = nil,
                windowLabel label: String? = nil) {
         guard state == .idle else { return }
         // The engine runs one capture session; a live screen share owns it.
@@ -387,6 +395,7 @@ final class RecordingService {
         sessionURL = url
         sessionGen += 1
         self.windowAlive = alive
+        self.windowRect = rect
         self.windowLabel = label
         Self.recordedTextureId = texture ?? -1
         state = .starting
@@ -407,6 +416,7 @@ final class RecordingService {
             fl_drm_view_recording_start_texture(view, Int32(shift), texture,
                                                 Int32(w), Int32(h),
                                                 textureTopDown ? 1 : 0)
+            refreshWindowRect()
         } else {
             fl_drm_view_recording_start(view, Int32(shift))
         }
@@ -440,6 +450,22 @@ final class RecordingService {
         guard state == .starting || state == .recording,
               let alive = windowAlive, !alive() else { return }
         stop()
+    }
+
+    /// Called from the shell's frame-tick pump beside checkWindowAlive:
+    /// tell the engine where the recorded window's content currently is, so
+    /// the cursor is composited in the right place. Off screen (minimized,
+    /// another space) pushes an empty rect, which leaves the cursor out
+    /// rather than drawing it at a stale position.
+    func refreshWindowRect() {
+        guard state == .starting || state == .recording,
+              let rect = windowRect else { return }
+        if let r = rect() {
+            fl_drm_view_recording_set_window_rect(Int32(r.0), Int32(r.1),
+                                                  Int32(r.2), Int32(r.3))
+        } else {
+            fl_drm_view_recording_set_window_rect(0, 0, 0, 0)
+        }
     }
 
     func stop() { endSession(reason: nil) }
@@ -511,6 +537,7 @@ final class RecordingService {
                 self.state = .idle
                 self.startedAt = nil
                 self.windowAlive = nil
+                self.windowRect = nil
                 self.windowLabel = nil
                 self.sessionURL = nil
                 Self.recordedTextureId = -1
