@@ -13,7 +13,11 @@
 set -euo pipefail
 
 UI="$(cd "$(dirname "$0")" && pwd)"
-REPO="${1:-${STARLING_SITE_REPO:-https://github.com/starling-build/www.git}}"
+# SSH, not HTTPS: this repo's own remote is SSH, so that is what has
+# credentials here. The HTTPS default this used to carry failed the deploy with
+# "could not read Username for 'https://github.com'" — git had no way to
+# authenticate and no terminal to ask on.
+REPO="${1:-${STARLING_SITE_REPO:-git@github.com:starling-build/www.git}}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
