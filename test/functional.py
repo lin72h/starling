@@ -290,8 +290,22 @@ def app_run(app_id: str) -> subprocess.Popen:
 
 
 def quit_app(*names: str) -> None:
+    """Ask, then insist. SIGTERM alone is not enough: GIMP 3.2 CATCHES it
+    (SigCgt carries 0x4000) and keeps running, which left it owning the
+    screen for every later check — the removal check refused, the dock
+    click for the next app landed on GIMP's window, and the recording
+    check filmed a still GIMP instead of a scrolling terminal. Five
+    failures, one surviving process. Escalate rather than assume."""
     for name in names:
         subprocess.run(["pkill", "-x", name], capture_output=True)
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if not any(subprocess.run(["pgrep", "-x", n], capture_output=True).returncode == 0
+                   for n in names):
+            return
+        time.sleep(0.25)
+    for name in names:
+        subprocess.run(["pkill", "-KILL", "-x", name], capture_output=True)
 
 
 def check(name: str):
