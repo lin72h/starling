@@ -6,6 +6,10 @@
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(ucrt)
+// Windows: the C library module is ucrt. Without this branch the file gets no
+// platform C declarations at all, which is how M_E went missing here.
+import ucrt
 #endif
 import FlutterSwiftBridge
 
@@ -151,7 +155,10 @@ public class FrictionSimulation: Simulation {
         _ startVelocity: Double,
         _ endVelocity: Double
     ) -> Double {
-        return pow(M_E, (startVelocity - endVelocity) / (startPosition - endPosition))
+        // exp(y), not pow(M_E, y): the two are the same value, but M_E is a
+        // platform-header constant that Windows only defines behind
+        // _USE_MATH_DEFINES, and exp is both portable and more accurate.
+        return exp((startVelocity - endVelocity) / (startPosition - endPosition))
     }
 
     /// The position of the object in the simulation at the given time.

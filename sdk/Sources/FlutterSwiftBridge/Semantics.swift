@@ -6,6 +6,10 @@
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(ucrt)
+// Windows: the C library module is ucrt. Without this branch the file gets no
+// platform C declarations at all, which is how M_E went missing here.
+import ucrt
 #endif
 import FlutterSwiftBridgeCxx
 

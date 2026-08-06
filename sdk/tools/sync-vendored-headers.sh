@@ -122,6 +122,35 @@ for stale in $(cd "$GTK_DEST" 2>/dev/null && ls -1 *.h 2>/dev/null || true); do
     fi
 done
 
+# The Win32 embedder's public header set, vendored the same way and for the
+# same reason: only FlutterWin32Bridge's C glue includes them, so <windows.h>
+# and the FlutterDesktop* types never reach the C++-interop importer. Unlike
+# flutter_linux this is not a whole directory — flutter_windows.h lives beside
+# the Windows embedder while the four headers it includes are in
+# shell/platform/common/public — so the set is listed explicitly. It is closed:
+# nothing in it includes anything outside the destination directory.
+WIN_DEST="Sources/FlutterWin32Bridge/flutter_windows"
+WIN_HEADERS=(
+    "flutter/shell/platform/windows/public/flutter_windows.h"
+    "flutter/shell/platform/common/public/flutter_export.h"
+    "flutter/shell/platform/common/public/flutter_messenger.h"
+    "flutter/shell/platform/common/public/flutter_plugin_registrar.h"
+    "flutter/shell/platform/common/public/flutter_texture_registrar.h"
+)
+WIN_BASENAMES=()
+for rel in "${WIN_HEADERS[@]}"; do
+    one "$SRC/$rel" "$WIN_DEST/$(basename "$rel")"
+    WIN_BASENAMES+=("$(basename "$rel")")
+done
+for stale in $(cd "$WIN_DEST" 2>/dev/null && ls -1 *.h 2>/dev/null || true); do
+    printf '%s\n' "${WIN_BASENAMES[@]}" | grep -qxF "$stale" && continue
+    if [ "$CHECK" = 1 ]; then
+        echo "stale: flutter_windows/$stale is vendored but not in the list"; drift=1
+    else
+        rm -f "$WIN_DEST/$stale"; echo "removed stale flutter_windows/$stale"
+    fi
+done
+
 # --- TOOLCHAIN --------------------------------------------------------------
 #
 # <swift/bridging> is the only toolchain header the bridge headers need, and it

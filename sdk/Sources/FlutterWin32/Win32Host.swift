@@ -1,0 +1,61 @@
+// Copyright 2013 The Flutter Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Runs a FlutterSwift app the way a real Flutter Windows app runs: inside the
+// engine's Win32 embedder (flutter_windows.dll), which owns the view, the
+// rendering surface, pointer/keyboard input, IME and accessibility. The engine
+// is started in Swift mode, so this framework drives frames through the
+// SwiftRuntimeCallbacks table instead of a Dart isolate.
+//
+// All Win32/embedder mechanics live in the C glue (FlutterWin32Bridge); this
+// type only owns the callback table's lifetime and the run sequence. The
+// counterpart of FlutterGTK's GTKHost.
+
+#if os(Windows)
+import Flutter
+import FlutterSwiftBridge
+import SwiftRuntime
+import FlutterWin32Bridge
+
+public final class Win32Host {
+
+    private let host: OpaquePointer
+    // The engine holds this pointer for its lifetime; heap-allocate so it
+    // never moves and never dies before the process does.
+    private let callbacks: UnsafeMutablePointer<SwiftRuntimeCallbacks>
+
+    /// Creates the window, the engine and the view; the engine starts inside
+    /// view-controller creation. Returns nil if the window or the engine could
+    /// not be created.
+    public init?(width: Int, height: Int, title: String) {
+        callbacks = UnsafeMutablePointer<SwiftRuntimeCallbacks>.allocate(capacity: 1)
+        callbacks.initialize(to: createRuntimeCallbacks())
+        guard let host = flwin32_host_create(title, Int32(width), Int32(height),
+                                             UnsafeRawPointer(callbacks)) else {
+            callbacks.deinitialize(count: 1)
+            callbacks.deallocate()
+            return nil
+        }
+        self.host = host
+    }
+
+    /// Sets up the widget binding. Call before run() — the tree must be
+    /// mounted by the time the engine requests the first frame.
+    public func mountWidget(_ builder: () -> Widget) {
+        runApp(builder())
+    }
+
+    /// Shows the window and runs the Win32 message loop. Returns when the
+    /// window is closed.
+    public func run() {
+        flwin32_host_show(host)
+        flwin32_host_run(host)
+    }
+
+    /// Fullscreens or restores the window.
+    public func setFullscreen(_ fullscreen: Bool) {
+        flwin32_host_set_fullscreen(host, fullscreen ? 1 : 0)
+    }
+}
+#endif

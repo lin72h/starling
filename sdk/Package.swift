@@ -85,6 +85,18 @@ let engineCandidates = [
     packageDir + "/../engine/src/out/host_debug",
     packageDir + "/../starling-engine/engine/src/out/host_debug",
 ]
+#elseif os(Windows)
+// On Windows the Swift bridge is merged into flutter_engine.dll, exactly as on
+// Linux; what gets linked is that DLL's import library. GN names it after the
+// DLL — flutter_engine.dll.lib — and clang's -l appends the .lib, so the link
+// name has to carry the .dll.
+let engineLinkName = "flutter_engine.dll"
+let engineMarker = "flutter_engine.dll.lib"
+let engineCandidates = [
+    packageDir + "/engine/lib",
+    packageDir + "/../engine/src/out/host_debug",
+    packageDir + "/../starling-engine/engine/src/out/host_debug",
+]
 #else
 // On macOS the Swift bridge is a separate libswift_bridge.dylib that sits
 // alongside FlutterMacOS.framework (the engine itself) in engineOutDir.
@@ -170,6 +182,14 @@ if staticEngine {
     ]
     staticSystemLibs = []
 }
+#elseif os(Windows)
+// No rpath on Windows — the loader has no such concept. flutter_engine.dll is
+// found beside the .exe (or on PATH), which is what staging arranges; the link
+// step only needs the import library.
+engineLinkSettings = [
+    .unsafeFlags(["-L\(engineOutDir)", "-l\(engineLinkName)"]),
+]
+staticSystemLibs = []
 #else
 engineLinkSettings = [
     .unsafeFlags([
@@ -278,6 +298,19 @@ products += [
 #if os(macOS)
 products += [
     .library(name: "FlutterMacOSBridge", targets: ["FlutterMacOSBridge"]),
+]
+#endif
+
+#if os(Windows)
+products += [
+    // Desktop host: the engine's own Win32 embedder (flutter_windows.dll) with
+    // the engine in Swift mode, rather than a hand-rolled window — so window
+    // management, input, IME and accessibility come from the same code path
+    // real Flutter Windows apps use. The counterpart of FlutterGTK on Linux.
+    .library(name: "FlutterWin32", targets: ["FlutterWin32"]),
+    // The classic `flutter create` counter, ported from Dart — the first
+    // sample proven on this platform.
+    .executable(name: "CounterApp", targets: ["CounterApp"]),
 ]
 #endif
 
@@ -391,6 +424,65 @@ targets += [
                 "-I", "\(engineOutDir)/FlutterMacOS.framework/Versions/A/Headers",
             ]),
         ]
+    ),
+]
+#endif
+
+// --- Windows-only targets ----------------------------------------------------
+
+#if os(Windows)
+targets += [
+    // C glue around the engine's Win32 embedder: a top-level window hosting
+    // the view controller's child HWND, with the engine in Swift mode. The
+    // vendored flutter_windows headers stay inside this target — <windows.h>
+    // defines several thousand macros and must never reach the C++-interop
+    // importer. Same containment the GTK bridge gives flutter_linux.
+    .target(
+        name: "FlutterWin32Bridge",
+        linkerSettings: [
+            .unsafeFlags([
+                "-L\(engineOutDir)", "-lflutter_windows.dll",
+            ]),
+        ]
+    ),
+    // The desktop host: the real Flutter Windows embedder, Swift-driven.
+    .target(
+        name: "FlutterWin32",
+        dependencies: [
+            "Flutter",
+            "FlutterSwiftBridge",
+            .target(name: "SwiftRuntime"),
+            .target(name: "FlutterWin32Bridge"),
+        ],
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
+    ),
+    // Shared plumbing for the ported example apps: the engine-data bootstrap,
+    // the run sequence, and the Material-look chrome. Same target as on Linux,
+    // hosted on FlutterWin32 instead of FlutterGTK.
+    .target(
+        name: "ExampleHost",
+        dependencies: [
+            "Flutter",
+            "FlutterWin32",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+            .target(name: "SwiftRuntime"),
+        ],
+        path: "Examples/ExampleHost",
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)]
+    ),
+    // The classic `flutter create` counter, ported from Dart.
+    .executableTarget(
+        name: "CounterApp",
+        dependencies: [
+            "Flutter",
+            "ExampleHost",
+            "FlutterSwiftBridge",
+            "CupertinoIcons",
+        ],
+        path: "Examples/CounterApp",
+        swiftSettings: cxxInteropSettings + [.swiftLanguageMode(.v5)],
+        linkerSettings: engineLinkSettings
     ),
 ]
 #endif

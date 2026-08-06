@@ -4,6 +4,7 @@
 // compile with no engine checkout; only linking still needs a built engine.
 module FlutterSwiftBridgeCxx {
     header "engine/intrusive_reference_counted.h"
+    header "engine/swift_bridge_export.h"
     header "engine/rsuperellipse_bridge.h"
     header "engine/channel_buffers_bridge.h"
     header "engine/shader_bridge.h"
