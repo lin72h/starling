@@ -248,6 +248,21 @@ Build / runtime:
       rm -rf <pkg>/.build/*/release/Flutter.build
       swift build -c release        # twice: the first re-plans
 
+- **On Windows a cold `swift build` always fails, and the failure is a lie.**
+  It dies inside the MSVC standard library —
+  `xmemory: no matching function for call to 'construct_at'`, under an
+  instantiation of `std::vector<std::atomic<bool>, _Parallelism_allocator<…>>`
+  from `<execution>`. Nothing in this tree includes those headers; Swift's C++
+  importer walks them while building the `std` module, and `std::atomic` is not
+  copyable. It is a toolchain bug (Swift 6.2.3 / MSVC 14.44). The failing run
+  still writes a usable `.pcm`, so *the same command* run again gets further —
+  and it needs one pass per interop configuration: `FlutterSwiftBridge`, then
+  `Flutter` (language mode 5 keys a separate module), then it builds. Use
+  `sdk/tools/build-windows.ps1` (`-PackagePath` for the app packages), which
+  loops only while that exact signature appears, so a real error still fails
+  once and immediately. Do not "fix" this by warming with a different target:
+  different flags mean a different module, and it does nothing.
+
 Engine / compositor:
 - **Audit `wayland_server_on_*` in the header against what
   `WaylandIntegration.swift` actually registers.** This has now bitten twice.
