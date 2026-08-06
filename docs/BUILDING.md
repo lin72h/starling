@@ -319,7 +319,7 @@ No extra flags on any release: the manifests carry what 26.04 needs.
 
 The shell pulls in `sdk/` (the `FlutterSwift` framework port) as a package
 dependency, so there is nothing to build there separately. `apps/` holds more
-than the catalog declares (dev and demo tools — DSATool, BlueScreenApp,
+than the catalog declares (dev and demo tools — DSATool,
 FlutterDemoApp); those have no record and stay out of the package on purpose.
 Staging picks up any app with a built binary, so a partial build still runs —
 only packaging insists on the full first-party set.

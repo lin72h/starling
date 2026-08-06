@@ -133,7 +133,7 @@ func rnode(from d: [String: Any]) -> RNode {
 }
 
 /// Boot NSApplication + the Flutter engine and render `root` in a macOS window.
-/// Mirrors BlueScreenApp's macOS path. Never returns (runs the AppKit loop).
+/// The AppKit + embedder path. Never returns (runs the AppKit loop).
 func hlog(_ s: String) { FileHandle.standardError.write(Data("[FlutterHost] \(s)\n".utf8)) }
 
 func runFlutterHost(root: RNode) {

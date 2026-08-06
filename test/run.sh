@@ -130,11 +130,10 @@ fi
 # than silent — a package that stops being built without saying so is how you
 # ship a desktop with a missing app.
 #
-# The same now covers apps/BlueScreenApp, which links a committed aarch64
-# libglfw and so cannot build on x86-64. Nothing here names it: drop in a
-# matching libglfw and it builds again, exactly as with libpdfium. Neither is
-# packaged (build/package-desktop.sh: both are dev and demo tools with no
-# registry record), so skipping them costs the shipped desktop nothing.
+# It has covered more than one package: host/.deps/lib/libglfw.so.3.4 is a
+# committed aarch64 binary, so anything linking -lglfw was unbuildable on
+# x86-64 too. Nothing here names any of them — drop in a matching library and
+# the package builds again with no change to this file.
 #
 # The host's ELF machine word is read off /bin/true instead of mapping uname -m
 # to an ELF name, so this needs no architecture table either.
@@ -144,10 +143,9 @@ HOST_MACHINE="$(elf_machine /bin/true)"
 # Every .so a package could link against: its own vendored .deps — both the
 # .deps/<name>/lib layout ImageViewerApp uses and the flatter .deps/lib one —
 # plus any .deps directory its manifest names. That last case is what this
-# missed: apps/BlueScreenApp links -lglfw out of ../../host/.deps/lib, another
-# package's directory, so looking only under "$1"/.deps found nothing and the
-# intended skip became a hard build failure. host/.deps/lib/libglfw.so.3.4 is
-# committed as an aarch64 binary, so that is every x86-64 machine.
+# missed once: a package can link a library out of ANOTHER package's .deps
+# (host/.deps/lib holds the vendored libglfw), so looking only under
+# "$1"/.deps found nothing and the intended skip became a hard build failure.
 vendored_libs() {
     local pkg="$1" d
     ls "$pkg"/.deps/*/lib/*.so "$pkg"/.deps/lib/*.so 2>/dev/null

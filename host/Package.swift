@@ -13,7 +13,7 @@
 // /usr/share/starling. Neither belongs in a general-purpose SDK, and the
 // desktop's own apps never use this path: they composite through the shell.
 //
-// Consumers: apps/BlueScreenApp and Examples/HelloWindow, both demos.
+// Consumer: Examples/HelloWindow, a demo.
 
 import PackageDescription
 import Foundation

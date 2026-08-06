@@ -20,7 +20,7 @@ sdk/       the Flutter→Swift framework port (SwiftPM package "FlutterSwift"),
 engine      -> SYMLINK to a starling-engine checkout
 host/       the windowed host (FlutterRunner + GLFWBridge): run a Swift Flutter
             app in an ordinary window instead of compositing through the shell.
-            Demos only — BlueScreenApp and Examples/HelloWindow. Stayed behind
+            Demos only — Examples/HelloWindow. Stayed behind
             when the framework was extracted, because it drags a vendored libglfw
             and resolves assets under /usr/share/starling.
 registry/  the app registry — the ONE description of every app the desktop knows
