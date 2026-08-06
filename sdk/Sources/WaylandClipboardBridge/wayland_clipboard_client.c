@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 
@@ -59,6 +60,16 @@ struct OfferState {
     int  rank;
 };
 
+/* Reads are queued rather than kept in a single slot: Clipboard.getData
+ * promises its completion runs exactly once, and two pastes in quick
+ * succession would otherwise drop the first callback (and leak the closure the
+ * Swift side retained for it). */
+struct ReadReq {
+    WlClipTextCallback cb;
+    void*              ctx;
+    struct ReadReq*    next;
+};
+
 struct WlClipboard {
     struct wl_display*  dpy;
     struct wl_registry* reg;
@@ -81,13 +92,12 @@ struct WlClipboard {
     int             quit;
     int             started;
 
-    /* Pending command, guarded by lock. */
+    /* Pending commands, guarded by lock. */
     char*  pending_text;
     size_t pending_text_len;
     int    pending_set;
-    int    pending_read;
-    WlClipTextCallback read_cb;
-    void*  read_ctx;
+    struct ReadReq* reads_head;
+    struct ReadReq* reads_tail;
 };
 
 /* ========================================================================= */
@@ -104,8 +114,18 @@ static char* read_all_bounded(int fd, size_t* out_len) {
     char* buf = malloc(cap);
     if (!buf) { close(fd); return NULL; }
 
-    int remaining = WLCLIP_TIMEOUT_MS;
+    /* One deadline for the whole transfer, not per-poll: a peer trickling a
+     * byte at a time must not be able to hold us open indefinitely. */
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     for (;;) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec - t0.tv_sec) * 1000
+                        + (now.tv_nsec - t0.tv_nsec) / 1000000;
+        int remaining = WLCLIP_TIMEOUT_MS - (int)elapsed_ms;
+        if (remaining <= 0) break;
+
         struct pollfd p = { .fd = fd, .events = POLLIN };
         int pr = poll(&p, 1, remaining);
         if (pr <= 0) break;                       /* timeout or error: give up */
@@ -331,17 +351,23 @@ static void do_read_text(WlClipboard* c, WlClipTextCallback cb, void* ctx) {
 static void run_pending(WlClipboard* c) {
     for (;;) {
         pthread_mutex_lock(&c->lock);
-        int do_set = c->pending_set, do_read = c->pending_read;
+        int do_set = c->pending_set;
         char* text = c->pending_text; size_t tlen = c->pending_text_len;
-        WlClipTextCallback cb = c->read_cb; void* ctx = c->read_ctx;
-        c->pending_set = 0; c->pending_read = 0;
+        struct ReadReq* reads = c->reads_head;
+        c->pending_set = 0;
         c->pending_text = NULL; c->pending_text_len = 0;
-        c->read_cb = NULL; c->read_ctx = NULL;
+        c->reads_head = NULL; c->reads_tail = NULL;
         pthread_mutex_unlock(&c->lock);
 
-        if (!do_set && !do_read) return;
+        if (!do_set && !reads) return;
+        /* Set first: a copy queued before a paste must be visible to it. */
         if (do_set) do_set_text(c, text, tlen);
-        if (do_read && cb) do_read_text(c, cb, ctx);
+        while (reads) {
+            struct ReadReq* next = reads->next;
+            do_read_text(c, reads->cb, reads->ctx);
+            free(reads);
+            reads = next;
+        }
     }
 }
 
@@ -423,6 +449,17 @@ void wlclip_destroy(WlClipboard* c) {
     wake(c);
     if (c->started) pthread_join(c->thread, NULL);
 
+    /* Anything still queued must be answered, not dropped: each request holds a
+     * caller-side closure that is only released when its callback runs. */
+    struct ReadReq* reads = c->reads_head;
+    c->reads_head = NULL; c->reads_tail = NULL;
+    while (reads) {
+        struct ReadReq* next = reads->next;
+        reads->cb(reads->ctx, NULL, 0);
+        free(reads);
+        reads = next;
+    }
+
     if (c->src)   zwlr_data_control_source_v1_destroy(c->src);
     if (c->offer) offer_drop(c->offer);
     if (c->dev)   zwlr_data_control_device_v1_destroy(c->dev);
@@ -456,10 +493,15 @@ void wlclip_set_text(WlClipboard* c, const char* text, size_t len) {
 
 int wlclip_read_text(WlClipboard* c, WlClipTextCallback cb, void* ctx) {
     if (!c || !cb) return -1;
+    struct ReadReq* req = calloc(1, sizeof(*req));
+    if (!req) return -1;
+    req->cb = cb;
+    req->ctx = ctx;
+
     pthread_mutex_lock(&c->lock);
-    c->read_cb = cb;
-    c->read_ctx = ctx;
-    c->pending_read = 1;
+    if (c->reads_tail) c->reads_tail->next = req;
+    else               c->reads_head = req;
+    c->reads_tail = req;
     pthread_mutex_unlock(&c->lock);
     wake(c);
     return 0;

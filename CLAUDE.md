@@ -304,6 +304,17 @@ Engine / compositor:
 - `EvdevToHID` (engine repo, `fl_drm_input.cc`) and
   `WaylandIntegration.hidToEvdev` (shell) are exact inverses. **Change one,
   change the other**, or letters break for Wayland clients.
+- **Keyboard focus is lazy, and "activated" is not focus.** `wl_keyboard.enter`
+  is sent from the *first keystroke* (`sendKeyEvent` in
+  `WaylandIntegration.swift`), not when a window is focused — so a window the
+  user has clicked, and which is drawing and decorated, may never have received
+  a keyboard enter. Meanwhile `wayland_server_configure_toplevel` sends
+  `XDG_TOPLEVEL_STATE_ACTIVATED` **unconditionally**, so GDK cheerfully reports
+  `GDK_WINDOW_STATE_FOCUSED` for such a window. Do not infer keyboard focus from
+  a client's own focus flag; anything that must reach a client the moment the
+  user engages with it belongs on **pointer** enter as well. This cost a full
+  round of wrong implementation on the clipboard (`docs/plans/clipboard.md`),
+  where hooking only `WL_KB_ENTER` looked correct and did nothing.
 - If the shell dies uncleanly it leaves `/tmp/xdg-starling-<uid>/wayland-0.lock`
   and the next run listens on **wayland-1**; clients must use the socket from
   the current run's `wayland_server: listening on wayland-N` log line.

@@ -267,8 +267,24 @@ Note a deliberate regression on Windows: `TerminalApp` used to share a clipboard
 file between its own instances there, and now falls back to a process-local
 clipboard until Stage 2 lands `Win32Host`'s provider.
 
-**Stage 2 — off-desktop backends.** GTK and Win32 providers, so the public SDK's
-`Clipboard` is not a stub outside Starling.
+**Stage 2 — off-desktop backends. GTK done, Win32 outstanding.** So the public
+SDK's `Clipboard` is not a stub outside Starling.
+
+`GtkClipboardProvider` (`sdk/Sources/FlutterGTK`) over `flgtk_clipboard.c`,
+installed by `GTKWindowedHost.install()`. It calls its completion **directly
+from the GtkClipboard callback** — no `DispatchQueue.main` hop, because nothing
+drains GCD's main queue under `gtk_main`. This is the case the callback-first
+API shape exists for; an `async`-only design would have been silently broken
+here.
+
+Verified cross-process under Xvfb with a two-process harness (one owns the
+selection, another reads it). Note it could *not* be verified through a
+first-party app: `STARLING_APP_GTK=1`, the opt-in GTK build of `TerminalApp`,
+has been removed, so nothing shipped links the GTK host any more.
+
+Win32 still to do: `OpenClipboard`/`GetClipboardData` behind `Win32Host`. Until
+it lands, `TerminalApp` on Windows has a process-local clipboard where it used
+to share a file between its own instances.
 
 **Stage 3 — later.** Primary selection (net-new on both protocols, per above),
 `image/png`, and the text-field/selection workstream.
