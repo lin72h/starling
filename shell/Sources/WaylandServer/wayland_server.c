@@ -409,6 +409,9 @@ static void deferred_input_send_one(WaylandServer* server,
                                   wl_fixed_from_double(ev->y));
             wl_pointer_send_frame(ir->resource);
         }
+        /* Keyboard focus is lazy (first keystroke), so this is the earliest
+         * point a mouse-only client can be handed a selection it missed. */
+        wayland_data_device_offer_on_interaction(server, surface);
         break;
     }
     case WL_PTR_LEAVE: {
@@ -446,6 +449,7 @@ static void deferred_input_send_one(WaylandServer* server,
             wl_array_release(&keys);
         }
         wayland_text_input_focus_enter(server, surface);
+        wayland_data_device_offer_on_interaction(server, surface);
         break;
     }
     case WL_KB_LEAVE: {
