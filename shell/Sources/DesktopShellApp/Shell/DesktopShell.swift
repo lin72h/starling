@@ -486,6 +486,237 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // One controller per animating window; a retarget cancels the old run.
     private var _windowRectAnims: [String: AnimationController] = [:]
 
+    // ── Screensaver ──────────────────────────────────────────────────────
+    // Visual layer only: activation is manual (Ctrl+Shift+S, or
+    // STARLING_SCREENSAVER_TEST=<seconds> for tooling) until idle detection
+    // lands. The overlay warps the LIVE desktop through a BackdropFilter —
+    // no capture step — so the machinery here is just a fade controller, a
+    // monotonic time Ticker for the shader phases, and teardown.
+    private var _screensaverActive = false      // overlay mounted
+    private var _screensaverClosing = false     // reverse fade in flight
+    private var _screensaverFade: AnimationController?
+    private var _screensaverFadeCurve: CurvedAnimation?
+    private var _screensaverTicker: Ticker?     // uTime driver
+    private var _screensaverTime: Double = 0    // seconds since activation
+    private var _screensaverShownAt = Date.distantPast  // input-grace anchor
+    private var _screensaverTestToken = 0       // env auto-activate generation
+    private var _screensaverProgram: FragmentProgram?
+    private var _screensaverProgramTried = false
+    private var _screensaverShader: FragmentShader?
+
+    // Aerial mode: a looping clip decoded by a spawned ffmpeg (AerialPlayer),
+    // cross-fading in over the warp once its first frame lands. Absent any
+    // installed clip these stay nil and the warp is the whole screensaver.
+    #if os(Linux)
+    private var _aerialPlayer: AerialPlayer?
+    #endif
+    private var _aerialTextureId: Int64 = -1
+    private var _aerialFirstFrameAt: Double = -1   // _screensaverTime of frame 1
+
+    /// Where the pointer was when the saver first saw it; wake once it has
+    /// travelled this far (logical px) from there.
+    private var _screensaverPointerOrigin: Offset?
+    private static let kScreensaverWakeDistance: Double = 24
+
+    // Cached — the saver rebuilds every frame, and a per-build DateFormatter
+    // (ICU setup) is real work. Only ever touched from the main queue.
+    nonisolated(unsafe) private static let _ssTimeFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "h:mm"; return f
+    }()
+    nonisolated(unsafe) private static let _ssAmpmFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "a"; return f
+    }()
+    nonisolated(unsafe) private static let _ssDateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "EEEE, MMMM d"; return f
+    }()
+
+    func _activateScreensaver() {
+        guard !_screensaverActive else { return }
+        if _missionControlOpen { _closeMissionControl() }
+        setState {
+            _screensaverActive = true
+            _screensaverClosing = false
+            _screensaverTime = 0
+            // Wake to a clean desktop: close anything modal now rather than
+            // leaving it parked under the saver.
+            _launcherOpen = false
+            activeStatusBarPopup = nil
+            contextMenuPosition = nil
+        }
+        _screensaverShownAt = Date()
+        _screensaverPointerOrigin = nil
+        if _screensaverFade == nil {
+            let c = AnimationController(duration: .milliseconds(700),
+                                        reverseDuration: .milliseconds(150),
+                                        vsync: self)
+            c.addListener { [weak self] in self?.setState {} }
+            c.addStatusListener { [weak self] status in
+                // Reverse run finished — the desktop is fully back.
+                guard let self, status == .dismissed, self._screensaverClosing
+                else { return }
+                self._teardownScreensaver()
+            }
+            _screensaverFade = c
+            _screensaverFadeCurve = CurvedAnimation(parent: c,
+                                                    curve: Curves.easeOutCubic)
+        }
+        // Monotonic seconds for the shader phases — a repeating controller
+        // would wrap into a sawtooth and pop every period.
+        _screensaverTicker?.stop()
+        _screensaverTicker = Ticker({ [weak self] elapsed in
+            guard let self else { return }
+            let comps = elapsed.components
+            self._screensaverTime = Double(comps.seconds)
+                + Double(comps.attoseconds) * 1e-18
+            self._pumpAerialFrame()
+            self.setState {}
+        }, debugLabel: "screensaver time")
+        _ = _screensaverTicker?.start()
+        _ = _screensaverFade?.forward(from: 0)
+        _startAerialIfAvailable()
+    }
+
+    /// Start decoding an aerial clip, if one is installed. Frames are decoded
+    /// at the size they are SHOWN (STARLING_AERIAL_RES, default half the
+    /// panel): a 4K RGBA frame is 33MB, and the CPU pipe cannot carry that —
+    /// see AerialPlayer's note on the VAAPI/dmabuf path this stands in for.
+    private func _startAerialIfAvailable() {
+        #if os(Linux)
+        guard _aerialPlayer == nil, let clip = AerialPlayer.discoverClip() else { return }
+        // PHYSICAL pixels, not screenWidth/screenHeight — those are logical
+        // (1280x800 on this 2560x1600 panel at DPI 2), and decoding to
+        // logical size would upscale 4x on screen.
+        //
+        // Native panel resolution is affordable: measured on the dev box,
+        // decoding the 4K NASA clip down to 2560x1600 RGBA runs at 4.3x
+        // realtime (1.16s of CPU per 5s of video), and a pre-scaled source
+        // at 5.7x. Decode is never the constraint — glTexImage2D of a 16MB
+        // frame is, so STARLING_AERIAL_RES exists to step down if the
+        // upload can't keep pace on a given box.
+        let phys = PlatformDispatcher.instance.implicitView?.physicalSize
+            ?? Size(screenWidth, screenHeight)
+        var w = Int(phys.width), h = Int(phys.height)
+        if let res = ProcessInfo.processInfo.environment["STARLING_AERIAL_RES"] {
+            let parts = res.lowercased().split(separator: "x").compactMap { Int($0) }
+            if parts.count == 2, parts[0] > 0, parts[1] > 0 {
+                w = parts[0]; h = parts[1]
+            }
+        }
+        guard let player = AerialPlayer(clip: clip, width: w, height: h) else {
+            FileHandle.standardError.write(Data(
+                "[DesktopShell] Aerial: ffmpeg unavailable — staying on the warp\n".utf8))
+            return
+        }
+        FileHandle.standardError.write(Data(
+            "[DesktopShell] Aerial: \(clip) at \(player.width)x\(player.height)\n".utf8))
+        _aerialPlayer = player
+        _aerialFirstFrameAt = -1
+        player.start()
+        #endif
+    }
+
+    /// Drain the decoder's mailbox into the aerial texture. Called from the
+    /// screensaver ticker, so uploads happen on the main thread at frame
+    /// cadence and the decode thread never touches engine state.
+    private func _pumpAerialFrame() {
+        #if os(Linux)
+        guard let player = _aerialPlayer,
+              let registry = drmTextureRegistry,
+              let wl = waylandIntegration else { return }
+        player.withNewFrame { data, w, h in
+            if _aerialTextureId < 0 {
+                _aerialTextureId = registry.registerTexture(engine: wl.engine)
+                _aerialFirstFrameAt = _screensaverTime
+            }
+            registry.updatePixelData(engine: wl.engine, id: _aerialTextureId,
+                                     data: data, width: w, height: h)
+        }
+        #endif
+    }
+
+    /// 0 until the first decoded frame, then a 1.5s ramp — the aerial
+    /// dissolves in over the warped desktop rather than cutting to it.
+    private var _aerialFadeT: Double {
+        guard _aerialTextureId >= 0, _aerialFirstFrameAt >= 0 else { return 0 }
+        return min(1.0, max(0.0, (_screensaverTime - _aerialFirstFrameAt) / 1.5))
+    }
+
+    private func _stopAerial() {
+        #if os(Linux)
+        _aerialPlayer?.stop()
+        _aerialPlayer = nil
+        if _aerialTextureId >= 0, let registry = drmTextureRegistry,
+           let wl = waylandIntegration {
+            registry.unregisterTexture(engine: wl.engine, id: _aerialTextureId)
+        }
+        #endif
+        _aerialTextureId = -1
+        _aerialFirstFrameAt = -1
+    }
+
+    func _dismissScreensaver() {
+        guard _screensaverActive, !_screensaverClosing else { return }
+        _screensaverClosing = true
+        _ = _screensaverFade?.reverse()
+    }
+
+    /// Pointer or key activity while the saver is up. The grace window
+    /// absorbs the activation chord's own repeat tail and any synthetic
+    /// hover fired as the overlay mounts under the cursor.
+    private func _screensaverInputWake() {
+        guard Date().timeIntervalSince(_screensaverShownAt) > 0.35 else { return }
+        _dismissScreensaver()
+    }
+
+    /// Pointer drift while the saver is up. A hand resting on a trackpad
+    /// emits hover events a pixel at a time (and plugging in a device emits
+    /// one on its own), so waking on the first of those dismissed the
+    /// screensaver the moment it appeared — it never survived long enough to
+    /// be seen. Wake only once the pointer has actually travelled.
+    private func _screensaverPointerActivity(_ pos: Offset) {
+        guard _screensaverActive, !_screensaverClosing else { return }
+        guard Date().timeIntervalSince(_screensaverShownAt) > 0.35 else { return }
+        guard let origin = _screensaverPointerOrigin else {
+            _screensaverPointerOrigin = pos
+            return
+        }
+        let dx = pos.dx - origin.dx, dy = pos.dy - origin.dy
+        if dx * dx + dy * dy > Self.kScreensaverWakeDistance * Self.kScreensaverWakeDistance {
+            _dismissScreensaver()
+        }
+    }
+
+    private func _teardownScreensaver() {
+        _screensaverTicker?.stop()
+        _screensaverTicker = nil
+        _stopAerial()
+        setState {
+            _screensaverActive = false
+            _screensaverClosing = false
+        }
+        _armScreensaverTestTimer()  // self-repeating test cycles
+    }
+
+    /// STARLING_SCREENSAVER_TEST=<seconds>: auto-activate that long after
+    /// startup (and again after every wake), so tooling can screenshot the
+    /// saver without holding a keyboard. DispatchQueue + generation token,
+    /// not Foundation.Timer — the latter never fires on the DRM embedder.
+    private func _armScreensaverTestTimer() {
+        guard let s = ProcessInfo.processInfo.environment["STARLING_SCREENSAVER_TEST"],
+              let secs = Double(s), secs > 0 else { return }
+        _screensaverTestToken += 1
+        let token = _screensaverTestToken
+        let fire: () -> Void = { [weak self] in
+            guard let self, token == self._screensaverTestToken,
+                  !self._screensaverActive else { return }
+            self._activateScreensaver()
+        }
+        // Main-queue-only state; @Sendable coercion is the codebase idiom.
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + secs,
+            execute: unsafeBitCast(fire, to: (@Sendable () -> Void).self))
+    }
+
     // ── Key repeat synthesis ─────────────────────────────────────────────
     // The DRM embedder emits only down/up; typematic repeat is synthesized
     // here (vsync Ticker) and routed like a real key. Wayland clients are
@@ -743,6 +974,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         recTimer.resume()
         _recordingTickTimer = recTimer
         #endif
+
+        _armScreensaverTestTimer()
     }
 
     /// Resolve a data file (wallpaper, icons, shaders) across installed and
@@ -1393,6 +1626,17 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 self._shiftPressed = (keyData.type == .down || keyData.type == .repeat)
             }
 
+            // Screensaver: any key wakes it, and nothing reaches apps or the
+            // shell's own UI while it is up (launcher-style modal swallow).
+            // Wake on down/repeat only — the activation chord's own key-ups
+            // pass through harmlessly.
+            if self._screensaverActive {
+                if keyData.type == .down || keyData.type == .repeat {
+                    self._screensaverInputWake()
+                }
+                return true
+            }
+
             // The app launcher (Launchpad) is modal: while it's open it owns
             // the keyboard. Type to search, Backspace to edit, Enter to launch
             // the top match, Esc to clear the query (then close). No keystroke
@@ -1548,6 +1792,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         rec.isRecording ? rec.stop() : rec.start()
                     }
                     #endif
+                    return true
+                }
+                // Ctrl+Shift+S — screensaver (dev trigger until the idle
+                // timer lands). Shift-gated so apps keep plain Ctrl+S (save).
+                if phys == 0x16 && self._shiftPressed && keyData.type == .down {
+                    self._activateScreensaver()
                     return true
                 }
             }
@@ -2886,6 +3136,35 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             color: Color(0x00000000),
                             child: SizedBox(expand: ())
                         )
+                    )
+                )
+            )
+        }
+
+        // Screensaver: dim + breathing blur + liquid warp over the LIVE
+        // desktop (no capture step), thin clock on top. Any pointer input
+        // wakes it via the overlay's opaque Listener; keys are swallowed by
+        // the matching branch in routeKey. Above everything interactive —
+        // only the frame-tick pixel and the non-claiming hover listener sit
+        // higher, and both are invisible.
+        if _screensaverActive {
+            let t = _screensaverFadeCurve?.value ?? 1.0
+            let now = Date()
+            children.append(
+                Positioned(
+                    fill: (),
+                    child: ScreenSaverOverlay(
+                        filter: _screensaverFilter(fadeT: t),
+                        fadeT: t,
+                        timeText: Self._ssTimeFmt.string(from: now),
+                        ampmText: Self._ssAmpmFmt.string(from: now),
+                        dateText: Self._ssDateFmt.string(from: now),
+                        aerialTextureId: _aerialTextureId >= 0 ? _aerialTextureId : nil,
+                        aerialT: _aerialFadeT,
+                        onWakeInput: { [weak self] in self?._screensaverInputWake() },
+                        onPointerActivity: { [weak self] pos in
+                            self?._screensaverPointerActivity(pos)
+                        }
                     )
                 )
             )
@@ -4970,6 +5249,70 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // float uniforms) — then texture() samples in raw coord space.
         shader.setFloat(5, 1.0)                             // uTexture_size.x
         shader.setFloat(6, 1.0)                             // uTexture_size.y
+        return ImageFilterFactory.compose(
+            outer: ImageFilterFactory.shader(shader),
+            inner: base
+        )
+    }
+
+    /// Loads the compiled screensaver warp program once. Returns nil if the
+    /// .iplr asset can't be found or fails to initialize — the screensaver
+    /// falls back to the plain breathing blur + scrim.
+    private func _screensaverProgramIfAvailable() -> FragmentProgram? {
+        if _screensaverProgramTried { return _screensaverProgram }
+        _screensaverProgramTried = true
+        var candidates = [
+            // Resolved relative to whichever CWD the shell was launched from.
+            "Sources/DesktopShellApp/Shaders/screensaver.frag.iplr",
+            "apps/DesktopShellApp/Sources/DesktopShellApp/Shaders/screensaver.frag.iplr",
+        ]
+        // Installed layout ($STARLING_DATA_DIR / <exe>/../share/starling).
+        if let packaged = Self.dataFilePath("shaders/screensaver.frag.iplr") {
+            candidates.insert(packaged, at: 0)
+        }
+        for path in candidates {
+            guard let data = FileManager.default.contents(atPath: path) else { continue }
+            do {
+                _screensaverProgram = try FragmentProgram(
+                    data: [UInt8](data), backend: .skSL)
+                FileHandle.standardError.write(Data(
+                    "[DesktopShell] Screensaver shader loaded from \(path)\n".utf8))
+                return _screensaverProgram
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[DesktopShell] Screensaver shader load failed: \(error)\n".utf8))
+            }
+        }
+        FileHandle.standardError.write(Data(
+            "[DesktopShell] Screensaver shader .iplr not found — using plain blur\n".utf8))
+        return nil
+    }
+
+    private func _screensaverShaderIfAvailable() -> FragmentShader? {
+        if _screensaverShader == nil {
+            _screensaverShader = _screensaverProgramIfAvailable()?.fragmentShader()
+        }
+        return _screensaverShader
+    }
+
+    /// Screensaver backdrop: breathing blur, with the liquid warp composed
+    /// outside it when the shader is available. `fadeT` scales everything —
+    /// an ancestor Opacity cannot attenuate what a BackdropFilter does to
+    /// its backdrop, so the fade has to be parametric.
+    private func _screensaverFilter(fadeT: Double) -> any ImageFilter {
+        // ±22% around the base sigma, one breath every 9 s.
+        let breathe = 1.0 + 0.22 * sin(_screensaverTime * 2.0 * .pi / 9.0)
+        let sigma = 22.0 * breathe * fadeT
+        let base = ImageFilterFactory.blur(sigmaX: sigma, sigmaY: sigma)
+        guard let shader = _screensaverShaderIfAvailable() else { return base }
+        shader.setFloat(0, screenWidth)                     // uSize.x
+        shader.setFloat(1, screenHeight)                    // uSize.y
+        shader.setFloat(2, _screensaverTime)                // uTime
+        shader.setFloat(3, fadeT)                           // uIntensity
+        // Auto uTexture_size just past the declared floats — (1,1) so
+        // texture() samples raw coords (see _liquidGlassFilter above).
+        shader.setFloat(4, 1.0)                             // uTexture_size.x
+        shader.setFloat(5, 1.0)                             // uTexture_size.y
         return ImageFilterFactory.compose(
             outer: ImageFilterFactory.shader(shader),
             inner: base

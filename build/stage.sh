@@ -173,6 +173,8 @@ install -m644 "$REPO"/registry/catalog.d/*.app "$SHARE/catalog.d/"
 # runtime (DesktopEntry lookup) and falls back to its own neutral glyph.
 install -m644 "$REPO/shell/Sources/DesktopShellApp/Shaders/liquid_glass.frag.iplr" \
     "$SHARE/shaders/"
+install -m644 "$REPO/shell/Sources/DesktopShellApp/Shaders/screensaver.frag.iplr" \
+    "$SHARE/shaders/"
 
 # --- third-party app tools: host-direct runner + apt-only installer ---------
 install -m755 "$REPO/build/app-run.sh" "$OUT/bin/app-run"
