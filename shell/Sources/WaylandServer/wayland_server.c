@@ -250,6 +250,35 @@ void wayland_server_on_present(WaylandServer* server,
  * Window management
  * -------------------------------------------------------------------------- */
 
+/* Ask a toplevel to close itself — the xdg_shell equivalent of clicking the
+ * window's close button. Well-behaved clients run their normal quit path
+ * (prompting to save, tearing down child processes) and then disconnect.
+ *
+ * There IS a server->client close in this protocol; an older comment in the
+ * shell claimed otherwise and left Quit as a no-op, so quitting an app took
+ * its window off the desktop and left the process running forever. Nothing
+ * obliges a client to honour it, which is why the shell follows up with a
+ * signal to the pid below if the client is still there. */
+void wayland_server_close_toplevel(WaylandServer* server, uint32_t surface_id) {
+    WARN_IF_OFF_LOOP_THREAD(server, "close_toplevel");
+    struct WaylandSurface* surface = wayland_server_find_surface(server, surface_id);
+    if (!surface || !surface->xdg_toplevel) return;
+    xdg_toplevel_send_close(surface->xdg_toplevel);
+}
+
+/* The pid on the other end of the surface's connection, straight from the
+ * socket's peer credentials — no client cooperation and no _NET_WM_PID-style
+ * property to spoof or omit. 0 when the surface or client is gone. */
+pid_t wayland_server_surface_pid(WaylandServer* server, uint32_t surface_id) {
+    struct WaylandSurface* surface = wayland_server_find_surface(server, surface_id);
+    if (!surface || !surface->resource) return 0;
+    struct wl_client* client = wl_resource_get_client(surface->resource);
+    if (!client) return 0;
+    pid_t pid = 0;
+    wl_client_get_credentials(client, &pid, NULL, NULL);
+    return pid;
+}
+
 void wayland_server_configure_toplevel(WaylandServer* server,
                                        uint32_t surface_id,
                                        int width, int height) {

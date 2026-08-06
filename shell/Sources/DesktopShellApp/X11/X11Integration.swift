@@ -52,6 +52,9 @@ class X11Integration {
     /// Self-signal counter — limits busy-looping during init
     private var wakeupCounter: Int = 0
 
+    /// Client pid per X11 window, from the connection's peer credentials.
+    private var windowPids: [UInt32: pid_t] = [:]
+
     /// Last imported DMA-BUF dimensions per texture — avoids costly
     /// reimportDmaBuf when frame dimensions haven't changed.
     private var lastImportedSize: [Int64: (width: Int, height: Int)] = [:]
@@ -237,6 +240,16 @@ class X11Integration {
         let textureId = textureRegistry.registerTexture(engine: engine)
         windowTextures[windowId] = textureId
 
+        // Peer pid, captured while the client is certainly still connected.
+        // The dock's Quit needs it to escalate past a client that ignores
+        // WM_DELETE_WINDOW; reading it at Quit time races the client's own
+        // teardown. Zoom is the case that matters — one X connection fronting
+        // an eleven-process tree that survives losing its window.
+        if let server = server {
+            let pid = x11_server_window_pid(server, windowId)
+            if pid > 0 { windowPids[windowId] = pid }
+        }
+
         if let shellWindowId = onNewWindow?(windowId, Int(textureId), "X11 App",
                                              x, y, width, height) {
             windowIds[windowId] = shellWindowId
@@ -246,6 +259,7 @@ class X11Integration {
     }
 
     private func handleWindowDestroyed(_ windowId: UInt32) {
+        windowPids.removeValue(forKey: windowId)
         // print("[X11Integration] Window destroyed: 0x\(String(windowId, radix: 16))")
 
         if let shellWindowId = windowIds.removeValue(forKey: windowId) {
@@ -391,6 +405,17 @@ class X11Integration {
         default:
             break
         }
+    }
+
+    /// Ask the client owning `windowId` to close (WM_DELETE_WINDOW).
+    func requestClose(windowId: UInt32) {
+        guard let server = server else { return }
+        x11_server_close_window(server, windowId)
+    }
+
+    /// pid behind an X11 window, captured when it was mapped.
+    func clientPid(windowId: UInt32) -> pid_t? {
+        return windowPids[windowId]
     }
 
     /// Send a resize to the X11 window.

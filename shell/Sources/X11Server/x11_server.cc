@@ -428,6 +428,7 @@ struct X11Extension {
 
 struct X11Client {
     int      fd;
+    pid_t    pid;            /* peer credentials, captured at accept */
     int      authenticated;  /* completed handshake */
     uint8_t  buf[CLIENT_BUF_SIZE];
     int      buf_len;
@@ -1294,7 +1295,21 @@ void x11_server_dispatch(X11Server* server) {
         std::memset(client, 0, sizeof(*client));
         client->fd = client_fd;
         client->pending_fd_count = 0;
-        fprintf(stderr, "[X11Server] Client connected (fd=%d)\n", client_fd);
+        /* Peer credentials, captured once at accept: this is the only
+         * trustworthy way to learn who is on the other end. _NET_WM_PID is a
+         * property the client sets voluntarily — Zoom's xcb windows carry no
+         * app_id either, and we are not going to trust a second optional
+         * property to decide what to signal. Needed so the dock's Quit can
+         * actually terminate an app rather than just forgetting its window. */
+        struct ucred cred;
+        socklen_t cred_len = sizeof(cred);
+        if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+            client->pid = cred.pid;
+        } else {
+            client->pid = 0;
+        }
+        fprintf(stderr, "[X11Server] Client connected (fd=%d pid=%d)\n",
+                client_fd, client->pid);
     }
     }
 
@@ -4888,6 +4903,48 @@ void x11_server_pointer_motion(X11Server* server, int x, int y) {
     event[30] = 1; /* same_screen */
     send_to_client(server, server->focus_client_idx, event, 32);
     send_xi2_device_event(server, win, 6, 0, x, y, server->button_state);
+}
+
+/* WM_DELETE_WINDOW — the ICCCM "please close" ClientMessage, the same thing a
+ * real WM sends when you click a title bar's X. Toolkits run their normal quit
+ * path on it. Advisory only: a client may ignore it or put up an "unsaved
+ * changes" dialog, so the caller must be prepared to escalate to a signal. */
+void x11_server_close_window(X11Server* server, uint32_t window_id) {
+    if (!server) return;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return;
+    int owner = static_cast<int>(win->owner_client);
+    if (owner < 0 || owner >= server->client_count) return;
+    if (server->clients[owner].fd < 0) return;
+
+    uint32_t wm_protocols = 0, wm_delete = 0;
+    for (auto& a : server->atoms) {
+        if (a.name == "WM_PROTOCOLS") wm_protocols = a.id;
+        else if (a.name == "WM_DELETE_WINDOW") wm_delete = a.id;
+    }
+    if (!wm_protocols || !wm_delete) return;
+
+    uint8_t cm[32] = {};
+    cm[0] = 33;  /* ClientMessage */
+    cm[1] = 32;  /* format */
+    *reinterpret_cast<uint16_t*>(cm + 2) = server->clients[owner].sequence;
+    *reinterpret_cast<uint32_t*>(cm + 4) = win->id;
+    *reinterpret_cast<uint32_t*>(cm + 8) = wm_protocols;
+    *reinterpret_cast<uint32_t*>(cm + 12) = wm_delete;
+    *reinterpret_cast<uint32_t*>(cm + 16) = x11_timestamp();
+    send_to_client(server, owner, cm, 32);
+}
+
+/* pid of the client that owns a window, from the credentials captured when it
+ * connected. 0 when the window is unknown or its client has gone. */
+pid_t x11_server_window_pid(X11Server* server, uint32_t window_id) {
+    if (!server) return 0;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return 0;
+    int owner = static_cast<int>(win->owner_client);
+    if (owner < 0 || owner >= server->client_count) return 0;
+    if (server->clients[owner].fd < 0) return 0;
+    return server->clients[owner].pid;
 }
 
 void x11_server_pointer_button(X11Server* server, uint32_t button,
