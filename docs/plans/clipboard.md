@@ -141,10 +141,17 @@ Costs, both small and both real:
   seeing `WAYLAND_DISPLAY`. The shell already knows the value
   (`WaylandIntegration.socketName`), and it matters that it is dynamic: after an
   unclean exit the next run listens on `wayland-1`.
-- libwayland-client becomes a dependency of the Starling path. It must **not**
-  land in the core `Flutter` target, which every public SDK consumer on Linux
-  links. Give it its own small C target beside `DmaBufBridge`, and reach it from
-  the framework through an installed hook (below).
+- libwayland-client becomes a dependency of the Starling path, as the
+  `WaylandClipboardBridge` target beside `DmaBufBridge`.
+
+  This plan originally said that target must be kept out of the core `Flutter`
+  target and reached through an installed hook, to spare public SDK consumers
+  the dependency. That was written before checking `sdk/Package.swift`:
+  `flutterDeps` **already** carries `DmaBufBridge`, which hangs gbm, EGL and
+  GLESv2 off every Linux consumer. Against that, libwayland-client is noise, and
+  the hook would have bought indirection rather than isolation. It is a direct
+  dependency. `wlclip_connect()` returns NULL wherever data-control is absent,
+  so off Starling it costs a `.so` reference and nothing else.
 
 ### Framework — a real `Clipboard`, callback-primitive
 
@@ -228,10 +235,37 @@ Also fixed here: the two comments that asserted things the code did not do
 (`wayland_data_device.c:76` claimed a bind-time send that never existed;
 `wayland_data_control.c:20` claimed zwp_primary_selection served primary).
 
-**Stage 1 — the user-visible goal.** Framework `Clipboard` (callback primitive +
-`async` wrapper), the data-control backend in the SDK's Starling path, the
+**Stage 1 — the user-visible goal. DONE.** Framework `Clipboard` (callback
+primitive + `async` wrapper) in `sdk/Sources/Flutter/Platform/Clipboard.swift`,
+the data-control backend in `sdk/Sources/WaylandClipboardBridge`, the
 `STARLING_WAYLAND_DISPLAY` hand-off from the shell, both apps switched off the
 file. `text/plain` only, but mime-typed from the start.
+
+The bridge owns a private thread and Wayland connection, so no clipboard
+transfer ever touches the app's UI thread, and every transfer is bounded by
+`WLCLIP_TIMEOUT_MS`. Two traps handled in it that are easy to miss:
+
+- **Reading our own selection would self-deadlock.** If we own it, the
+  compositor answers a paste by asking *us* to write — on the very thread that
+  is blocked reading. `wlclip_owns_selection` short-circuits to the local copy.
+- **Replacing our own selection races its `cancelled`.** Destroying the old
+  source proxy first stops libwayland delivering a `cancelled` that would
+  otherwise arrive after we re-took ownership and clear the flag we just set.
+
+Verified on a real GDM session with real Chrome, all four directions plus the
+failure mode:
+
+| case | result |
+| --- | --- |
+| Text Editor copy → `wl-paste` | ✅ |
+| `wl-copy` → Text Editor paste | ✅ |
+| Text Editor copy → Chrome paste (Chrome started *after* the copy) | ✅ |
+| Chrome copy → Text Editor paste | ✅ |
+| paste while the owner is `kill -STOP`ped | desktop keeps compositing, editor stays alive, paste degrades to empty, and recovers on `kill -CONT` ✅ |
+
+Note a deliberate regression on Windows: `TerminalApp` used to share a clipboard
+file between its own instances there, and now falls back to a process-local
+clipboard until Stage 2 lands `Win32Host`'s provider.
 
 **Stage 2 — off-desktop backends.** GTK and Win32 providers, so the public SDK's
 `Clipboard` is not a stub outside Starling.

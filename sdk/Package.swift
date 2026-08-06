@@ -326,6 +326,7 @@ let flutterDeps: [Target.Dependency] = [
     .target(name: "SwiftRuntime"),
     .target(name: "FlutterEmbedderBridge"),
     .target(name: "DmaBufBridge"),
+    .target(name: "WaylandClipboardBridge"),
 ]
 #else
 let flutterDeps: [Target.Dependency] = [
@@ -509,6 +510,23 @@ targets += [
             .linkedLibrary("gbm"),
             .linkedLibrary("EGL"),
             .linkedLibrary("GLESv2"),
+        ]
+    ),
+    // The system clipboard for a Starling app, spoken as a zwlr_data_control
+    // client on its own thread. Vendors the wayland-scanner output for the
+    // protocol the same way shell/Sources/WaylandServer does, so no build-time
+    // codegen step is needed.
+    //
+    // This does put libwayland-client on every Linux consumer of Flutter. That
+    // is in keeping with what is already there — DmaBufBridge hangs gbm, EGL
+    // and GLESv2 off the same target — and it buys a Clipboard that is not a
+    // stub. wlclip_connect() returns NULL wherever data-control is absent, so
+    // linking it off Starling costs nothing but the .so reference.
+    .target(
+        name: "WaylandClipboardBridge",
+        exclude: ["wlr-data-control-unstable-v1.xml"],
+        linkerSettings: [
+            .linkedLibrary("wayland-client"),
         ]
     ),
     // System GTK 3 via pkg-config — supplies GTK/GLib include paths and libs
