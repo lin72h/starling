@@ -20,7 +20,7 @@ sdk/       the Flutter→Swift framework port (SwiftPM package "FlutterSwift"),
 engine      -> SYMLINK to a starling-engine checkout
 host/       the windowed host (FlutterRunner + GLFWBridge): run a Swift Flutter
             app in an ordinary window instead of compositing through the shell.
-            Demos only — BlueScreenApp and Examples/HelloWindow. Stayed behind
+            Demos only — Examples/HelloWindow. Stayed behind
             when the framework was extracted, because it drags a vendored libglfw
             and resolves assets under /usr/share/starling.
 registry/  the app registry — the ONE description of every app the desktop knows
@@ -143,9 +143,12 @@ which renders every Android app into one window.
   and until recently `MacosSlider` was a display-only stub, which is how
   Fluent sliders leaked into the control center. If the `Macos*` control you
   need is missing or a stub, implement it in `sdk/` rather than reaching for
-  the Fluent one. Known Fluent remnants to convert, not extend: the desktop
-  context menus (`MenuFlyout`), and the Settings / ImageViewer / BlueScreen
-  app shells (`FluentApp`).
+  the Fluent one — that is where `MacosMenu` and `MacosScrollbar` came from.
+  The shell and every shipped app are now Fluent-free: app shells are
+  `MacosApp`, context menus are `MacosMenu`. Note that `MacosApp` still
+  installs a `FluentTheme` internally, so a stray Fluent widget keeps
+  rendering instead of failing loudly — grep for `Fluent` in `shell/` and
+  `apps/` rather than trusting that it would have broken.
 - **Wayland only.** Do not read, modify, or reference `X11Server/` or X11 launch
   paths unless explicitly asked.
 - **No security hardening on the app runtime** (`build/app-run.sh` is an app

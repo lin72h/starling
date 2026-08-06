@@ -246,16 +246,3 @@ sudo DISPLAY=:1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
 **Swift callbacks in DRM mode:** Do NOT use `print()` inside C callback closures called from the DRM epoll thread — `stdout` may have no reader in DRM mode, causing `print()` to block forever and hang the event loop. Use `fputs(stderr, ...)` from C or avoid logging.
 
 **EWMH properties:** The root window must have `_NET_SUPPORTED`, `_NET_WORKAREA`, `_NET_SUPPORTING_WM_CHECK`, `_NET_NUMBER_OF_DESKTOPS`, and `_NET_CURRENT_DESKTOP` properties set during server initialization. Chrome queries these to determine window manager support and display bounds.
-
-## Nav Item Positions (BlueScreenApp, all expanders collapsed)
-
-```
-Home:               x=150, y~19
-Basic Controls:     x=150, y~71   (expander)
-Surfaces:           x=150, y~111  (expander)
-Navigation:         x=150, y~151  (expander)
-Popups:             x=150, y~191  (expander)
-Pickers:            x=150, y~231
-```
-
-When an expander opens, each sub-item is ~40px tall and all items below shift down accordingly.

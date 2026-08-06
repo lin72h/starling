@@ -2,6 +2,7 @@
 #define FLUTTER_X11_SERVER_H
 
 #include <stdint.h>
+#include <sys/types.h>   /* pid_t — x11_server_window_pid */
 
 #ifdef __cplusplus
 extern "C" {
@@ -125,6 +126,14 @@ void x11_server_pointer_button(X11Server* server, uint32_t button,
 
 /* Send key press/release (evdev keycode). */
 void x11_server_key_event(X11Server* server, uint32_t keycode, int pressed);
+
+/* Ask a window to close (WM_DELETE_WINDOW). Advisory — clients may ignore it,
+ * so a caller that must see the app go away follows up with
+ * x11_server_window_pid() and a signal. */
+void x11_server_close_window(X11Server* server, uint32_t window_id);
+
+/* pid of the client owning a window, from peer credentials. 0 if unknown. */
+pid_t x11_server_window_pid(X11Server* server, uint32_t window_id);
 
 /* Send EnterNotify to a window. */
 void x11_server_enter_notify(X11Server* server, uint32_t window_id,

@@ -40,10 +40,10 @@ app.setActivationPolicy(.regular)
 // Create FlutterEngine (headless — we start it manually in Swift mode).
 let engine = FlutterEngine(name: "swift-app", project: nil, allowHeadlessExecution: true)
 
-// Build the widget tree: FluentApp wrapping our DesktopShell.
-// FluentApp now provides Directionality and Overlay automatically.
+// Build the widget tree: MacosApp wrapping our DesktopShell.
+// MacosApp provides Directionality and Overlay (via Navigator) automatically.
 runApp(
-    FluentApp(
+    MacosApp(
         themeMode: .dark,
         home: DesktopShell(),
         title: "Desktop Shell PoC"
@@ -433,7 +433,7 @@ func runDRM() -> Never {
 
     // Build the widget tree and runtime callbacks.
     runApp(
-        FluentApp(
+        MacosApp(
             themeMode: .dark,
             home: DesktopShell(),
             title: "Desktop Shell"
@@ -790,7 +790,7 @@ func runDRM() -> Never {
 
 func runHeadless() -> Never {
     runApp(
-        FluentApp(
+        MacosApp(
             themeMode: .dark,
             home: DesktopShell(),
             title: "Desktop Shell"

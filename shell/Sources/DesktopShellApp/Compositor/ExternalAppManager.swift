@@ -98,7 +98,7 @@ class ExternalAppManager {
 
         // Mount the demo widget and start rendering.
         // Wrap in Directionality since this is a standalone widget tree
-        // (no FluentApp / MaterialApp ancestor to provide TextDirection).
+        // (no MacosApp / MaterialApp ancestor to provide TextDirection).
         offscreenApp.mountWidget {
             Directionality(
                 textDirection: TextDirection.ltr,

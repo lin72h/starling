@@ -201,16 +201,28 @@ else
             # looks exactly like a compositor bug. It isn't. Move ~/.zoom aside
             # and relaunch — that alone took zoom from black to pixel-perfect
             # here. Check for it before suspecting the X server.
-            # AUDIO / DO NOT INSTALL pulseaudio-utils. Zoom crashes (SIGSEGV
-            # during audio init) whenever `pactl` is on PATH on a box that runs
-            # PipeWire without a native PulseAudio daemon — the common Ubuntu
-            # 25.10/26.04 setup here. With pactl ABSENT, Zoom logs "no pactl and
-            # pacmd found", skips audio, and runs fine; with pactl present it
-            # segfaults, and a working PULSE_SERVER does NOT save it (verified:
-            # crashes either way once pactl exists). So: leave pactl uninstalled
-            # for Zoom to work at all. The tradeoff is no Zoom audio until this
-            # PipeWire-vs-pactl crash is worked around per-app (bwrap-masking
-            # /usr/bin/pactl for Zoom only, once host-direct grows that hook).
+            # AUDIO. This used to read "DO NOT INSTALL pulseaudio-utils" —
+            # Zoom was said to SIGSEGV during audio init whenever `pactl` was
+            # on PATH under PipeWire, so pactl was kept off the box and Zoom
+            # ran with no audio at all. That verdict does not survive
+            # re-testing: it was reached while the X server was handing DRI3
+            # clients the WRONG GPU (see x11_server.cc) and app-run was
+            # double-applying the DPI, either of which was enough to kill Zoom
+            # on its own. With those fixed, pulseaudio-utils installed and
+            # PULSE_SERVER pointed at PipeWire's socket, Zoom starts clean,
+            # registers as a PipeWire client ("ZOOM VoiceEngine") and stops
+            # logging "no pactl and pacmd found".
+            #
+            # So Zoom DOES want pactl — it shells out to it to enumerate
+            # devices — and both halves are needed: pulseaudio-utils on the
+            # image, and PULSE_SERVER in the environment (set for every app in
+            # the launch branches below; our private XDG_RUNTIME_DIR hides the
+            # real socket, so without it libpulse finds nothing and Zoom drops
+            # to raw ALSA on /dev/snd).
+            #
+            # CAMERA needs nothing here: host-direct runs without bwrap, so
+            # /dev/video* is already visible, and logind's ACL plus the video
+            # group give the session user rw on it.
             #
             # XDG_SESSION_TYPE=X11 is what unlocks SCREEN SHARE. Per the Arch
             # wiki: "To enable screen share on Xorg, you must change the
@@ -219,13 +231,22 @@ else
             # for us, so without this line sharing is silently unavailable
             # even though our XShmGetImage capture works fine.
             #
-            # QT_SCALE_FACTOR matches the shell's FLUTTER_DRM_DPI — on a 4K
-            # panel Zoom's Qt UI is otherwise rendered at 1:1 and comes out
-            # tiny. Honour an explicit override if the caller set one.
+            # DO NOT set QT_SCALE_FACTOR here. It used to be set to the
+            # shell's FLUTTER_DRM_DPI, from a time when the X server told
+            # clients nothing about DPI and Zoom's Qt UI came out 1:1 and
+            # tiny. The X server now publishes Xft.dpi = FLUTTER_DRM_DPI * 96
+            # in RESOURCE_MANAGER on the root window (x11_server.cc), which
+            # Qt reads and turns into exactly that scale on its own — so
+            # setting the variable too MULTIPLIES the two: at DPI 2.0 Qt
+            # reported devicePixelRatio 4.0, made a 4920x2892 window for a
+            # 2560x1600 panel, and the compositor showed a giant blurred
+            # crop of it. It also quadruples every buffer (57 MB each) and
+            # the Qt scene-graph atlas (8192x4096), which is its own hazard.
+            # Honour an explicit override, for testing a scale by hand.
             set -- /usr/bin/env -u WAYLAND_DISPLAY \
                 DISPLAY=:1 QT_QPA_PLATFORM=xcb \
                 XDG_SESSION_TYPE=X11 \
-                QT_SCALE_FACTOR="${QT_SCALE_FACTOR:-${FLUTTER_DRM_DPI:-1.7}}" \
+                ${QT_SCALE_FACTOR:+QT_SCALE_FACTOR="$QT_SCALE_FACTOR"} \
                 LD_LIBRARY_PATH=/opt/zoom:/opt/zoom/Qt/lib \
                 /opt/zoom/ZoomLauncher "$@"
             ;;
@@ -375,12 +396,24 @@ if ! is_starling_os; then
         # is clean, and a developer's ssh session has no GNOME_DESKTOP_
         # SESSION_ID either. Only a real GDM login sets it — the one path
         # nobody launches a browser from by hand.
+        #
+        # AUDIO, and it has to be here as well as in the root branch: we
+        # override XDG_RUNTIME_DIR to our private $XDG_DIR, and libpulse
+        # looks for the server at $XDG_RUNTIME_DIR/pulse/native — which does
+        # not exist there. The real socket is PipeWire's, under the login
+        # user's /run/user/UID. Without PULSE_SERVER an app finds no Pulse
+        # server at all and silently falls back to raw ALSA (Zoom was sitting
+        # on /dev/snd/controlC1) or to no audio, on the SHIPPED path only —
+        # `sudo app-run` looked fine, because the root branch sets this.
+        PULSE_SOCK="/run/user/$(id -u)/pulse/native"
+        [ -S "$PULSE_SOCK" ] && PULSE_ENV="PULSE_SERVER=unix:$PULSE_SOCK" || PULSE_ENV="PULSE_UNSET="
         exec env \
             -u LD_LIBRARY_PATH -u MESA_LOADER_DRIVER_OVERRIDE \
             -u VK_ICD_FILENAMES -u GBM_BACKENDS_PATH \
             -u GNOME_DESKTOP_SESSION_ID \
             PATH="$APPBIN:$PATH" \
             XDG_RUNTIME_DIR="$XDG_DIR" \
+            "$PULSE_ENV" \
             WAYLAND_DISPLAY="$SOCKET" \
             DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
             DISPLAY="${DISPLAY:-:1}" \

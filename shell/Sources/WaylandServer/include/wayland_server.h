@@ -5,6 +5,7 @@
 #define FLUTTER_WAYLAND_SERVER_H
 
 #include <stdint.h>
+#include <sys/types.h>   /* pid_t — wayland_server_surface_pid */
 
 #ifdef __cplusplus
 extern "C" {
@@ -210,6 +211,15 @@ void wayland_server_flush_clients(WaylandServer* server);
 /* --------------------------------------------------------------------------
  * Window management
  * -------------------------------------------------------------------------- */
+
+/* Ask a toplevel to close (xdg_toplevel.close). Advisory — the client may
+ * ignore it, so a caller that must see the app go away follows up with
+ * wayland_server_surface_pid() and a signal. */
+void wayland_server_close_toplevel(WaylandServer* server, uint32_t surface_id);
+
+/* pid behind a surface's connection, from SO_PEERCRED-style peer credentials.
+ * 0 if unknown. */
+pid_t wayland_server_surface_pid(WaylandServer* server, uint32_t surface_id);
 
 /* Send a configure (resize) event to a toplevel surface.
  * The client will resize and commit a new buffer in response.

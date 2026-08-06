@@ -47,7 +47,7 @@ SESSION=$REPO/build/session
 # executable name (AppRecord.swift:30), while third-party records name an
 # app-run recipe and ship no binary of ours. So adding a first-party app is
 # still one file, the way "Apps are data, not code" promises, and apps/ entries
-# with no record (DSATool, BlueScreenApp, FlutterDemoApp — dev and demo tools)
+# with no record (DSATool, FlutterDemoApp — dev and demo tools)
 # stay out on purpose.
 first_party_execs() {
     local f kind exec
@@ -250,7 +250,7 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Starling <dev@starling.build>
 Depends: $DEPS, libseat1, dbus, pkexec
-Recommends: gdm3 | lightdm | sddm, xwayland, x11-utils, xdg-utils, network-manager, ffmpeg
+Recommends: gdm3 | lightdm | sddm, xwayland, x11-utils, xdg-utils, network-manager, ffmpeg, pipewire-pulse, pulseaudio-utils
 Conflicts: starling-desktop
 Replaces: starling-desktop
 Provides: starling-desktop

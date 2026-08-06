@@ -79,6 +79,7 @@ private enum WaylandEvent: @unchecked Sendable {
 /// Commands produced on the UI thread, executed on the platform thread.
 private enum WaylandCommand: @unchecked Sendable {
     case configureToplevel(surfaceId: UInt32, width: Int32, height: Int32)
+    case closeToplevel(surfaceId: UInt32)
     case flushClients
     case updateScale(scale: Int32, fractional120: UInt32)
     case setOutputs(outputs: [WaylandOutputDesc])
@@ -115,6 +116,7 @@ class WaylandIntegration {
     private var surfaceTextures: [UInt32: Int64] = [:]   // surfaceId → textureId
     private var surfaceWindows: [UInt32: String] = [:]    // surfaceId → windowId
     private var surfaceAppIds: [UInt32: String] = [:]     // surfaceId → xdg app_id
+    private var surfacePids: [UInt32: pid_t] = [:]        // surfaceId → client pid
     private var surfaceSizes: [UInt32: (Int, Int)] = [:]  // surfaceId → (width, height) in buffer pixels
     private var surfaceBufferScales: [UInt32: Int] = [:]  // surfaceId → buffer_scale from client
     private var surfaceGeometry: [UInt32: (x: Int, y: Int, width: Int, height: Int)] = [:]
@@ -435,6 +437,8 @@ class WaylandIntegration {
             switch cmd {
             case .configureToplevel(let surfaceId, let w, let h):
                 wayland_server_configure_toplevel(server, surfaceId, w, h)
+            case .closeToplevel(let surfaceId):
+                wayland_server_close_toplevel(server, surfaceId)
             case .flushClients:
                 wayland_server_flush_clients(server)
             case .updateScale(let scale, let fractional120):
@@ -561,6 +565,14 @@ class WaylandIntegration {
         textureRegistry.markAsWaylandSurface(id: textureId)
         surfaceTextures[surfaceId] = textureId
 
+        // Peer pid, captured here while the surface is certainly alive. The
+        // dock's Quit needs it to escalate past a client that ignores
+        // xdg_toplevel.close, and looking it up later races the client's own
+        // teardown — by the time a user picks Quit the surface may be gone.
+        if let server = server {
+            let pid = wayland_server_surface_pid(server, surfaceId)
+            if pid > 0 { surfacePids[surfaceId] = pid }
+        }
         if let windowId = onNewWindow?(surfaceId, Int(textureId), "Wayland App", clientId) {
             surfaceWindows[surfaceId] = windowId
             // An app_id that arrived before the window existed.
@@ -1406,6 +1418,22 @@ class WaylandIntegration {
         default:
             break
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MARK: - Quit
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Ask the client owning `surfaceId` to close itself (xdg_toplevel.close).
+    func requestClose(surfaceId: UInt32) {
+        guard server != nil else { return }
+        enqueueCommand(.closeToplevel(surfaceId: surfaceId))
+    }
+
+    /// pid behind a surface, captured when its toplevel appeared. nil if the
+    /// surface never had one (or the compositor could not read credentials).
+    func clientPid(surfaceId: UInt32) -> pid_t? {
+        return surfacePids[surfaceId]
     }
 
     // ═══════════════════════════════════════════════════════════════════════

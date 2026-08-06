@@ -14,7 +14,7 @@ GLFW_LIB="$(cd ../../.deps/lib && pwd)"
 export COMPAT_ENGINE_OUT="$ENGINE_OUT"
 export LD_LIBRARY_PATH="$PWD/build:$TOOLCHAIN/usr/lib/swift/linux:$ENGINE_OUT:$GLFW_LIB:${LD_LIBRARY_PATH:-}"
 
-# Render on the GNOME Wayland session, exactly like BlueScreenApp: WAYLAND_DISPLAY
+# Render on the GNOME Wayland session: WAYLAND_DISPLAY
 # set + DISPLAY EMPTY (not just unset). With DISPLAY="" GLFW's X11 connect fails and
 # auto-detect falls through to Wayland; merely leaving DISPLAY unset makes GLFW grab
 # X11 :0 (an X server that may not be the desktop you see). Override as needed.

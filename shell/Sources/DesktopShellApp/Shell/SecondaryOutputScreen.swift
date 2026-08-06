@@ -260,7 +260,7 @@ struct SecondaryOutputScreen {
             height: DesktopTheme.kStatusBarHeight,
             child: _statusBar()))
 
-        // This tree has no FluentApp above it, so establish text direction
+        // This tree has no MacosApp above it, so establish text direction
         // ourselves — Stack/Row alignment resolution traps without it.
         return Directionality(
             textDirection: .ltr,

@@ -7,7 +7,8 @@
 // Wayland window — taps route back via `swiftui_compat_dispatch` into the app's
 // real SwiftUI action closures (@State mutates → re-walk → update → rebuild).
 //
-// The engine bootstrap mirrors apps/BlueScreenApp's Linux windowed path.
+// The engine bootstrap is the GLFW + embedder windowed path: create a GLFW
+// window, hand its GL context to the embedder, drive frames from its loop.
 
 import Foundation
 import Glibc
@@ -654,7 +655,7 @@ public func swiftui_compat_update(_ jsonPtr: UnsafePointer<CChar>) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// MARK: - GLFW + embedder engine boot (mirrors BlueScreenApp's Linux path)
+// MARK: - GLFW + embedder engine boot
 // ════════════════════════════════════════════════════════════════════════════
 
 final class AppState: @unchecked Sendable {

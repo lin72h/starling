@@ -34,10 +34,141 @@
 #include <sys/shm.h>
 #include <sys/mman.h>
 #include <map>
+#include <dirent.h>
 extern "C" {
 #include <X11/xshmfence.h>
 #include <drm/drm_fourcc.h>
 #include <gbm.h>
+}
+
+/* ========================================================================== */
+/* DRI3 render node selection                                                  */
+/* ========================================================================== */
+
+/* The render node we hand to DRI3 clients MUST be the GPU the compositor
+ * itself renders on. It used to be hardcoded to renderD128 — "the first
+ * render node", which is the right answer only on a single-GPU box. On a
+ * switchable-graphics laptop it is whichever card enumerated first, and that
+ * can be the one nobody drives the display with: on the 14ARP8 dev box
+ * renderD128 is the NVIDIA card (GL there is zink-on-NVK) while the AMD iGPU
+ * drives the panel and runs the compositor.
+ *
+ * Getting this wrong does NOT fail visibly on the client side. The client
+ * renders perfectly happily on the wrong GPU, allocates its buffers there,
+ * and hands them over through DRI3 — and every eglCreateImageKHR in the
+ * compositor then fails with EGL_BAD_ALLOC, because those buffers belong to
+ * a device its EGL display knows nothing about. The window maps, presents
+ * frames forever, and composites as NOTHING. That reads as "this app doesn't
+ * render" rather than "the server handed it the wrong GPU". Zoom lost a day
+ * to exactly this. (The VM harness hit the same trap pointing virgl at
+ * nouveau — see test/vm-harness/launch-vm-2604.sh.)
+ *
+ * Resolution order:
+ *   1. STARLING_X11_RENDER_NODE — explicit override, wins outright.
+ *   2. The render node of FLUTTER_DRM_DEVICE, i.e. the card the compositor
+ *      was told to scan out on. Same PCI device => imports work. This is the
+ *      answer in a real session, where the session launcher always sets it.
+ *   3. First render node whose driver is a display-capable one we prefer
+ *      (amdgpu/i915/xe/radeon) over anything else — matches pick_rendernode()
+ *      in the VM harness.
+ *   4. renderD128, the historical guess.
+ */
+static std::string sysfs_driver_of(const char* render_node_name) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/device/uevent", render_node_name);
+    FILE* f = fopen(path, "r");
+    if (!f) return "";
+    char line[256];
+    std::string drv;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "DRIVER=", 7) == 0) {
+            drv = line + 7;
+            while (!drv.empty() && (drv.back() == '\n' || drv.back() == '\r')) drv.pop_back();
+            break;
+        }
+    }
+    fclose(f);
+    return drv;
+}
+
+/* The render node that sits on the same DRM device as `card_path`
+ * (/dev/dri/cardN) — /sys/class/drm/cardN/device/drm/ lists every node the
+ * device exposes, so the renderD* sibling there is by construction the same
+ * GPU. */
+static std::string render_node_for_card(const char* card_path) {
+    const char* base = strrchr(card_path, '/');
+    base = base ? base + 1 : card_path;
+    char dir_path[256];
+    snprintf(dir_path, sizeof(dir_path), "/sys/class/drm/%s/device/drm", base);
+    DIR* d = opendir(dir_path);
+    if (!d) return "";
+    std::string found;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (strncmp(e->d_name, "renderD", 7) == 0) {
+            found = std::string("/dev/dri/") + e->d_name;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Resolved once — every DRI3Open must hand out the SAME device, or clients
+ * disagree with each other about which GPU the pixmaps live on. */
+static const char* dri3_render_node_path() {
+    static std::string cached;
+    static bool resolved = false;
+    if (resolved) return cached.c_str();
+    resolved = true;
+
+    if (const char* env = getenv("STARLING_X11_RENDER_NODE")) {
+        if (env[0] != '\0') {
+            cached = env;
+            fprintf(stderr, "[X11Server] render node %s (STARLING_X11_RENDER_NODE)\n",
+                    cached.c_str());
+            return cached.c_str();
+        }
+    }
+
+    if (const char* card = getenv("FLUTTER_DRM_DEVICE")) {
+        if (card[0] != '\0') {
+            std::string node = render_node_for_card(card);
+            if (!node.empty()) {
+                cached = node;
+                fprintf(stderr, "[X11Server] render node %s (compositor's %s)\n",
+                        cached.c_str(), card);
+                return cached.c_str();
+            }
+            fprintf(stderr, "[X11Server] no render node for %s — falling back\n", card);
+        }
+    }
+
+    std::string fallback;
+    DIR* d = opendir("/dev/dri");
+    if (d) {
+        std::vector<std::string> nodes;
+        struct dirent* e;
+        while ((e = readdir(d)) != nullptr) {
+            if (strncmp(e->d_name, "renderD", 7) == 0) nodes.push_back(e->d_name);
+        }
+        closedir(d);
+        std::sort(nodes.begin(), nodes.end());
+        for (const auto& n : nodes) {
+            std::string drv = sysfs_driver_of(n.c_str());
+            if (drv == "amdgpu" || drv == "i915" || drv == "xe" || drv == "radeon") {
+                cached = "/dev/dri/" + n;
+                fprintf(stderr, "[X11Server] render node %s (driver %s)\n",
+                        cached.c_str(), drv.c_str());
+                return cached.c_str();
+            }
+            if (fallback.empty()) fallback = "/dev/dri/" + n;
+        }
+    }
+
+    cached = fallback.empty() ? "/dev/dri/renderD128" : fallback;
+    fprintf(stderr, "[X11Server] render node %s (fallback)\n", cached.c_str());
+    return cached.c_str();
 }
 
 /* ========================================================================== */
@@ -297,6 +428,7 @@ struct X11Extension {
 
 struct X11Client {
     int      fd;
+    pid_t    pid;            /* peer credentials, captured at accept */
     int      authenticated;  /* completed handshake */
     uint8_t  buf[CLIENT_BUF_SIZE];
     int      buf_len;
@@ -635,7 +767,7 @@ X11Server* x11_server_create(int display_num, const X11ServerConfig* config) {
     server->epoll_fd = -1;
     server->listen_fd = -1;
     server->listen_fd2 = -1;
-    server->render_device_fd = open("/dev/dri/renderD128", O_RDWR);
+    server->render_device_fd = open(dri3_render_node_path(), O_RDWR);
     server->sync_counter = 0;
     server->sync_waiting = 0;
     server->resize_pending = 0;
@@ -1163,7 +1295,21 @@ void x11_server_dispatch(X11Server* server) {
         std::memset(client, 0, sizeof(*client));
         client->fd = client_fd;
         client->pending_fd_count = 0;
-        fprintf(stderr, "[X11Server] Client connected (fd=%d)\n", client_fd);
+        /* Peer credentials, captured once at accept: this is the only
+         * trustworthy way to learn who is on the other end. _NET_WM_PID is a
+         * property the client sets voluntarily — Zoom's xcb windows carry no
+         * app_id either, and we are not going to trust a second optional
+         * property to decide what to signal. Needed so the dock's Quit can
+         * actually terminate an app rather than just forgetting its window. */
+        struct ucred cred;
+        socklen_t cred_len = sizeof(cred);
+        if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+            client->pid = cred.pid;
+        } else {
+            client->pid = 0;
+        }
+        fprintf(stderr, "[X11Server] Client connected (fd=%d pid=%d)\n",
+                client_fd, client->pid);
     }
     }
 
@@ -2744,10 +2890,11 @@ static void handle_dri3(X11Server* server, int client_idx, uint8_t minor,
         break;
     }
     case 1: {
-        fprintf(stderr, "[X11Server] DRI3Open\n");
-        int gpu_fd = open("/dev/dri/renderD128", O_RDWR);
+        const char* node = dri3_render_node_path();
+        fprintf(stderr, "[X11Server] DRI3Open -> %s\n", node);
+        int gpu_fd = open(node, O_RDWR);
         if (gpu_fd < 0) {
-            fprintf(stderr, "[X11Server] Failed to open renderD128: %s\n", strerror(errno));
+            fprintf(stderr, "[X11Server] Failed to open %s: %s\n", node, strerror(errno));
             uint8_t err[32] = {};
             err[0] = 0; err[1] = 4;
             *reinterpret_cast<uint16_t*>(err + 2) = seq;
@@ -4756,6 +4903,48 @@ void x11_server_pointer_motion(X11Server* server, int x, int y) {
     event[30] = 1; /* same_screen */
     send_to_client(server, server->focus_client_idx, event, 32);
     send_xi2_device_event(server, win, 6, 0, x, y, server->button_state);
+}
+
+/* WM_DELETE_WINDOW — the ICCCM "please close" ClientMessage, the same thing a
+ * real WM sends when you click a title bar's X. Toolkits run their normal quit
+ * path on it. Advisory only: a client may ignore it or put up an "unsaved
+ * changes" dialog, so the caller must be prepared to escalate to a signal. */
+void x11_server_close_window(X11Server* server, uint32_t window_id) {
+    if (!server) return;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return;
+    int owner = static_cast<int>(win->owner_client);
+    if (owner < 0 || owner >= server->client_count) return;
+    if (server->clients[owner].fd < 0) return;
+
+    uint32_t wm_protocols = 0, wm_delete = 0;
+    for (auto& a : server->atoms) {
+        if (a.name == "WM_PROTOCOLS") wm_protocols = a.id;
+        else if (a.name == "WM_DELETE_WINDOW") wm_delete = a.id;
+    }
+    if (!wm_protocols || !wm_delete) return;
+
+    uint8_t cm[32] = {};
+    cm[0] = 33;  /* ClientMessage */
+    cm[1] = 32;  /* format */
+    *reinterpret_cast<uint16_t*>(cm + 2) = server->clients[owner].sequence;
+    *reinterpret_cast<uint32_t*>(cm + 4) = win->id;
+    *reinterpret_cast<uint32_t*>(cm + 8) = wm_protocols;
+    *reinterpret_cast<uint32_t*>(cm + 12) = wm_delete;
+    *reinterpret_cast<uint32_t*>(cm + 16) = x11_timestamp();
+    send_to_client(server, owner, cm, 32);
+}
+
+/* pid of the client that owns a window, from the credentials captured when it
+ * connected. 0 when the window is unknown or its client has gone. */
+pid_t x11_server_window_pid(X11Server* server, uint32_t window_id) {
+    if (!server) return 0;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return 0;
+    int owner = static_cast<int>(win->owner_client);
+    if (owner < 0 || owner >= server->client_count) return 0;
+    if (server->clients[owner].fd < 0) return 0;
+    return server->clients[owner].pid;
 }
 
 void x11_server_pointer_button(X11Server* server, uint32_t button,

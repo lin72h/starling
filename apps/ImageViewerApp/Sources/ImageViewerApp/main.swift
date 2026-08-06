@@ -30,7 +30,7 @@ class _ThemedViewerRootState: State<StatefulWidget> {
     }
 
     override func build(_ context: any BuildContext) -> Widget {
-        return FluentApp(
+        return MacosApp(
             themeMode: _dark ? .dark : .light,
             home: ImageViewerApp(),
             title: "Image Viewer"

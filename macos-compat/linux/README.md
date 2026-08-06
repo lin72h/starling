@@ -99,7 +99,7 @@ this box). All 86 binds resolve, 99 fixups apply, stable across ASLR slides.
 - **Display backend.** This box's GLFW can't init its Wayland backend (a runtime lib
   is missing), so it falls back to **X11 on `:0`** — which is the session Xwayland, i.e.
   the visible GNOME desktop, so the window does appear. `run.sh` sets `DISPLAY=` empty +
-  `WAYLAND_DISPLAY=wayland-0` (matching how BlueScreenApp is run); `COMPAT_GLFW_PLATFORM=
+  `WAYLAND_DISPLAY=wayland-0`; `COMPAT_GLFW_PLATFORM=
   wayland|x11|auto` overrides, falling back to auto if the forced backend won't init.
 - **Tap threading.** A real tap's `GestureDetector.onTap` runs on the engine's UI
   thread, not the main/platform thread. Calling `setState` there (via
