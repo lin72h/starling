@@ -1,11 +1,13 @@
 # Screensaver
 
-> **Status 2026-08-06: it is a real screensaver — it appears on its own.**
-> Ten minutes idle by default (Settings → Appearance → Screensaver, or
-> `~/.config/starling/screensaver`), Ctrl+Shift+S on demand, and any key,
-> click or pointer travel wakes it. Video playback holds it off through
-> `zwp_idle_inhibit_manager_v1`. What remains is the aerial decode path,
-> and the deferred items at the end.
+> **Status 2026-08-06: it is a real screensaver — it appears on its own,
+> verified on live hardware.** Ten minutes idle by default (Settings →
+> Appearance → Screensaver, or `~/.config/starling/screensaver`),
+> Ctrl+Shift+S on demand, and any key, click or pointer travel wakes it.
+> Video playback holds it off through `zwp_idle_inhibit_manager_v1`.
+> `sudo test/functional.sh` is green — 19 passed, 10 skipped, including
+> both screensaver checks. What remains is the aerial decode path and the
+> deferred items at the end.
 
 ## What exists
 
@@ -69,17 +71,36 @@ tens of megabytes — a poor thing to put on every install for a
 decoration. Download-on-demand in Settings stays available as a later
 option; the drop-in directory is the v1.
 
-### 4. A functional check ✓
+### 4. Functional checks ✓ — and they found a real bug
 
-`check_screensaver_idle` in `test/functional.py` waits out a real idle
-period with no input, asserts the saver arrived, wakes it with pointer
-travel, and then waits out a *second* period — the re-arm after a wake
-is the bug you only find on the second cycle. It asserts through a new
-unscoped broker op (`screensaver` → active / idle_seconds / inhibited),
-never against pixels, for the reason the suite's header already gives:
-a screenshot baseline over a compositor gets re-blessed until it tests
+Two, both green on live hardware. `check_screensaver_idle` waits out a
+real idle period with no input, asserts the saver arrived, wakes it with
+pointer travel, then waits out a *second* period — the re-arm after a
+wake is the bug you only find on the second cycle.
+`check_screensaver_inhibit` builds a tiny `zwp_idle_inhibit_manager_v1`
+client from `test/fixtures/idle-inhibit-client.c` (wayland-scanner + cc
+at run time; no checked-in binary to rot), holds an inhibitor across
+twice the idle period asserting the saver never appears, then **SIGKILLs
+it** — a client that dies never sends `destroy`, so the count is only
+right if a wl_resource destructor maintains it. Both assert through a
+new unscoped broker op (`screensaver` → active / idle_seconds /
+inhibited), never pixels, for the reason the suite's header gives: a
+screenshot baseline over a compositor gets re-blessed until it tests
 nothing. `functional.sh` starts the shell with
 `STARLING_SCREENSAVER_IDLE=15`.
+
+**What the live run caught.** The first version treated a live inhibitor
+as activity and re-armed a full period, which sounds right and isn't:
+the stamp is taken at the *check*, so if the client dies late in that
+period the remaining time is near zero. Measured on the dev box, the
+screensaver came up **13 seconds** after the inhibiting client died, on
+a 20-second timeout — scaled to the shipped 600s default that is the
+credits rolling and the desktop vanishing seconds later, half the time.
+`_checkIdle` now polls at `min(period, 30)` while inhibited so the
+release is noticed promptly, and starts a *fresh* full period on the
+check that finds the inhibitor gone. Re-measured: 25s, where 20s is the
+floor. No unit test would have found this; it needed a real client
+holding a real inhibitor and a clock.
 
 ### 5. Docs ✓
 
@@ -100,24 +121,6 @@ path is VAAPI decode straight into a dmabuf imported by
 side already stands up a VAAPI context (`[Recording] zero-copy VAAPI
 encoder ready`), so the plumbing precedent exists in-tree. Keep the pipe
 as the fallback (nouveau boxes: VAAPI init fails there today).
-
-### 6. Verify the whole thing on live hardware
-
-Everything above builds and passes `test/run.sh`, but the idle path has
-**not yet been watched on a real display** — the dev box had two shells
-up (a 16-hour packaged session plus a leftover dev shell), which is the
-exact configuration that burned a diagnostic run before, and neither was
-safe to kill unattended. Run:
-
-    sudo test/functional.sh --only check_screensaver_idle
-
-on a box with one shell, or drive it by hand with
-`STARLING_SCREENSAVER_IDLE=20 build/run-desktop.sh`. What to watch for
-that a unit test cannot see: that the idle timer isn't reset by the
-shell's own animation ticks (it shouldn't be — activity is stamped from
-pointer and key events only, never from frames), and that the saver's
-own ticker doesn't feed back into the activity stamp and keep itself
-alive forever.
 
 ### Later, deliberately not now
 

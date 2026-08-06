@@ -193,6 +193,22 @@ def proc_running(name: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def wayland_display() -> str:
+    """The socket name the RUNNING shell listens on.
+
+    Not always wayland-0: a shell that died uncleanly leaves a
+    wayland-0.lock behind and the next run takes wayland-1, so a client
+    that assumes wayland-0 talks to nothing. The newest socket in the
+    runtime dir is the current run's, which is what a client needs.
+    """
+    rt = os.path.dirname(broker_path())
+    socks = [p for p in glob.glob(os.path.join(rt, "wayland-*"))
+             if not p.endswith(".lock")]
+    if not socks:
+        raise Skip("no wayland socket in the session runtime dir")
+    return os.path.basename(max(socks, key=lambda p: os.stat(p).st_mtime))
+
+
 def session_home() -> str:
     """The session user's home — where the shell persists its config."""
     user = os.environ.get("SUDO_USER")
@@ -1061,6 +1077,96 @@ def check_screensaver_idle() -> None:
     drive("key esc")
     wait_for(lambda: not ask("screensaver")["active"], "the saver to clear")
     log("second cycle armed and fired")
+
+
+def _build_idle_inhibit_client(into: str) -> str:
+    """Compile the fixture idle-inhibit client, or Skip if we can't.
+
+    Built here rather than shipped as a binary: it needs the protocol
+    bindings generated from the system's own wayland-protocols XML, and a
+    checked-in a.out would rot against libwayland.
+    """
+    xml = "/usr/share/wayland-protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml"
+    src = REPO / "test/fixtures/idle-inhibit-client.c"
+    if not shutil.which("wayland-scanner") or not shutil.which("cc"):
+        raise Skip("needs wayland-scanner and a C compiler")
+    if not os.path.exists(xml) or not src.exists():
+        raise Skip("idle-inhibit protocol XML or fixture source missing")
+    hdr = os.path.join(into, "idle-inhibit-unstable-v1-client-protocol.h")
+    code = os.path.join(into, "idle-inhibit-unstable-v1-protocol.c")
+    out = os.path.join(into, "inhibit")
+    for args in (["wayland-scanner", "client-header", xml, hdr],
+                 ["wayland-scanner", "private-code", xml, code],
+                 ["cc", "-o", out, str(src), code, "-I", into, "-lwayland-client"]):
+        r = subprocess.run(args, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise Skip(f"could not build the inhibit client: {r.stderr.strip()[:200]}")
+    return out
+
+
+@check("screensaver: a client holding an idle inhibitor keeps it away")
+def check_screensaver_inhibit() -> None:
+    """Chrome playing a video must not be covered by the screensaver, and a
+    Chrome that CRASHES mid-video must not suppress it forever.
+
+    This half of the feature was dead code for a long time and nothing
+    noticed: the compositor implemented zwp_idle_inhibit_manager_v1, accepted
+    every inhibitor, and dropped it on the floor — under a comment explaining
+    that idle tracking didn't exist. It does now. That is exactly the failure
+    shape this suite exists for, so it gets a check rather than trust.
+
+    The SIGKILL at the end is the point of the second half: a client that
+    dies never sends zwp_idle_inhibitor_v1.destroy, so the count can only be
+    right if it is maintained by a wl_resource destructor.
+    """
+    idle = ask("screensaver")["idle_seconds"]
+    if idle <= 0 or idle > 60:
+        raise Skip(f"shell's idle timeout is {idle}s — needs the test value")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client_bin = _build_idle_inhibit_client(tmp)
+
+        # Wake anything currently up, so the assertion below is about the
+        # inhibitor and not about a saver that was already there.
+        if ask("screensaver")["active"]:
+            drive("move 400 400", "move 900 700")
+            wait_for(lambda: not ask("screensaver")["active"], "the saver to clear")
+
+        env = dict(os.environ)
+        env["XDG_RUNTIME_DIR"] = os.path.dirname(broker_path())
+        env["WAYLAND_DISPLAY"] = wayland_display()
+        proc = subprocess.Popen([client_bin], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True)
+        try:
+            wait_for(lambda: ask("screensaver")["inhibited"],
+                     "the compositor to count the client's inhibitor",
+                     timeout=15)
+            log("inhibitor counted")
+
+            # The assertion: well past the timeout, with no input at all.
+            deadline = time.time() + idle * 2 + 5
+            while time.time() < deadline:
+                assert not ask("screensaver")["active"], (
+                    "screensaver appeared while a client held an idle inhibitor")
+                time.sleep(2)
+            log(f"stayed away for {idle * 2 + 5}s of idle, as it should")
+        finally:
+            proc.kill()   # SIGKILL: no destroy request is ever sent
+            proc.wait()
+
+    wait_for(lambda: not ask("screensaver")["inhibited"],
+             "the inhibitor count to drop when the client DIED", timeout=15)
+    log("count released on client death, not on a destroy request")
+
+    # And the saver comes back — a released inhibitor must not leave the idle
+    # cycle stalled, and the user gets a fresh period rather than the tail of
+    # the one that was running when playback started.
+    wait_for(lambda: ask("screensaver")["active"],
+             "the screensaver to resume once nothing inhibits it",
+             timeout=idle * 3 + 20)
+    drive("move 400 400", "move 900 700")
+    wait_for(lambda: not ask("screensaver")["active"], "the saver to clear")
 
 
 @check("tiling: the Settings toggle retiles a live desktop and nothing dies")

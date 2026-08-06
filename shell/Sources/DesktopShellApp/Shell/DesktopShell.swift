@@ -530,6 +530,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     private var _lastInputActivity = Date()
     /// Generation token for the re-arming idle check (see `_armIdleTimer`).
     private var _idleTimerToken = 0
+    /// Whether the last idle check found a client holding the screensaver
+    /// off, so the check that finds the inhibitor gone can start a fresh
+    /// full period rather than resuming a nearly-expired one.
+    private var _idleWasInhibited = false
 
     /// Whether some client is currently holding the screensaver off. Read by
     /// the broker's `screensaver` op so the functional tier can tell "the
@@ -773,11 +777,25 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             return
         }
         // A client is playing video (or otherwise asked to stay awake).
-        // Count it as activity rather than merely deferring the check: when
-        // the film ends the user should get a full idle period, not a
-        // screensaver the instant the inhibitor is dropped.
         #if os(Linux)
         if waylandIntegration?.idleInhibited == true {
+            _idleWasInhibited = true
+            _noteUserActivity()
+            // Poll sooner than a full period so the release is noticed
+            // promptly — otherwise the film can end most of a period before
+            // anything here looks again.
+            _armIdleTimer(after: min(_screensaverIdleSeconds, 30))
+            return
+        }
+        if _idleWasInhibited {
+            // The inhibitor has just gone. Start a FULL period from now
+            // rather than resuming whatever was left of the one that was
+            // running when playback started: measured on the dev box, the
+            // naive version put the screensaver up 13s after a 20s-timeout
+            // client died, because the last stamp was already 7s old. What
+            // the user experiences is the credits rolling and the desktop
+            // vanishing seconds later.
+            _idleWasInhibited = false
             _noteUserActivity()
             _armIdleTimer(after: _screensaverIdleSeconds)
             return
