@@ -91,6 +91,17 @@ static LRESULT CALLBACK host_wnd_proc(HWND hwnd,
       }
       return 0;
 
+    case WM_SETFOCUS:
+      // Hand keyboard focus down to the engine's view. Activating the frame
+      // focuses the frame, and the view is a child window — without this the
+      // key messages are delivered to a window the embedder is not listening
+      // on, so the app renders and takes mouse input but silently ignores
+      // every keystroke. Flutter's own Win32 runner does exactly this.
+      if (host != NULL && host->child != NULL) {
+        SetFocus(host->child);
+      }
+      return 0;
+
     case WM_FONTCHANGE:
       if (host != NULL && host->controller != NULL) {
         FlutterDesktopEngineReloadSystemFonts(
