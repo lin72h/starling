@@ -26,7 +26,10 @@ through `wayland_clipboard_set()`, which broadcasts to both). Verified live:
 
 **But a `wl_data_device` client cannot read a selection that predates it.**
 This is a live, shipping bug, and it is the reason to doubt "Chrome↔GIMP works
-now". Proven with a focused GTK3 window (`WindowState.MAXIMIZED|FOCUSED`):
+now". Proven with a mapped, activated GTK3 window (GDK reported
+`WindowState.MAXIMIZED|FOCUSED` — which, as Stage 0 explains, is *not* evidence
+of keyboard focus here, though it took a round of wrong implementation to
+learn):
 
 | order of events | what the GTK client reads |
 | --- | --- |
@@ -44,9 +47,9 @@ launch after copying a URL — sees an empty clipboard until someone copies agai
 GDM session, `wl-copy` before Chrome was launched, then Ctrl+V in Chrome's
 address bar, pastes the text. Before the fix the same sequence pasted nothing.
 
-The comment at `wayland_data_device.c:76` claims the helper is used "on every
-set + when a device binds". It is called from exactly one place, the broadcast
-loop. The comment describes an intention that was never wired.
+The comment at `wayland_data_device.c:76` used to claim the helper was used "on
+every set + when a device binds", while it was called from exactly one place,
+the broadcast loop — an intention that was never wired. Corrected in Stage 0.
 
 **Primary selection does not work at all.** The earlier draft said all three
 protocols share the selection and primary needed only later wiring. In fact
