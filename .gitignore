@@ -4,6 +4,7 @@
 /engine
 .build/
 .build-starling/
+.build-gtk/
 .DS_Store
 .stage/
 /build/tools/drm_screenshot

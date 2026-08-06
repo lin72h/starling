@@ -91,8 +91,14 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
 
     /// Clipboard shared across terminal instances (and, later, the shell).
     private var _clipboardPath: String {
-        (ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp")
+        #if os(Windows)
+        // No XDG_RUNTIME_DIR; the per-user temp directory is the equivalent
+        // scope — per-user and cleaned by the system, not world-writable /tmp.
+        return NSTemporaryDirectory() + "starling-clipboard"
+        #else
+        return (ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp")
             + "/starling-clipboard"
+        #endif
     }
 
     override func initState() {

@@ -7,8 +7,22 @@ import FlutterSwiftBridge
 /// Maps framework key events to the byte sequences a terminal expects.
 enum TerminalInput {
 
-    // X11 keysyms as delivered in KeyData.logical by the DRM embedder / the
-    // shell's DMA-BUF key forwarding.
+    // Two numbering schemes reach us, and both have to be recognised.
+    //
+    // The DRM embedder and the shell's DMA-BUF key forwarding put **X11
+    // keysyms** in KeyData.logical (Keysym below). The engine's own embedders
+    // — the Win32 one, and the GTK one — put **Flutter logical key ids**
+    // there instead (FlutterKey below), which are unrelated values in a
+    // dedicated plane above 2^32.
+    //
+    // Printable characters were unaffected either way, because they fall
+    // through to keyData.character. Special keys were not: on Windows every
+    // one of them, Enter included, silently produced nothing — you could type
+    // at a shell prompt but never run anything.
+    //
+    // The two ranges cannot collide (keysyms are 16-bit here, Flutter ids are
+    // ≥ 0x1_0000_0000), so one switch can serve both and the same binary works
+    // under the Starling shell and on Windows.
     private enum Keysym {
         static let backspace: Int64 = 0xFF08
         static let tab: Int64 = 0xFF09
@@ -28,6 +42,29 @@ enum TerminalInput {
         static let f1: Int64 = 0xFFBE  // F1..F12 are contiguous
     }
 
+    /// Flutter logical key ids, as the engine's Win32 and GTK embedders
+    /// deliver them. Enter was confirmed on a Windows run (the embedder
+    /// reported logical=0x1_0000_000D for physical=0x7_0028); the rest are
+    /// Flutter's published logical key table, which assigns the same plane.
+    private enum FlutterKey {
+        static let backspace: Int64 = 0x1_0000_0008
+        static let tab: Int64 = 0x1_0000_0009
+        static let enter: Int64 = 0x1_0000_000D
+        static let escape: Int64 = 0x1_0000_001B
+        static let delete: Int64 = 0x1_0000_007F
+        static let arrowDown: Int64 = 0x1_0000_0301
+        static let arrowLeft: Int64 = 0x1_0000_0302
+        static let arrowRight: Int64 = 0x1_0000_0303
+        static let arrowUp: Int64 = 0x1_0000_0304
+        static let end: Int64 = 0x1_0000_0305
+        static let home: Int64 = 0x1_0000_0306
+        static let pageDown: Int64 = 0x1_0000_0307
+        static let pageUp: Int64 = 0x1_0000_0308
+        static let insert: Int64 = 0x1_0000_0407
+        static let numpadEnter: Int64 = 0x2_0000_020D
+        static let f1: Int64 = 0x1_0000_0801  // F1..F12 are contiguous
+    }
+
     /// Returns the bytes to write to the PTY for a key press, or nil if the
     /// key is not terminal input (e.g. a bare modifier).
     ///
@@ -39,31 +76,36 @@ enum TerminalInput {
         // Special keys first — they take priority over any character the
         // keymap attached to them.
         switch logical {
-        case Keysym.enter, Keysym.kpEnter:
+        case Keysym.enter, Keysym.kpEnter,
+             FlutterKey.enter, FlutterKey.numpadEnter:
             return [0x0D]
-        case Keysym.backspace:
+        case Keysym.backspace, FlutterKey.backspace:
             return [0x7F]
-        case Keysym.tab:
+        case Keysym.tab, FlutterKey.tab:
             return [0x09]
-        case Keysym.escape:
+        case Keysym.escape, FlutterKey.escape:
             return [0x1B]
-        case Keysym.up:    return _cursor("A", appCursor)
-        case Keysym.down:  return _cursor("B", appCursor)
-        case Keysym.right: return _cursor("C", appCursor)
-        case Keysym.left:  return _cursor("D", appCursor)
-        case Keysym.home:  return _cursor("H", appCursor)
-        case Keysym.end:   return _cursor("F", appCursor)
-        case Keysym.insert:   return Array("\u{1B}[2~".utf8)
-        case Keysym.delete:   return Array("\u{1B}[3~".utf8)
-        case Keysym.pageUp:   return Array("\u{1B}[5~".utf8)
-        case Keysym.pageDown: return Array("\u{1B}[6~".utf8)
+        case Keysym.up, FlutterKey.arrowUp:       return _cursor("A", appCursor)
+        case Keysym.down, FlutterKey.arrowDown:   return _cursor("B", appCursor)
+        case Keysym.right, FlutterKey.arrowRight: return _cursor("C", appCursor)
+        case Keysym.left, FlutterKey.arrowLeft:   return _cursor("D", appCursor)
+        case Keysym.home, FlutterKey.home:        return _cursor("H", appCursor)
+        case Keysym.end, FlutterKey.end:          return _cursor("F", appCursor)
+        case Keysym.insert, FlutterKey.insert:     return Array("\u{1B}[2~".utf8)
+        case Keysym.delete, FlutterKey.delete:     return Array("\u{1B}[3~".utf8)
+        case Keysym.pageUp, FlutterKey.pageUp:     return Array("\u{1B}[5~".utf8)
+        case Keysym.pageDown, FlutterKey.pageDown: return Array("\u{1B}[6~".utf8)
         default:
             break
         }
 
-        // Function keys F1-F12
-        if logical >= Keysym.f1 && logical < Keysym.f1 + 12 {
-            let n = Int(logical - Keysym.f1)  // 0-based
+        // Function keys F1-F12, in whichever numbering arrived.
+        let fnBase: Int64? =
+            (logical >= Keysym.f1 && logical < Keysym.f1 + 12) ? Keysym.f1
+            : (logical >= FlutterKey.f1 && logical < FlutterKey.f1 + 12) ? FlutterKey.f1
+            : nil
+        if let fnBase {
+            let n = Int(logical - fnBase)  // 0-based
             switch n {
             case 0: return Array("\u{1B}OP".utf8)
             case 1: return Array("\u{1B}OQ".utf8)

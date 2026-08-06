@@ -7,6 +7,10 @@ import Foundation
 import Glibc
 #endif
 
+// The POSIX implementation. PtyWindows.swift provides the same type, with the
+// same surface, over ConPTY — Windows has no forkpty and no SIGWINCH.
+#if !os(Windows)
+
 /// A pseudo-terminal running a shell process.
 ///
 /// Opens the PTY master, forks, and execs the shell on the slave side with
@@ -180,3 +184,5 @@ final class Pty: @unchecked Sendable {
         close(masterFd)
     }
 }
+
+#endif  // !os(Windows)

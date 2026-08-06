@@ -22,7 +22,7 @@ func env(_ key: String, default fallback: String) -> String {
 // back to their own RUNPATH.
 let appPackageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 
-#if os(Linux)
+#if os(Linux) || os(Windows)
 let engineOutDir = env("STARLING_ENGINE_OUT",
                        default: appPackageDir + "/../../engine/src/out/host_debug")
 #else
@@ -45,13 +45,7 @@ let platformConstraints: [SupportedPlatform] = [.macOS(.v14)]
 let platformConstraints: [SupportedPlatform] = []
 #endif
 
-let package = Package(
-    name: "TerminalApp",
-    platforms: platformConstraints.isEmpty ? nil : platformConstraints,
-    dependencies: [
-        .package(name: "FlutterSwift", path: "../../sdk"),
-    ],
-    targets: [
+var targets: [Target] = [
         {
             #if os(macOS)
             return .executableTarget(
@@ -76,6 +70,35 @@ let package = Package(
                         "-F\(engineOutDir)",
                         "-framework", "FlutterMacOS",
                         "-Xlinker", "-rpath", "-Xlinker", "\(engineOutDir)",
+                    ]),
+                ]
+            )
+            #elseif os(Windows)
+            // Windows links the engine's import library rather than a shared
+            // FlutterShared: there is no such product there, and no rpath —
+            // the loader finds flutter_engine.dll beside the .exe. FlutterWin32
+            // brings the Win32 embedder host in with it.
+            return .executableTarget(
+                name: "TerminalApp",
+                dependencies: [
+                    .product(name: "Flutter", package: "FlutterSwift"),
+                    .product(name: "FlutterSwiftBridge", package: "FlutterSwift"),
+                    .product(name: "SwiftRuntime", package: "FlutterSwift"),
+                    .product(name: "CupertinoIcons", package: "FlutterSwift"),
+                    .product(name: "FlutterWin32", package: "FlutterSwift"),
+                    "CStarlingConPTY",
+                ],
+                resources: [
+                    .copy("Resources/RobotoMono-Regular.ttf"),
+                    .copy("Resources/RobotoMono-Bold.ttf"),
+                ],
+                swiftSettings: [
+                    .interoperabilityMode(.Cxx),
+                ],
+                linkerSettings: [
+                    .unsafeFlags([
+                        "-L\(engineOutDir)",
+                        "-lflutter_engine.dll",
                     ]),
                 ]
             )
@@ -104,7 +127,24 @@ let package = Package(
                 ]
             )
             #endif
-        }()
+    }()
+]
+
+#if os(Windows)
+// The ConPTY shim. C rather than Swift-over-WinSDK because the pseudoconsole
+// process attribute is a computed macro Swift cannot import; see the header.
+// <windows.h> stays inside this target, away from the C++-interop importer.
+targets += [
+    .target(name: "CStarlingConPTY"),
+]
+#endif
+
+let package = Package(
+    name: "TerminalApp",
+    platforms: platformConstraints.isEmpty ? nil : platformConstraints,
+    dependencies: [
+        .package(name: "FlutterSwift", path: "../../sdk"),
     ],
+    targets: targets,
     cxxLanguageStandard: .cxx20
 )
