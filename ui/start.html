@@ -239,13 +239,19 @@
 
   <div class="hero">
     <div class="wrap hero-inner">
-      <span class="eyebrow"><span class="dot"></span> Get started · Linux x86_64</span>
+      <span class="eyebrow"><span class="dot"></span> Get started · Linux &amp; Windows x86_64</span>
       <h1>From nothing to a running app in <span class="accent">about ten minutes</span></h1>
       <p class="lede">
         One download, four files, one <code>swift build</code>. You do not need an
         engine checkout, depot_tools, ninja, or 40 GB of disk — the SDK bundle
         carries the Flutter engine binaries with it. Every command below was run
         start to finish on a clean machine before this page was written.
+      </p>
+      <p class="lede" style="margin-top:14px">
+        The walkthrough is written for <strong>Linux</strong>. Windows takes the same
+        four steps with a different bundle and host — each step carries a
+        <strong>On Windows</strong> box with the difference, and they are the only
+        differences.
       </p>
     </div>
   </div>
@@ -269,6 +275,18 @@
                  libgbm-dev libxkbcommon-dev libepoxy-dev</pre>
         </li>
       </ul>
+      <div class="note">
+        <p><strong>On Windows</strong> you need instead:</p>
+        <ul style="margin-bottom:0">
+          <li><strong>Windows 10 or 11, x86_64.</strong> Tested on Windows 11.</li>
+          <li><strong>Swift 6.2 for Windows</strong> from
+            <a href="https://swift.org/install">swift.org</a>, and the
+            <strong>Visual Studio 2022</strong> build tools it depends on
+            (tested with 17.14 and the 10.0.22621 Windows SDK).</li>
+          <li>No system libraries to install — the engine's Win32 embedder
+            uses what ships with Windows.</li>
+        </ul>
+      </div>
     </div>
   </section>
 
@@ -280,7 +298,7 @@
         The bundle is the framework plus the engine binaries it links against, in one
         tree. Unpack it anywhere — <code>/opt</code> is a good default.
       </p>
-<pre>curl -LO https://github.com/starling-build/starling/releases/download/sdk-v0.1.0/starling-sdk-linux-x86_64.tar.gz
+<pre>curl -LO https://github.com/starling-build/starling/releases/download/sdk-v0.2.0/starling-sdk-linux-x86_64.tar.gz
 sudo tar -xzf starling-sdk-linux-x86_64.tar.gz -C /opt/</pre>
       <p style="margin-top:20px">That gives you:</p>
 <pre>/opt/starling-sdk-linux-x86_64/
@@ -294,6 +312,17 @@ sudo tar -xzf starling-sdk-linux-x86_64.tar.gz -C /opt/</pre>
           <strong>Verify the download</strong> if you like — the release carries a
           <code>SHA256SUMS</code> file next to the tarball:<br>
           <code>curl -sL …/SHA256SUMS | sha256sum -c -</code>
+        </p>
+      </div>
+      <div class="note">
+        <p><strong>On Windows</strong>, take the zip and unpack it to the drive root:</p>
+<pre>curl.exe -LO https://github.com/starling-build/starling/releases/download/sdk-v0.2.0/starling-sdk-windows-x86_64.zip
+Expand-Archive starling-sdk-windows-x86_64.zip -DestinationPath C:\</pre>
+        <p style="margin-top:14px">
+          Same tree, with <code>engine/lib/</code> holding
+          <code>flutter_engine.dll</code> and <code>flutter_windows.dll</code> — each
+          beside its <code>.lib</code> import library, because on Windows the link step
+          needs the import library and the run needs the DLL.
         </p>
       </div>
     </div>
@@ -347,6 +376,22 @@ sudo tar -xzf starling-sdk-linux-x86_64.tar.gz -C /opt/</pre>
           <code>package: "starling-sdk-linux-x86_64"</code> — not
           <code>"starling-sdk"</code>. Rename the folder and you rename the package.
         </p>
+      </div>
+      <div class="note">
+        <p><strong>On Windows</strong>, three changes to that manifest:</p>
+        <ul style="margin-bottom:0">
+          <li>the path and package name become
+            <code>"C:/starling-sdk-windows-x86_64"</code> and
+            <code>"starling-sdk-windows-x86_64"</code> — forward slashes are fine, and
+            the same directory-name rule applies;</li>
+          <li><code>FlutterWin32</code> replaces <code>FlutterGTK</code>. It is the
+            engine's own Win32 embedder, so windowing, input, IME and accessibility
+            come from the same code path real Flutter Windows apps use;</li>
+          <li><strong>drop the <code>.unsafeFlags</code> line entirely.</strong> Those
+            two <code>-Xcc</code> flags work around an Ubuntu 26.04 glibc clash and
+            mean nothing on Windows. <code>.interoperabilityMode(.Cxx)</code> is still
+            required.</li>
+        </ul>
       </div>
     </div>
   </section>
@@ -415,6 +460,17 @@ host.run()</pre>
           is <code>EdgeInsets(horizontal:vertical:)</code> here.
         </p>
       </div>
+      <div class="note">
+        <p>
+          <strong>On Windows</strong>, two lines change — the import and the host. The
+          widget code above is identical, character for character:
+        </p>
+<pre><span class="k">import</span> FlutterWin32              <span class="c">// instead of FlutterGTK</span>
+
+<span class="k">guard let</span> host = Win32Host(width: 720, height: 420, title: <span class="s">"Hello Starling"</span>) <span class="k">else</span> {
+    fatalError(<span class="s">"could not create the window"</span>)
+}</pre>
+      </div>
     </div>
   </section>
 
@@ -456,6 +512,41 @@ ln -sf /opt/starling-sdk-linux-x86_64/engine/share/flutter_assets  .build/releas
 cp .build/release/HelloStarling                          dist/
 cp /opt/starling-sdk-linux-x86_64/engine/lib/*.so        dist/
 cp -r /opt/starling-sdk-linux-x86_64/engine/share/*      dist/data/</pre>
+
+      <div class="note">
+        <p>
+          <strong>On Windows</strong>, use the bundle's build script for the
+          <em>first</em> build:
+        </p>
+<pre>C:\starling-sdk-windows-x86_64\tools\build-windows.ps1 -PackagePath . -Configuration release</pre>
+        <p style="margin-top:14px">
+          A cold Clang module cache makes the first C++-interop compilation fail inside
+          MSVC's own <code>&lt;xmemory&gt;</code> with
+          <code>no matching function for call to 'construct_at'</code>. That is a
+          toolchain bug, not your package: the failing run still writes a usable module,
+          so the same command run again gets further, and it needs one pass per interop
+          configuration. The script loops only while that exact signature appears, so a
+          real build error still fails immediately. Once the cache is warm, plain
+          <code>swift build</code> is fine.
+        </p>
+        <p style="margin-top:14px">
+          Windows has no rpath, so the DLLs must sit beside the executable — this is the
+          staging step, and the equivalent of the <code>data/</code> symlinks above:
+        </p>
+<pre>copy C:\starling-sdk-windows-x86_64\engine\lib\*.dll        .build\release\
+mkdir .build\release\data
+copy C:\starling-sdk-windows-x86_64\engine\share\icudtl.dat .build\release\data\
+xcopy /E /I C:\starling-sdk-windows-x86_64\engine\share\flutter_assets .build\release\data\flutter_assets
+
+.build\release\HelloStarling.exe</pre>
+        <p style="margin-top:14px">
+          To ship it, copy the same files next to your binary <em>plus the Swift runtime
+          DLLs</em> from
+          <code>%LOCALAPPDATA%\Programs\Swift\Runtimes\&lt;version&gt;\usr\bin</code>.
+          The bundle deliberately does not carry those — they belong to your toolchain,
+          exactly as <code>libswiftCore</code> does on Linux.
+        </p>
+      </div>
     </div>
   </section>
 
@@ -505,6 +596,26 @@ cp -r /opt/starling-sdk-linux-x86_64/engine/share/*      dist/data/</pre>
         Wayland session where GTK picks the wrong backend,
         <code>GDK_BACKEND=x11</code> is a useful fallback.
       </p>
+
+      <h3><code>xmemory: no matching function for call to 'construct_at'</code> — Windows</h3>
+      <p>
+        The cold module-cache bug described in step four. It is a Swift/MSVC toolchain
+        bug rather than anything your package did — nothing in the tree includes the
+        headers it fails in. Run the build again, or use
+        <code>tools\build-windows.ps1</code>, which does that for you and stops as soon
+        as the error is a real one.
+      </p>
+
+      <h3><code>0xC0000135</code> / the app exits immediately — Windows</h3>
+      <p>
+        <code>STATUS_DLL_NOT_FOUND</code>, raised before <code>main()</code>, so there is
+        no message — only an exit code. Something the executable links is not beside it
+        and not on <code>PATH</code>: either the two engine DLLs, or the Swift runtime
+        DLLs on a machine without the toolchain. Copy both next to the
+        <code>.exe</code>. The same code from <code>swift build</code> itself means
+        <code>PATH</code> is missing the toolchain's
+        <code>Runtimes\&lt;version&gt;\usr\bin</code>.
+      </p>
     </div>
   </section>
 
@@ -519,6 +630,11 @@ cp -r /opt/starling-sdk-linux-x86_64/engine/share/*      dist/data/</pre>
       </p>
 <pre>cd /opt/starling-sdk-linux-x86_64
 swift run -c release CounterApp</pre>
+      <p style="margin-top:14px">
+        On Windows: <code>cd C:\starling-sdk-windows-x86_64</code>, then
+        <code>swift run -c release CounterApp</code>. The examples find the bundle's
+        <code>engine/share</code> themselves, so they need no staging.
+      </p>
       <p style="margin-top:22px">
         Because the framework is a port rather than a reimagining, <strong>Flutter's own
         documentation applies</strong> — widget catalogue, layout rules, the
@@ -538,7 +654,7 @@ swift run -c release CounterApp</pre>
         issue.
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/starling-build/starling/releases/tag/sdk-v0.1.0">Download the SDK</a>
+        <a class="btn btn-primary" href="https://github.com/starling-build/starling/releases/tag/sdk-v0.2.0">Download the SDK</a>
         <a class="btn btn-ghost" href="sdk.html">Why it exists</a>
       </div>
     </div>
