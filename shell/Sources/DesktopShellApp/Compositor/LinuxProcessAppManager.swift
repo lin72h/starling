@@ -166,6 +166,18 @@ class LinuxProcessAppManager {
 
     private let pendingWallpaperRequests = AtomicBox<[Int]>([])
 
+    /// Fired on the platform thread when a child (SettingsApp's Screensaver
+    /// picker) asks to change the idle timeout. Seconds; 0 = never.
+    var onScreensaverChangeRequested: ((Int) -> Void)?
+
+    /// The shell's current screensaver idle timeout in seconds, pushed to
+    /// children at connect so the Settings picker reflects reality (kept in
+    /// sync by _setScreensaverIdle).
+    nonisolated(unsafe) var currentScreensaverIdle: Int =
+        Int(_DesktopShellState.kDefaultIdleSeconds)
+
+    private let pendingScreensaverRequests = AtomicBox<[Int]>([])
+
     /// Pending caret reports from child processes (textureId, x, y, width,
     /// height in the child's logical content coords, visible).
     private let pendingCaretUpdates =
@@ -237,6 +249,7 @@ class LinuxProcessAppManager {
                 sendTheme(textureId: texId, dark: shellTheme.isDark)
                 sendLayout(textureId: texId, tiling: currentLayoutIsTiling)
                 sendWallpaper(textureId: texId, preset: currentWallpaper)
+                sendScreensaver(textureId: texId, seconds: currentScreensaverIdle)
 
                 // Import DMA-BUF as EGLImage → GL texture (zero-copy)
                 textureRegistry.importDmaBuf(
@@ -334,6 +347,13 @@ class LinuxProcessAppManager {
         if !wallpaperRequests.isEmpty {
             if let lastPreset = wallpaperRequests.last {
                 onWallpaperChangeRequested?(lastPreset)
+            }
+        }
+
+        let screensaverRequests = pendingScreensaverRequests.take([])
+        if !screensaverRequests.isEmpty {
+            if let lastIdle = screensaverRequests.last {
+                onScreensaverChangeRequested?(lastIdle)
             }
         }
 
@@ -499,6 +519,7 @@ class LinuxProcessAppManager {
         let pendingThemeChanges = self.pendingThemeChanges
         let pendingLayoutRequests = self.pendingLayoutRequests
         let pendingWallpaperRequests = self.pendingWallpaperRequests
+        let pendingScreensaverRequests = self.pendingScreensaverRequests
         let pendingCaretUpdates = self.pendingCaretUpdates
         let pendingTerminations = self.pendingTerminations
         let capturedEngine = unsafeBitCast(engine, to: Int.self)
@@ -599,6 +620,9 @@ class LinuxProcessAppManager {
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CONTROL_SET_WALLPAPER {
                         pendingWallpaperRequests.withLock { $0.append(Int(event.x)) }
+                        FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
+                    } else if event.type == DMABUF_CONTROL_SET_SCREENSAVER {
+                        pendingScreensaverRequests.withLock { $0.append(Int(event.x)) }
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CARET {
                         let bits = UInt64(bitPattern: event.buttons)
@@ -709,6 +733,23 @@ class LinuxProcessAppManager {
         currentWallpaper = preset
         for texId in apps.keys {
             sendWallpaper(textureId: texId, preset: preset)
+        }
+    }
+
+    /// Pushes the screensaver idle timeout (seconds, 0 = never) to one child.
+    func sendScreensaver(textureId: Int64, seconds: Int) {
+        guard let entry = apps[textureId] else { return }
+        var event = DmaBufInputEvent(x: Double(seconds), y: 0, buttons: 0,
+                                     type: Int32(DMABUF_CONTROL_SET_SCREENSAVER),
+                                     phase: 0)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
+    }
+
+    /// Idle-timeout change: push to every child so Settings pickers stay live.
+    func broadcastScreensaver(seconds: Int) {
+        currentScreensaverIdle = seconds
+        for texId in apps.keys {
+            sendScreensaver(textureId: texId, seconds: seconds)
         }
     }
 

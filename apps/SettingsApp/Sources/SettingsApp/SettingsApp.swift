@@ -646,6 +646,31 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                 child: Row(children: _wallpaperSwatches(selected: s.wallpaper))
                             ),
                         ]),
+                        SizedBox(height: 20),
+                        _sectionHeader("Screensaver"),
+                        SizedBox(height: 12),
+                        _macosGroupBox([
+                            _settingsRowWithTrailing(
+                                "Start After", "Idle time before the screensaver appears",
+                                MacosSegmentedControl(
+                                    labels: Self._screensaverChoices.map { $0.label },
+                                    selectedIndex: Self._screensaverChoices.firstIndex {
+                                        $0.seconds == s.screensaverIdle
+                                    } ?? -1,
+                                    onChanged: { [self] (i: Int) in
+                                        bloc.add(.selectScreensaverIdle(
+                                            Self._screensaverChoices[i].seconds))
+                                    }
+                                )
+                            ),
+                            Padding(
+                                padding: EdgeInsets(horizontal: 16, vertical: 4),
+                                child: Text(
+                                    _screensaverDescription(s.screensaverIdle),
+                                    style: TextStyle(color: pal.textTertiary, fontSize: 11)
+                                )
+                            ),
+                        ]),
                         // No Notifications or Auto-Update toggles, no
                         // Brightness or Volume sliders, and no accent picker.
                         // All five sat here once, flipping local state and
@@ -658,6 +683,30 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                 )
             )
         )
+    }
+
+    /// The idle timeouts the picker offers. The shell accepts any value —
+    /// these are just the ones worth a segment, and an idle timeout it holds
+    /// that isn't here (set by hand in the config file, or by a newer build)
+    /// shows no selection rather than being silently rounded to one of these.
+    private static let _screensaverChoices: [(label: String, seconds: Int)] = [
+        ("Never", 0),
+        ("1 min", 60),
+        ("5 min", 300),
+        ("10 min", 600),
+        ("30 min", 1800),
+        ("1 hr", 3600),
+    ]
+
+    private func _screensaverDescription(_ seconds: Int) -> String {
+        if seconds <= 0 {
+            return "The screensaver never starts on its own. Ctrl+Shift+S still shows it."
+        }
+        if !Self._screensaverChoices.contains(where: { $0.seconds == seconds }) {
+            return "Custom: \(seconds) seconds."
+        }
+        return "Wakes on any key, click, or mouse movement. "
+            + "Video playback holds it off."
     }
 
     /// One swatch per shell wallpaper preset. The raw values and colors

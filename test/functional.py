@@ -1012,6 +1012,57 @@ def check_portal_chooser() -> None:
     wait_for(lambda: not proc_running("FileExplorerApp"), "the picker to exit")
 
 
+@check("screensaver: it appears on its own when idle, and input wakes it")
+def check_screensaver_idle() -> None:
+    """The whole point of the feature is that nobody has to ask for it, so
+    the assertion is that it arrives with no input at all — and then that
+    input takes it away again.
+
+    The shell is started with STARLING_SCREENSAVER_IDLE=15 by functional.sh,
+    which is why this waits ~15s rather than the shipped ten minutes. Every
+    other check in this file drives the pointer, so the idle clock is
+    whatever the previous check left it at: the wait starts from now, not
+    from the shell's launch.
+
+    Asserted through the broker, never a screenshot. A screensaver is a
+    full-screen visual change, so a pixel baseline for one would have to be
+    re-blessed on every shader tweak and would then be asserting nothing.
+    """
+    idle = ask("screensaver")["idle_seconds"]
+    if idle <= 0 or idle > 60:
+        raise Skip(f"shell's idle timeout is {idle}s — needs the test value")
+
+    # Wake anything already up, then leave the desk alone.
+    if ask("screensaver")["active"]:
+        drive("key esc")
+        wait_for(lambda: not ask("screensaver")["active"], "the saver to clear")
+    drive("move 400 400")
+    time.sleep(1)
+
+    wait_for(lambda: ask("screensaver")["active"],
+             f"the screensaver to appear after {idle}s idle",
+             timeout=idle + 20)
+    log(f"appeared unprompted after ~{idle}s")
+
+    # The saver ignores the first pointer pixels on purpose (a hand resting
+    # on a trackpad emits hover a pixel at a time), so wake it with travel
+    # well past the 24px threshold rather than a nudge.
+    time.sleep(1)
+    drive("move 400 400", "move 900 700")
+    wait_for(lambda: not ask("screensaver")["active"],
+             "pointer travel to wake the desktop")
+    log("pointer travel woke it")
+
+    # And it must come back — the idle cycle re-arms after a wake, which is
+    # the bug you only find on the second cycle.
+    wait_for(lambda: ask("screensaver")["active"],
+             "the screensaver to return on the next idle period",
+             timeout=idle + 20)
+    drive("key esc")
+    wait_for(lambda: not ask("screensaver")["active"], "the saver to clear")
+    log("second cycle armed and fired")
+
+
 @check("tiling: the Settings toggle retiles a live desktop and nothing dies")
 def check_tiling_toggle() -> None:
     """Guards the crash class that shipped: flipping tiling resizes every

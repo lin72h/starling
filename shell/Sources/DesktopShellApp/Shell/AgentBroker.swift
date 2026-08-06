@@ -562,6 +562,19 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // Screensaver state. Unscoped and read-only, like dock_rects: it
+        // reports what is already on screen. The functional tier asserts on
+        // this rather than on pixels — a screensaver IS a full-screen visual
+        // change, and a screenshot check for one would re-bless itself into
+        // meaninglessness the first time the shader is tuned.
+        if op == "screensaver" {
+            conn.send(["id": id, "ok": true,
+                       "active": shell._screensaverActive,
+                       "idle_seconds": shell._screensaverIdleSeconds,
+                       "inhibited": shell._screensaverInhibited])
+            return
+        }
+
         // Everything else requires a registered agent.
         guard let agentId = conn.agentId else { return fail("hello first") }
         agentLastOpMs[agentId] = nowMs

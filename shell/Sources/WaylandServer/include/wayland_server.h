@@ -351,6 +351,12 @@ int wayland_server_get_viewport_destination(WaylandServer* server,
                                             uint32_t surface_id,
                                             int* out_width, int* out_height);
 
+/* Number of live zwp_idle_inhibitor_v1 objects across all clients.
+ * Nonzero means at least one client (Chrome playing video, a presentation,
+ * a player) has asked the compositor not to blank; the shell's screensaver
+ * idle timer treats that as ongoing activity. */
+int wayland_server_idle_inhibited(WaylandServer* server);
+
 #ifdef __cplusplus
 }
 #endif

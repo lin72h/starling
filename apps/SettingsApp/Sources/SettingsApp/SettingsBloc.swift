@@ -63,10 +63,14 @@ struct SettingsState {
     var tilingWM: Bool = GpuDmaBufRenderer.lastPushedLayoutIsTiling ?? false
     /// Wallpaper preset raw value — the shell owns it and pushes at connect.
     var wallpaper: Int = GpuDmaBufRenderer.lastPushedWallpaper ?? 0
+    /// Screensaver idle timeout in seconds (0 = never) — the shell owns it
+    /// and pushes at connect.
+    var screensaverIdle: Int = GpuDmaBufRenderer.lastPushedScreensaver ?? 600
     #else
     var darkMode: Bool = true
     var tilingWM: Bool = false
     var wallpaper: Int = 0
+    var screensaverIdle: Int = 600
     #endif
 
     // Power. Seeded synchronously — a handful of sysfs reads — so the pane
@@ -134,6 +138,10 @@ enum SettingsEvent {
     case selectWallpaper(Int)
     /// Wallpaper pushed by the shell (no echo back).
     case wallpaperApplied(Int)
+    /// Screensaver idle timeout in seconds; 0 = never.
+    case selectScreensaverIdle(Int)
+    /// Idle timeout pushed by the shell (no echo back).
+    case screensaverApplied(Int)
 
     // Power
     case refreshBattery
@@ -209,6 +217,11 @@ final class SettingsBloc: @unchecked Sendable {
             _applyWallpaper(value)
         case .wallpaperApplied(let value):
             state.wallpaper = value
+        case .selectScreensaverIdle(let value):
+            state.screensaverIdle = value
+            _applyScreensaver(value)
+        case .screensaverApplied(let value):
+            state.screensaverIdle = value
         case .refreshBattery:
             _refreshBattery()
         case .changeBrightness(let percent):
@@ -421,6 +434,14 @@ final class SettingsBloc: @unchecked Sendable {
     private func _applyWallpaper(_ preset: Int) {
         #if os(Linux)
         GpuDmaBufRenderer.current?.sendWallpaperChange(preset: preset)
+        #endif
+    }
+
+    /// Forward the Screensaver picker to the shell, which restarts its idle
+    /// timer and persists the choice.
+    private func _applyScreensaver(_ seconds: Int) {
+        #if os(Linux)
+        GpuDmaBufRenderer.current?.sendScreensaverChange(seconds: seconds)
         #endif
     }
 

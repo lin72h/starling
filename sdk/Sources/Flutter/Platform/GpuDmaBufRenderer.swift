@@ -1034,6 +1034,14 @@ public class GpuDmaBufRenderer {
         _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
+    /// Ask the shell to change the screensaver idle timeout (Settings
+    /// picker). Seconds of no input before the screensaver appears; 0 = never.
+    public func sendScreensaverChange(seconds: Int) {
+        var event = DmaBufInputEvent(x: Double(seconds), y: 0, buttons: 0,
+                                     type: DMABUF_CONTROL_SET_SCREENSAVER, phase: 0)
+        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+    }
+
     /// Global reference for child apps to send control messages.
     public nonisolated(unsafe) static var current: GpuDmaBufRenderer? = nil
 
@@ -1119,6 +1127,31 @@ public class GpuDmaBufRenderer {
             deliverIntChange(cb, preset)
         } else {
             pendingWallpaper = preset
+        }
+    }
+
+    // Screensaver idle timeout push — same latch/replay contract as the
+    // theme. Seconds of idle before the screensaver appears; 0 = never.
+
+    public nonisolated(unsafe) static var onScreensaverChanged: ((Int) -> Void)? = nil {
+        didSet {
+            guard let cb = onScreensaverChanged, let secs = pendingScreensaver else { return }
+            pendingScreensaver = nil
+            deliverIntChange(cb, secs)
+        }
+    }
+
+    /// The most recent idle timeout the parent pushed, or nil.
+    public private(set) nonisolated(unsafe) static var lastPushedScreensaver: Int? = nil
+
+    private nonisolated(unsafe) static var pendingScreensaver: Int? = nil
+
+    fileprivate static func receiveScreensaverPush(_ seconds: Int) {
+        lastPushedScreensaver = seconds
+        if let cb = onScreensaverChanged {
+            deliverIntChange(cb, seconds)
+        } else {
+            pendingScreensaver = seconds
         }
     }
 
@@ -1548,6 +1581,11 @@ public class GpuDmaBufRenderer {
 
                     if inputEvent.type == DMABUF_CONTROL_SET_WALLPAPER {
                         GpuDmaBufRenderer.receiveWallpaperPush(Int(inputEvent.x))
+                        continue
+                    }
+
+                    if inputEvent.type == DMABUF_CONTROL_SET_SCREENSAVER {
+                        GpuDmaBufRenderer.receiveScreensaverPush(Int(inputEvent.x))
                         continue
                     }
 

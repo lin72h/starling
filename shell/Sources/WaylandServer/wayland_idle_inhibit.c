@@ -4,10 +4,18 @@
 /*
  * wayland_idle_inhibit.c — zwp_idle_inhibit_manager_v1 implementation
  *
- * Prevents the compositor from blanking/sleeping the screen while a client
- * (e.g. Chrome playing video) has an active inhibitor. We accept the
- * requests but don't implement actual idle tracking — our DRM shell
- * doesn't blank the screen anyway.
+ * Prevents the screensaver from appearing while a client (e.g. Chrome
+ * playing video) holds an inhibitor. We only count live inhibitors and
+ * publish the count; the shell's idle timer reads it and treats a nonzero
+ * count as activity. The surface argument is ignored — the protocol scopes
+ * an inhibitor to one surface's visibility, but the shell has a single
+ * full-screen saver, so any live inhibitor suppresses it.
+ *
+ * The count must be maintained by a resource DESTRUCTOR, not by the
+ * explicit destroy request: a client that exits (or crashes) mid-video
+ * never sends one, and a leaked inhibitor would suppress the screensaver
+ * for the rest of the session. wl_resource destructors run on client
+ * disconnect too, which is the only way to get this right.
  */
 
 #include "wayland_server_internal.h"
@@ -23,6 +31,14 @@ static void inhibitor_destroy(struct wl_client* client,
                               struct wl_resource* resource) {
     (void)client;
     wl_resource_destroy(resource);
+}
+
+/* Runs on explicit destroy AND on client disconnect — see the file header. */
+static void inhibitor_resource_destroyed(struct wl_resource* resource) {
+    struct WaylandServer* server = wl_resource_get_user_data(resource);
+    if (server && server->idle_inhibitors > 0) {
+        server->idle_inhibitors--;
+    }
 }
 
 static const struct zwp_idle_inhibitor_v1_interface inhibitor_impl = {
@@ -52,7 +68,9 @@ static void manager_create_inhibitor(struct wl_client* client,
         wl_client_post_no_memory(client);
         return;
     }
-    wl_resource_set_implementation(inh, &inhibitor_impl, server, NULL);
+    wl_resource_set_implementation(inh, &inhibitor_impl, server,
+                                   inhibitor_resource_destroyed);
+    server->idle_inhibitors++;
 }
 
 static const struct zwp_idle_inhibit_manager_v1_interface idle_inhibit_manager_impl = {
@@ -68,6 +86,11 @@ static void idle_inhibit_manager_bind(struct wl_client* client, void* data,
 }
 
 void wayland_idle_inhibit_init(struct WaylandServer* server) {
+    server->idle_inhibitors = 0;
     server->idle_inhibit_manager_global = wl_global_create(server->display,
         &zwp_idle_inhibit_manager_v1_interface, 1, server, idle_inhibit_manager_bind);
+}
+
+int wayland_server_idle_inhibited(struct WaylandServer* server) {
+    return server ? server->idle_inhibitors : 0;
 }

@@ -110,6 +110,9 @@ struct DmaBufMeta {
 /* Desktop wallpaper preset (either direction): x = the preset's raw value.
  * The shell owns the enum; children treat it as an opaque small integer. */
 #define DMABUF_CONTROL_SET_WALLPAPER 0x0a
+/* Screensaver idle timeout (either direction): x = seconds of no input
+ * before the screensaver appears, 0 = never. */
+#define DMABUF_CONTROL_SET_SCREENSAVER 0x0b
 /* Caret rect report (child→parent): x/y = caret top-left in the child's
  * logical content coordinates; buttons packs width (low Float32) and
  * height (high Float32); phase = 1 caret visible / 0 hidden. Drives the

@@ -113,6 +113,28 @@ one fall back to a software encoder, which works but costs more.
 
 ---
 
+## The screensaver
+
+Leave the desk for ten minutes and the desktop dissolves into a screensaver:
+your own screen, blurred and drifting behind a slow liquid warp, with the
+time and date floating over it. Any key, click, or mouse movement brings it
+straight back — nothing is asked for, so it is decoration, not a lock.
+**Ctrl + Shift + S** shows it immediately.
+
+Change the idle time (or turn it off) in **Settings → Appearance →
+Screensaver**. Video playback holds it off: an app that tells the desktop
+it is playing something — Chrome, Firefox, a video player — keeps the
+screensaver away for as long as it says so, so a film watched without
+touching the mouse is never interrupted.
+
+For **aerial footage** in place of the warp, drop a video file in
+`~/.local/share/starling/aerials/`; the screensaver dissolves into it and
+loops it. Starling ships none of its own — the warp needs no assets, and the
+clips worth watching are large. Any shape works: letterbox bars are cropped
+away and the picture fills the screen.
+
+---
+
 ## Windows
 
 Windows have a title bar with three **macOS-style colored circle buttons** on
@@ -176,6 +198,7 @@ Right-click anywhere on the wallpaper for the desktop menu:
 | **Ctrl + ↑** | Mission Control |
 | **Ctrl + ↓** | AI Space |
 | **Ctrl + Shift + R** | Start / stop screen recording |
+| **Ctrl + Shift + S** | Show the screensaver now |
 | **Ctrl + Space** | Toggle the input method (fcitx5, for CJK and other IME input) |
 | **Esc** | Close Mission Control; release a taken-over agent window |
 | Double-click title bar | Maximize / restore a window |
@@ -218,8 +241,9 @@ The Settings app has nine sections in its sidebar:
 - **Default Apps** — which application handles what, the browser included.
 - **Appearance** — the **Dark Mode** switch (the same light/dark choice as the
   desktop right-click menu), **Tiling Windows** to switch between floating and
-  tiling window management, and a **Notifications** toggle — events collect
-  behind the bell in the menu bar.
+  tiling window management, the wallpaper picker, the **Screensaver** idle
+  time, and a **Notifications** toggle — events collect behind the bell in the
+  menu bar.
 - **Power** — power options.
 - **About** — about the desktop.
 
@@ -272,8 +296,9 @@ desktop.
 
 Starling is an early preview (v0.2.3). A few limits you will notice:
 
-- **No screen lock or screensaver.** Do not rely on it to secure an unattended
-  machine.
+- **No screen lock.** There is a screensaver (below), but it is decoration:
+  any key or mouse movement dismisses it, with nothing asked. Do not rely on
+  it to secure an unattended machine.
 - **Scaling is fixed at 2.0.** Fractional scaling produced blurry text and is
   not usable yet.
 - **No display-mode picker.** The session uses the connector's preferred mode.

@@ -108,8 +108,12 @@ if [ "$ATTACH" = 0 ]; then
     # LIBSEAT_BACKEND are forwarded only when set to something non-empty: they
     # are read with a bare getenv() downstream, where "" is not the same as
     # unset (see the env-knob trap in CLAUDE.md).
+    # A 15s screensaver timeout so the idle check can actually wait one out.
+    # The shipped default is ten minutes; every other check would finish long
+    # before it fired, and the idle check would have nothing to observe.
     as_user env STARLING_CATALOG_DIR="$CATALOG_DIR" \
                 STARLING_APP_RECORDS="$RECORDS_DIR" \
+                STARLING_SCREENSAVER_IDLE=15 \
                 ${STARLING_SEAT_MODE:+STARLING_SEAT_MODE="$STARLING_SEAT_MODE"} \
                 ${LIBSEAT_BACKEND:+LIBSEAT_BACKEND="$LIBSEAT_BACKEND"} \
                 "$REPO/build/run-desktop.sh" \

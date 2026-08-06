@@ -392,6 +392,15 @@ class WaylandIntegration {
         return String(cString: wayland_server_get_socket_name(server))
     }
 
+    /// True while any client holds a zwp_idle_inhibitor_v1 — Chrome or
+    /// Firefox playing video, a slideshow, a player. The shell's screensaver
+    /// idle timer treats this as ongoing activity, so a film watched without
+    /// touching the mouse doesn't get covered up.
+    var idleInhibited: Bool {
+        guard let server = server else { return false }
+        return wayland_server_idle_inhibited(server) > 0
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // MARK: - Platform Thread: Dispatch + Command Execution
     // ═══════════════════════════════════════════════════════════════════════

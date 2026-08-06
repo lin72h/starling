@@ -175,6 +175,14 @@ install -m644 "$REPO/shell/Sources/DesktopShellApp/Shaders/liquid_glass.frag.ipl
     "$SHARE/shaders/"
 install -m644 "$REPO/shell/Sources/DesktopShellApp/Shaders/screensaver.frag.iplr" \
     "$SHARE/shaders/"
+# Aerials: the directory is shipped, the footage is not. The screensaver is
+# complete without it — no clip means the liquid warp over the live desktop,
+# which needs no assets — and the clips worth having are tens of megabytes
+# each, which is not a cost to put on every install for a decoration. Drop an
+# .mp4 in here (or in ~/.local/share/starling/aerials) and the saver dissolves
+# into it; AerialPlayer.discoverClip() takes the first by name.
+mkdir -p "$SHARE/aerials"
+install -m644 "$REPO/shell/Resources/aerials-README" "$SHARE/aerials/README"
 
 # --- third-party app tools: host-direct runner + apt-only installer ---------
 install -m755 "$REPO/build/app-run.sh" "$OUT/bin/app-run"

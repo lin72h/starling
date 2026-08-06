@@ -555,6 +555,11 @@ func runDRM() -> Never {
         _shellState?._setWallpaper(preset)
     }
 
+    // Screensaver idle-timeout requests (SettingsApp's Screensaver picker).
+    processManager.onScreensaverChangeRequested = { seconds in
+        _shellState?._setScreensaverIdle(seconds: Double(seconds))
+    }
+
     // Caret reports from child apps drive the IME candidate panel placement.
     processManager.onCaretChanged = { texId, x, y, w, h, visible in
         _shellState?._imeCaretChanged(textureId: texId, x: x, y: y,

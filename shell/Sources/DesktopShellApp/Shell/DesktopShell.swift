@@ -487,12 +487,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     private var _windowRectAnims: [String: AnimationController] = [:]
 
     // ── Screensaver ──────────────────────────────────────────────────────
-    // Visual layer only: activation is manual (Ctrl+Shift+S, or
-    // STARLING_SCREENSAVER_TEST=<seconds> for tooling) until idle detection
-    // lands. The overlay warps the LIVE desktop through a BackdropFilter —
-    // no capture step — so the machinery here is just a fade controller, a
-    // monotonic time Ticker for the shader phases, and teardown.
-    private var _screensaverActive = false      // overlay mounted
+    // Appears on its own after `_screensaverIdleSeconds` without input, and
+    // on Ctrl+Shift+S (or STARLING_SCREENSAVER_TEST=<seconds> for tooling).
+    // The overlay warps the LIVE desktop through a BackdropFilter — no
+    // capture step — so the machinery here is a fade controller, a monotonic
+    // time Ticker for the shader phases, the idle timer, and teardown.
+    var _screensaverActive = false              // overlay mounted (broker-visible)
     private var _screensaverClosing = false     // reverse fade in flight
     private var _screensaverFade: AnimationController?
     private var _screensaverFadeCurve: CurvedAnimation?
@@ -517,6 +517,30 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// travelled this far (logical px) from there.
     private var _screensaverPointerOrigin: Offset?
     private static let kScreensaverWakeDistance: Double = 24
+
+    // ── Idle detection ───────────────────────────────────────────────────
+    /// Seconds of no input before the saver appears; 0 disables it entirely.
+    /// Loaded from `~/.config/starling/screensaver` at mount, changed by the
+    /// Settings app's Screensaver picker.
+    var _screensaverIdleSeconds: Double = kDefaultIdleSeconds
+    static let kDefaultIdleSeconds: Double = 600   // 10 minutes, like macOS
+    /// Last deliberate user input, from the shell's global pointer listener
+    /// and the key hook — both see every event, including ones destined for
+    /// Wayland/X11 clients, because client windows are textures in this tree.
+    private var _lastInputActivity = Date()
+    /// Generation token for the re-arming idle check (see `_armIdleTimer`).
+    private var _idleTimerToken = 0
+
+    /// Whether some client is currently holding the screensaver off. Read by
+    /// the broker's `screensaver` op so the functional tier can tell "the
+    /// timer hasn't fired yet" from "a client is suppressing it".
+    var _screensaverInhibited: Bool {
+        #if os(Linux)
+        return waylandIntegration?.idleInhibited == true
+        #else
+        return false
+        #endif
+    }
 
     // Cached — the saver rebuilds every frame, and a per-build DateFormatter
     // (ICU setup) is real work. Only ever touched from the main queue.
@@ -694,7 +718,117 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             _screensaverActive = false
             _screensaverClosing = false
         }
+        // The wake itself is the newest activity — without this the idle
+        // clock still reads "hours", and the saver would come straight back.
+        // `_checkIdle` bails while the saver is up, so this is also the one
+        // place that restarts the idle cycle after a wake.
+        _noteUserActivity()
+        if _screensaverIdleSeconds > 0 { _armIdleTimer(after: _screensaverIdleSeconds) }
         _armScreensaverTestTimer()  // self-repeating test cycles
+    }
+
+    // ── Idle detection ───────────────────────────────────────────────────
+
+    /// Deliberate user input. Called from the shell's topmost global pointer
+    /// listener and from the key hook, which between them see every event —
+    /// including those forwarded to Wayland and X11 clients, because client
+    /// windows are textures inside this widget tree.
+    ///
+    /// This is on the hot path for every pointer move, so it does exactly one
+    /// thing: stamp a Date. The timer is NOT re-armed here (that would queue a
+    /// wakeup per mouse move); it re-arms itself when it finds the desktop
+    /// still busy.
+    func _noteUserActivity() {
+        _lastInputActivity = Date()
+    }
+
+    /// Arm the idle check `seconds` from now. One timer is in flight at a
+    /// time: the generation token invalidates the previous one, so a settings
+    /// change or a wake can safely re-arm without stacking.
+    ///
+    /// `DispatchQueue.main.asyncAfter`, not `Foundation.Timer` — the latter
+    /// never fires on the DRM embedder.
+    private func _armIdleTimer(after seconds: Double) {
+        _idleTimerToken += 1
+        let token = _idleTimerToken
+        let fire: () -> Void = { [weak self] in
+            guard let self, token == self._idleTimerToken else { return }
+            self._checkIdle()
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(1.0, seconds),
+            execute: unsafeBitCast(fire, to: (@Sendable () -> Void).self))
+    }
+
+    /// Has the desktop been idle long enough? Re-arms for whatever time is
+    /// left, so the common case (a busy desktop) costs one wakeup per idle
+    /// period rather than a poll per second.
+    private func _checkIdle() {
+        guard _screensaverIdleSeconds > 0 else { return }  // disabled
+        guard !_screensaverActive else { return }  // teardown re-arms
+        let remaining = _screensaverIdleSeconds
+            - Date().timeIntervalSince(_lastInputActivity)
+        if remaining > 0 {
+            _armIdleTimer(after: remaining)
+            return
+        }
+        // A client is playing video (or otherwise asked to stay awake).
+        // Count it as activity rather than merely deferring the check: when
+        // the film ends the user should get a full idle period, not a
+        // screensaver the instant the inhibitor is dropped.
+        #if os(Linux)
+        if waylandIntegration?.idleInhibited == true {
+            _noteUserActivity()
+            _armIdleTimer(after: _screensaverIdleSeconds)
+            return
+        }
+        #endif
+        _activateScreensaver()  // teardown re-arms on wake
+    }
+
+    /// Change the idle timeout (Settings' Screensaver picker) and persist it.
+    /// 0 turns the screensaver off; a saver already on screen stays up until
+    /// the user dismisses it — switching the setting is not a wake gesture.
+    func _setScreensaverIdle(seconds: Double) {
+        let clean = seconds <= 0 ? 0 : max(10, seconds)
+        guard clean != _screensaverIdleSeconds else { return }
+        _screensaverIdleSeconds = clean
+        #if os(Linux)
+        linuxProcessAppManager?.broadcastScreensaver(seconds: Int(clean))
+        #endif
+        let path = Self._screensaverFile
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try? String(Int(clean)).write(toFile: path, atomically: true,
+                                      encoding: .utf8)
+        _noteUserActivity()
+        if clean > 0 { _armIdleTimer(after: clean) }
+    }
+
+    private static var _screensaverFile: String {
+        LoginUser.configDir + "/screensaver"
+    }
+
+    /// Restore the persisted idle timeout and start the clock. The env
+    /// override exists so tooling and demos can ask for a short timeout
+    /// without writing to the user's config.
+    private func _startIdleDetection() {
+        if let s = try? String(contentsOfFile: Self._screensaverFile,
+                               encoding: .utf8),
+           let secs = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            _screensaverIdleSeconds = secs <= 0 ? 0 : max(10, secs)
+        }
+        if let env = ProcessInfo.processInfo.environment["STARLING_SCREENSAVER_IDLE"],
+           let secs = Double(env) {
+            _screensaverIdleSeconds = secs <= 0 ? 0 : max(10, secs)
+        }
+        #if os(Linux)
+        linuxProcessAppManager?.currentScreensaverIdle = Int(_screensaverIdleSeconds)
+        #endif
+        _noteUserActivity()
+        guard _screensaverIdleSeconds > 0 else { return }
+        _armIdleTimer(after: _screensaverIdleSeconds)
     }
 
     /// STARLING_SCREENSAVER_TEST=<seconds>: auto-activate that long after
@@ -975,6 +1109,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         _recordingTickTimer = recTimer
         #endif
 
+        _startIdleDetection()
         _armScreensaverTestTimer()
     }
 
@@ -1902,6 +2037,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
         _keyRouter = routeKey
         pd.onKeyData = { [weak self] keyData in
+            // Idle detection taps the raw hook, above routeKey's modal
+            // branches, so a key typed into a Wayland client counts too.
+            // Synthesized repeats don't: a stuck key is not a person.
+            if keyData.type == .down { self?._noteUserActivity() }
             self?._trackKeyRepeat(keyData)
             return routeKey(keyData)
         }
@@ -3199,15 +3338,24 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     // listener is in every pointer's hit path, so it keeps
                     // seeing move events while a window drag is in flight.
                     // No setState — the position feeds the dwell check only.
+                    // This listener is also the shell's idle-detection tap:
+                    // it is in every pointer's hit path, including events on
+                    // their way to a Wayland or X11 client, because client
+                    // windows are textures inside this same tree.
+                    onPointerDown: { [self] _ in _noteUserActivity() },
                     onPointerMove: { [self] event in
                         _dragPointerPos = event.position
+                        _noteUserActivity()
                     },
                     onPointerUp: { [self] _ in
                         _cancelEdgeCarry()
+                        _noteUserActivity()
                     },
                     onPointerHover: { [self] event in
                         _updateDockHover(x: event.position.dx, y: event.position.dy)
+                        _noteUserActivity()
                     },
+                    onPointerSignal: { [self] _ in _noteUserActivity() },
                     behavior: .translucent,
                     child: SizedBox(expand: ())
                 )

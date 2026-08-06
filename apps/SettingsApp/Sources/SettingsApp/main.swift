@@ -39,6 +39,10 @@ class _ThemedSettingsRootState: State<StatefulWidget> {
         GpuDmaBufRenderer.onWallpaperChanged = { preset in
             settingsBlocShared?.add(.wallpaperApplied(preset))
         }
+        // Screensaver timeout pushes keep the segmented control live.
+        GpuDmaBufRenderer.onScreensaverChanged = { seconds in
+            settingsBlocShared?.add(.screensaverApplied(seconds))
+        }
         #endif
     }
 

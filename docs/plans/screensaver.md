@@ -1,11 +1,11 @@
 # Screensaver
 
-> **Status 2026-08-06: the visual layer is landed and verified; activation
-> is manual.** Ctrl+Shift+S (or `STARLING_SCREENSAVER_TEST=<seconds>` for
-> tooling) fades the live desktop into a breathing blur + liquid warp with
-> a thin clock, then dissolves into looping aerial footage if a clip is
-> installed. Everything below is what remains to make it a real
-> screensaver rather than a demo you summon by hand.
+> **Status 2026-08-06: it is a real screensaver — it appears on its own.**
+> Ten minutes idle by default (Settings → Appearance → Screensaver, or
+> `~/.config/starling/screensaver`), Ctrl+Shift+S on demand, and any key,
+> click or pointer travel wakes it. Video playback holds it off through
+> `zwp_idle_inhibit_manager_v1`. What remains is the aerial decode path,
+> and the deferred items at the end.
 
 ## What exists
 
@@ -28,33 +28,67 @@
   wake (24 logical px — a resting trackpad hand emits hovers a pixel at
   a time, and waking on the first one dismissed the saver instantly).
 
-## Next steps, in order
+## Done since
 
-### 1. Idle detection (the headline gap)
+### 1. Idle detection ✓
 
-Activation is manual precisely because this is missing. The shell
-already sees every input event — `routeKey` and the pointer handlers
-funnel through `_DesktopShellState` — so this is one last-activity
-timestamp reset from both paths plus a periodic check. Traps already
-known: `Foundation.Timer` never fires on the DRM embedder, so use
-`DispatchQueue.main.asyncAfter` + a generation token (the pattern
-`_armScreensaverTestTimer` already uses); and video playback / an active
-screen recording should hold the saver off (an inhibit bit, checked at
-fire time). Needs a Settings knob (timeout + off), persisted wherever
-Settings keeps the DPI choice today.
+`_noteUserActivity()` stamps a Date from the shell's topmost global
+pointer Listener and from the raw `pd.onKeyData` hook — between them
+every event, including ones forwarded to Wayland and X11 clients, since
+client windows are textures in this same tree. Synthesized key repeats
+are excluded: a stuck key is not a person. `_armIdleTimer` re-arms
+itself for whatever time is left rather than polling, so a busy desktop
+costs one wakeup per idle period; `DispatchQueue.main.asyncAfter` + a
+generation token, never `Foundation.Timer`.
 
-### 2. An aerials asset story
+**The inhibit came free, and was already half-built.** The compositor
+has implemented `zwp_idle_inhibit_manager_v1` all along — accepting
+inhibitors and dropping them on the floor, under a comment explaining
+that idle tracking didn't exist. It does now, so
+`wayland_idle_inhibit.c` counts live inhibitors and publishes the count.
+The count is maintained by a resource *destructor*, not by the destroy
+request, because a client that crashes mid-video never sends one and a
+leaked inhibitor would suppress the screensaver for the rest of the
+session. A live inhibitor counts as activity rather than merely
+deferring the check, so the user gets a full idle period after the film
+ends instead of a screensaver the instant the inhibitor drops.
 
-Nothing ships a clip. `AerialPlayer.discoverClip()` already searches
-`$STARLING_AERIAL`, the packaged `share/starling/aerials/`, and
-`~/.local/share/starling/aerials/` — but `stage.sh` stages no `aerials/`
-dir and the .deb carries none. Options, not mutually exclusive: bundle
-one short public-domain clip (NASA earth footage worked well in
-testing — but it is tens of MB, and the .deb is lean today); a
-download-on-demand in Settings, macOS-style; or document the drop-in
-directory and ship nothing. Decide before the .deb grows by accident.
-The saver already falls back to the warp with no assets, so shipping
-nothing is a legitimate v1.
+Settings → Appearance → Screensaver is a `MacosSegmentedControl` (new,
+in `sdk/` — AppKit's NSSegmentedControl, which the port lacked) over
+Never / 1 / 5 / 10 / 30 min / 1 hr, on the same push-and-echo channel as
+the wallpaper picker. The choice persists to
+`~/.config/starling/screensaver`; `STARLING_SCREENSAVER_IDLE` overrides
+it without touching the user's config.
+
+### 2. Aerials: ship the directory, not the footage ✓
+
+Decided. `stage.sh` now stages `share/aerials/` with a README naming the
+three search paths, and the .deb carries it. No clip ships: the warp is
+a complete screensaver on its own, and the clips worth watching run to
+tens of megabytes — a poor thing to put on every install for a
+decoration. Download-on-demand in Settings stays available as a later
+option; the drop-in directory is the v1.
+
+### 4. A functional check ✓
+
+`check_screensaver_idle` in `test/functional.py` waits out a real idle
+period with no input, asserts the saver arrived, wakes it with pointer
+travel, and then waits out a *second* period — the re-arm after a wake
+is the bug you only find on the second cycle. It asserts through a new
+unscoped broker op (`screensaver` → active / idle_seconds / inhibited),
+never against pixels, for the reason the suite's header already gives:
+a screenshot baseline over a compositor gets re-blessed until it tests
+nothing. `functional.sh` starts the shell with
+`STARLING_SCREENSAVER_IDLE=15`.
+
+### 5. Docs ✓
+
+`USER_GUIDE.md` has a Screensaver section, the shortcut table has
+Ctrl+Shift+S, and the "no screen lock or screensaver" limitation is now
+"no screen lock" — with the security warning kept, since wake is
+unauthenticated.
+
+## Next
 
 ### 3. VAAPI zero-copy aerial decode
 
@@ -67,21 +101,23 @@ side already stands up a VAAPI context (`[Recording] zero-copy VAAPI
 encoder ready`), so the plumbing precedent exists in-tree. Keep the pipe
 as the fallback (nouveau boxes: VAAPI init fails there today).
 
-### 4. A functional test
+### 6. Verify the whole thing on live hardware
 
-`STARLING_SCREENSAVER_TEST=<seconds>` exists for exactly this: activate
-without holding a keyboard, screenshot, assert the scrim/clock, inject
-pointer travel, assert the desktop is back. Slot it into
-`test/run.sh --functional`. Mind the two-shells trap: with a packaged
-session also running, shell-drive screenshots and keys go to the wrong
-shell — one diagnostic run was already burned on that.
+Everything above builds and passes `test/run.sh`, but the idle path has
+**not yet been watched on a real display** — the dev box had two shells
+up (a 16-hour packaged session plus a leftover dev shell), which is the
+exact configuration that burned a diagnostic run before, and neither was
+safe to kill unattended. Run:
 
-### 5. Docs
+    sudo test/functional.sh --only check_screensaver_idle
 
-`docs/USER_GUIDE.md` says "No screen lock or screensaver." Half of that
-is now stale; the security half ("do not rely on it to secure an
-unattended machine") stays true and must stay said, since wake is
-unauthenticated.
+on a box with one shell, or drive it by hand with
+`STARLING_SCREENSAVER_IDLE=20 build/run-desktop.sh`. What to watch for
+that a unit test cannot see: that the idle timer isn't reset by the
+shell's own animation ticks (it shouldn't be — activity is stamped from
+pointer and key events only, never from frames), and that the saver's
+own ticker doesn't feed back into the activity stamp and keep itself
+alive forever.
 
 ### Later, deliberately not now
 

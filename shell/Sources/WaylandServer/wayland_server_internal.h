@@ -200,6 +200,10 @@ struct WaylandServer {
     struct wl_list text_inputs;
     struct WaylandSurface* ti_focus;
     struct wl_global* idle_inhibit_manager_global;
+    // Live zwp_idle_inhibitor_v1 resources. Nonzero = some client is
+    // playing video (or otherwise asked to stay awake); the shell's idle
+    // timer reads it through wayland_server_idle_inhibited().
+    int idle_inhibitors;
     struct wl_global* xdg_output_manager_global;
     struct wl_global* xdg_activation_global;
     struct wl_global* presentation_global;
