@@ -76,7 +76,7 @@ class TextViewerApp: StatelessWidget {
 
     // Desktop Shell PoC
     // A proof-of-concept desktop environment
-    // built with Flutter Swift + Fluent UI
+    // built with Flutter Swift + Macos UI
 
     func main() {
         let app = NSApplication.shared
@@ -89,7 +89,7 @@ class TextViewerApp: StatelessWidget {
         )
 
         runApp(
-            FluentApp(
+            MacosApp(
                 themeMode: .dark,
                 home: DesktopShell()
             )

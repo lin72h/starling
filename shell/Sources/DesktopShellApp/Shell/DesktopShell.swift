@@ -1007,9 +1007,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     appId: appId,
                     textureId: textureId,
                     onWindowClose: {
-                        // Client-initiated close: the Wayland protocol doesn't have a
-                        // server->client close command. The client disconnects on its own.
-                        // When it does, on_toplevel_destroy fires and cleans up.
+                        // xdg_toplevel.close — the protocol DOES have a
+                        // server->client close; believing otherwise is what
+                        // left Quit a no-op. The client runs its normal quit
+                        // path and disconnects, and on_toplevel_destroy then
+                        // fires and cleans up. If it ignores us, _quitApp
+                        // escalates to the pid captured at map time.
+                        wayland.requestClose(surfaceId: surfaceId)
                     },
                     onPointerEvent: { (phase, x, y, buttons) in
                         wayland.sendPointerEvent(
@@ -1994,7 +1998,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     rect: fullRect,
                     textureId: textureId,
                     onWindowClose: {
-                        // X11 window close: we could send WM_DELETE_WINDOW ClientMessage
+                        // ICCCM close request. The client runs its own quit
+                        // path; if it ignores us, _quitApp escalates to the
+                        // pid captured when the window was mapped.
+                        x11.requestClose(windowId: windowId)
                     },
                     onPointerEvent: { (phase, px, py, buttons) in
                         // Scale logical to physical pixels for X11 client
@@ -5503,10 +5510,28 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     // MARK: - Context Menu
 
+    /// The shell's context menus, in the macOS shape.
+    ///
+    /// Brightness and accent follow the shell theme so a menu matches the rest
+    /// of the chrome. The panel fill is deliberately NOT `shellTheme.popupTint`
+    /// — that colour is a 35%-alpha tint meant to be layered over the
+    /// liquid-glass refraction the status-bar popovers sit on, and a context
+    /// menu opens straight over whatever happens to be on the desktop, where
+    /// it would be unreadable. MacosMenu's own near-opaque slab is both legible
+    /// and closer to AppKit, which keeps menus opaque precisely because they
+    /// appear over unknown content.
+    private func _macosMenu(_ items: [MacosMenuEntry]) -> Widget {
+        return MacosMenu(
+            items: items,
+            brightness: shellTheme.isDark ? .dark : .light,
+            accentColor: DesktopTheme.accent
+        )
+    }
+
     private func _buildContextMenu() -> Widget {
-        var items: [MenuFlyoutItemBase] = [
-            MenuFlyoutItem(
-                text: Text("Change Wallpaper"),
+        var items: [MacosMenuEntry] = [
+            MacosMenuItem(
+                text: "Change Wallpaper",
                 onPressed: { [self] in
                     setState {
                         wallpaperPreset = wallpaperPreset.next
@@ -5515,33 +5540,33 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     }
                 }
             ),
-            MenuFlyoutItem(
-                text: Text(shellTheme.isDark ? "Light Appearance" : "Dark Appearance"),
+            MacosMenuItem(
+                text: shellTheme.isDark ? "Light Appearance" : "Dark Appearance",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
                     _setAppearance(dark: !shellTheme.isDark)
                 }
             ),
-            MenuFlyoutSeparator(),
+            MacosMenuSeparator(),
             // Spaces. New desktops append at the end of the strip; removal
             // rehomes the desktop's windows to the nearest user space.
-            MenuFlyoutItem(
-                text: Text("Mission Control"),
+            MacosMenuItem(
+                text: "Mission Control",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
                     _openMissionControl()
                 }
             ),
-            MenuFlyoutItem(
-                text: Text("New Desktop"),
+            MacosMenuItem(
+                text: "New Desktop",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
                     let idx = windowManager.addSpace()
                     _switchToSpace(idx)
                 }
             ),
-            MenuFlyoutItem(
-                text: Text("AI Space"),
+            MacosMenuItem(
+                text: "AI Space",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
                     if !windowManager.activeSpace.isAgent { _toggleAgentSpace() }
@@ -5550,8 +5575,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         ]
         let active = windowManager.activeSpace
         if active.isUser && windowManager.spaces.filter({ $0.isUser }).count > 1 {
-            items.append(MenuFlyoutItem(
-                text: Text("Remove This Desktop"),
+            items.append(MacosMenuItem(
+                text: "Remove This Desktop",
                 onPressed: { [self] in
                     setState {
                         contextMenuPosition = nil
@@ -5561,9 +5586,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             ))
         }
         items.append(contentsOf: [
-            MenuFlyoutSeparator(),
-                MenuFlyoutItem(
-                    text: Text("Display Settings"),
+            MacosMenuSeparator(),
+                MacosMenuItem(
+                    text: "Display Settings",
                     onPressed: { [self] in
                         setState {
                             contextMenuPosition = nil
@@ -5571,8 +5596,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         }
                     }
                 ),
-                MenuFlyoutItem(
-                    text: Text("Open Text Viewer"),
+                MacosMenuItem(
+                    text: "Open Text Viewer",
                     onPressed: { [self] in
                         setState {
                             contextMenuPosition = nil
@@ -5581,21 +5606,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     }
                 ),
         ])
-        // The flyout panel draws from the Fluent theme — override the
-        // app-level dark theme so menus follow the shell appearance.
-        return FluentTheme(
-            data: FluentThemeData(brightness: shellTheme.isDark ? .dark : .light),
-            child: MenuFlyout(items: items)
-        )
+        return _macosMenu(items)
     }
 
     /// Dock icon right-click menu: Show/Open, Quit (when running), and
     /// Remove from Dock (macOS style).
     private func _buildDockIconMenu(for appId: String) -> Widget {
         let running = _isAppRunning(appId)
-        var items: [MenuFlyoutItemBase] = [
-            MenuFlyoutItem(
-                text: Text(running ? "Show" : "Open"),
+        var items: [MacosMenuEntry] = [
+            MacosMenuItem(
+                text: running ? "Show" : "Open",
                 onPressed: { [self] in
                     setState {
                         _dockMenuAppId = nil
@@ -5605,18 +5625,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             ),
         ]
         if running {
-            items.append(MenuFlyoutItem(
-                text: Text("Quit"),
+            items.append(MacosMenuItem(
+                text: "Quit",
                 onPressed: { [self] in
                     setState { _dockMenuAppId = nil }
                     _quitApp(appId)
                 }
             ))
         }
-        items.append(MenuFlyoutSeparator())
+        items.append(MacosMenuSeparator())
         if dockAppOrder.contains(appId) {
-            items.append(MenuFlyoutItem(
-                text: Text("Remove from Dock"),
+            items.append(MacosMenuItem(
+                text: "Remove from Dock",
                 onPressed: { [self] in
                     setState {
                         _dockMenuAppId = nil
@@ -5627,8 +5647,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             ))
         } else {
             // Transient icon (running but unpinned) — offer to pin it.
-            items.append(MenuFlyoutItem(
-                text: Text("Keep in Dock"),
+            items.append(MacosMenuItem(
+                text: "Keep in Dock",
                 onPressed: { [self] in
                     setState {
                         _dockMenuAppId = nil
@@ -5640,10 +5660,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
             ))
         }
-        return FluentTheme(
-            data: FluentThemeData(brightness: shellTheme.isDark ? .dark : .light),
-            child: MenuFlyout(items: items)
-        )
+        return _macosMenu(items)
     }
 
     /// Quit a running app from its dock menu: tear down every desktop window
@@ -5656,6 +5673,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             win.ownerAgentId == nil && _appOwning(win)?.id == appId
         }
         guard !targets.isEmpty else { return }
+
+        // Client pids, collected BEFORE teardown — closing the windows drops
+        // the records these are resolved from, and a third-party app that
+        // ignores the close request would otherwise be unreachable.
+        var pids = Set<pid_t>()
+        for win in targets {
+            if let pid = _clientPid(of: win) { pids.insert(pid) }
+        }
+
         let activeSpaceId = windowManager.activeSpace.id
         setState {
             for win in targets {
@@ -5669,6 +5695,59 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
             }
         }
+        if !pids.isEmpty { _reapAfterQuit(pids) }
+    }
+
+    /// pid behind a third-party window, from the peer credentials its server
+    /// captured when the window appeared. nil for first-party and agent
+    /// windows, which are torn down through their own managers.
+    private func _clientPid(of win: WindowInfo) -> pid_t? {
+        #if os(Linux)
+        if win.appId.hasPrefix("wayland-"),
+           let sid = UInt32(win.appId.dropFirst("wayland-".count)) {
+            return waylandIntegration?.clientPid(surfaceId: sid)
+        }
+        if win.appId.hasPrefix("x11-"),
+           let wid = UInt32(win.appId.dropFirst("x11-".count)) {
+            return x11Integration?.clientPid(windowId: wid)
+        }
+        #endif
+        return nil
+    }
+
+    /// Make Quit mean it. The close request _quitApp just sent is advisory —
+    /// a client is free to ignore it, and Zoom's window vanishing tells you
+    /// nothing about its eleven processes — so give the app a grace period to
+    /// leave on its own, then signal, then insist.
+    ///
+    /// Signals go to the process GROUP: an app is a tree, and its helpers do
+    /// not exit just because the process holding the display connection did.
+    /// _spawnLauncher setsid's every app so that group is the app's alone.
+    private func _reapAfterQuit(_ pids: Set<pid_t>) {
+        #if os(Linux)
+        let ownGroup = getpgrp()
+        func signalAll(_ sig: Int32) {
+            for pid in pids {
+                guard pid > 1, kill(pid, 0) == 0 else { continue }  // already gone
+                let pgid = getpgid(pid)
+                // Never signal our own group — that is the desktop. An app
+                // launched before the setsid fix (or by something that did not
+                // detach) still shares it; quit that one by pid alone.
+                if pgid > 1 && pgid != ownGroup {
+                    kill(-pgid, sig)
+                } else {
+                    kill(pid, sig)
+                }
+            }
+        }
+        // 2s to quit gracefully, 3s more to honour SIGTERM, then SIGKILL.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            signalAll(SIGTERM)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                signalAll(SIGKILL)
+            }
+        }
+        #endif
     }
 
     // MARK: - IME
@@ -5983,8 +6062,28 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     private func _spawnLauncher(_ path: String, args: [String] = []) {
         guard let socketName = waylandIntegration?.socketName else { return }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
+        // Launch through setsid so the app becomes its own session leader
+        // instead of inheriting OUR process group. Two reasons, and the second
+        // one is not optional:
+        //
+        //   1. An app's helper processes (Zoom runs eleven) then share one
+        //      group, so quitting it is a single signal to that group rather
+        //      than a guess at which pids belong to the app.
+        //   2. Without this they sit in the SHELL's process group, and any
+        //      kill(-pgid, …) aimed at the app would take the whole desktop
+        //      down with it. _reapAfterQuit refuses to signal its own group
+        //      for exactly that reason — this is the other half of the guard.
+        //
+        // Foundation's Process has no setpgid knob on Linux, so the grouping
+        // has to come from the exec'd program. Fall back to a direct exec if
+        // setsid is missing (the app is then quit by pid, not by group).
+        if FileManager.default.isExecutableFile(atPath: "/usr/bin/setsid") {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/setsid")
+            process.arguments = [path] + args
+        } else {
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = args
+        }
         var env = ProcessInfo.processInfo.environment
         env["STARLING_WAYLAND"] = socketName
         env["STARLING_XDG_DIR"] = LoginUser.runtimeDir

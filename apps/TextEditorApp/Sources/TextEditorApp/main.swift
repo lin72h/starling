@@ -7,7 +7,7 @@ import Flutter
 
 /// Re-themes the editor when the parent shell pushes an appearance change
 /// over the DMA-BUF socket (same pattern as SettingsApp / CalculatorApp).
-/// Rooted in FluentApp so the toolbar's FluentTextBox finds its theme.
+/// Rooted in MacosApp so the toolbar's MacosTextField finds its theme.
 class ThemedEditorRoot: StatefulWidget {
     override func createState() -> State<StatefulWidget> {
         return _ThemedEditorRootState()
@@ -31,7 +31,7 @@ class _ThemedEditorRootState: State<StatefulWidget> {
     }
 
     override func build(_ context: any BuildContext) -> Widget {
-        return FluentApp(
+        return MacosApp(
             themeMode: _dark ? .dark : .light,
             home: TextEditorApp(),
             title: "Text Editor"

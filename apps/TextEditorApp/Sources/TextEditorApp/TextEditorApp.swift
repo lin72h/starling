@@ -634,7 +634,7 @@ class _TextEditorAppState: State<StatefulWidget>, @unchecked Sendable {
     // MARK: - Build
 
     override func build(_ context: any BuildContext) -> Widget {
-        let theme = FluentTheme.of(context)
+        let theme = MacosTheme.of(context)
         _isDark = theme.brightness == .dark
         pal = EditorPalette(dark: _isDark)
 
@@ -700,9 +700,9 @@ class _TextEditorAppState: State<StatefulWidget>, @unchecked Sendable {
                         },
                         SizedBox(width: 14),
                         Expanded(
-                            child: FluentTextBox(
+                            child: MacosTextField(
                                 controller: pathController,
-                                placeholderText: "~/untitled.rtf",
+                                placeholder: "~/untitled.rtf",
                                 onSubmitted: { [self] path in
                                     _openFile(path)
                                 }

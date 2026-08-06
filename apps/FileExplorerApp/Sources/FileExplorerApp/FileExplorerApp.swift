@@ -193,8 +193,8 @@ class _FileExplorerAppState: State<StatefulWidget>, @unchecked Sendable {
                 SizedBox(width: 10),
                 SizedBox(
                     width: 170,
-                    child: FluentTextBox(
-                        placeholderText: "Search",
+                    child: MacosTextField(
+                        placeholder: "Search",
                         onChanged: { [self] (text: String) in
                             bloc.add(.search(text))
                         }
@@ -402,7 +402,7 @@ class _FileExplorerAppState: State<StatefulWidget>, @unchecked Sendable {
             )
         )
 
-        return FluentScrollbar(controller: scrollController, child: list)
+        return MacosScrollbar(controller: scrollController, child: list)
     }
 
     private func _buildFileRow(_ entry: FileEntry, index: Int, isSelected: Bool) -> Widget {
@@ -863,8 +863,8 @@ class _NewFolderDialogState: State<StatefulWidget> {
             message: Column(
                 mainAxisSize: .min,
                 children: [
-                    FluentTextBox(
-                        placeholderText: "Folder name",
+                    MacosTextField(
+                        placeholder: "Folder name",
                         onChanged: { [self] (text: String) in
                             setState {
                                 folderName = text
@@ -948,8 +948,8 @@ class _RenameDialogState: State<StatefulWidget> {
             message: Column(
                 mainAxisSize: .min,
                 children: [
-                    FluentTextBox(
-                        placeholderText: "New name",
+                    MacosTextField(
+                        placeholder: "New name",
                         onChanged: { [self] (text: String) in
                             setState {
                                 newName = text
