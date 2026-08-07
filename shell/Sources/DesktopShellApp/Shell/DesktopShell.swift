@@ -364,27 +364,29 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     private var _spaceSlideController: AnimationController?
     private var _spaceSlideCurve: CurvedAnimation?
 
-    // ── AI Space (Murmuration agent mode) ────────────────────────────────
+    // ── Workspace mode ───────────────────────────────────────────────────
+    // A driver app with whatever it opens beside it. Independent of the AI
+    // Space below — it shares the "special space" mechanism and nothing else.
+    // UI lives in WorkspaceSpace.swift; stored state has to be here because
+    // extensions cannot add stored properties.
+    /// Where Ctrl+Up returns to when toggling out of workspace mode.
+    var _workspaceReturnSpaceIndex: Int = 0
+    /// Explicitly selected tab per workspace (workspaceId → windowId).
+    /// Absent or stale = follow the workspace: newest window wins.
+    var _workspaceActiveTab: [String: String] = [:]
+    /// Set while the launcher is filling a workspace's driver slot, so the
+    /// app it launches lands in the middle column instead of on the desktop.
+    var _launcherDriverTarget: String? = nil
+    /// Live width of the driver column; the divider drags it.
+    var _workspaceDriverW: Double = 688
+    /// True between pointer-down and pointer-up on the divider.
+    var _workspaceDividerDragging: Bool = false
+
+    // ── Broker-owned windows ─────────────────────────────────────────────
     // The persistent agent space holds the fleet UI instead of windows; it
     // is entered by Ctrl+Down / context menu only (never by Ctrl+arrow/Tab
     // cycling). Stored here because extensions can't add stored properties;
     // the UI lives in AgentSpace.swift.
-    /// Where Ctrl+Down returns to when toggling out of the AI Space.
-    var _agentReturnSpaceIndex: Int = 0
-    /// Generation token for the scripted P0 demo task (asyncAfter chains —
-    /// Foundation.Timer never fires on the DRM embedder).
-    var _agentDemoToken: Int = 0
-    /// Demo task progress line shown in the tile, nil when idle.
-    var _agentDemoStatus: String? = nil
-    /// Windows the human has taken over (P2): pointer-down into an app pane
-    /// arms it; Esc hands back. While a window is here, broker injections
-    /// for it are refused ("human has the controls").
-    var _humanControlledWindows: Set<String> = []
-    /// The selected session in the workbench (rail row); nil = first agent.
-    var _agentFeaturedId: String? = nil
-    /// Explicitly selected app tab per agent (agentId → windowId). Absent
-    /// or stale = follow the agent: the newest owned window is shown.
-    var _agentActiveTab: [String: String] = [:]
     /// Wayland ownership hand-off (P4): set right before spawning a
     /// Wayland client (Chrome via app-run) for an agent. The first toplevel
     /// that arrives consumes it AND records the client connection in
@@ -402,15 +404,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// Last content size configured per agent window (diff guard for
     /// _applyAgentWindowGeometry, which runs on every workbench build).
     var _agentSizeApplied: [String: Size] = [:]
-    /// Width of the workbench conversation column, draggable by the divider
-    /// between it and the stage.
-    var _agentChatW: Double = 688
     /// True while the divider is being dragged: window re-configures are
     /// deferred to the drop, so clients reflow once instead of per frame.
     var _agentDividerDragging: Bool = false
     /// 1s tick that refreshes tile status text (working/idle) while the
-    /// AI Space is visible — texture updates alone don't rebuild widgets.
-    var _agentStatusTimer: DispatchSourceTimer? = nil
+    /// a workspace is visible — texture updates alone don't rebuild widgets.
+    var _spaceRepaintTimer: DispatchSourceTimer? = nil
     #if os(Linux)
     /// The P1 agent broker: JSON-lines socket at
     /// $XDG_RUNTIME_DIR/starling-agent.sock. Every agent action crosses it.
@@ -996,15 +995,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         // Murmuration P2: tile status (working/idle) derives from broker op
         // and frame recency, which don't mark widgets dirty — poke a rebuild
-        // once a second while the AI Space is on screen.
+        // once a second while a workspace is on screen.
         let statusTimer = DispatchSource.makeTimerSource(queue: .main)
         statusTimer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
         statusTimer.setEventHandler { [weak self] in
-            guard let self, self.windowManager.activeSpace.isAgent else { return }
+            guard let self, self.windowManager.activeSpace.isSpecial else { return }
             self.setState {}
         }
         statusTimer.resume()
-        _agentStatusTimer = statusTimer
+        _spaceRepaintTimer = statusTimer
 
         // Frame tick (see _frameTickRequested): SIGRTMIN+2 = 36 on glibc.
         // Also pumps presents while an X11 GetImage client (Zoom screen share)
@@ -1385,9 +1384,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             var windowId = ""
             self.setState {
                 // addWindow may hop the active space to a user desktop (new
-                // windows never open inside the AI Space); if this turns out
+                // windows never open inside a workspace); if this turns out
                 // to be an agent-claimed window, the hop is undone below.
                 let spaceBefore = self.windowManager.activeSpaceIndex
+                // Whether a workspace was on screen must be sampled HERE:
+                // addWindow hops the active space to a user one, so asking
+                // afterwards always says no, and the window lands on the
+                // desktop the user cannot even see.
+                let workspaceOnEntry: String? =
+                    self.windowManager.spaces[spaceBefore].isWorkspace
+                        ? self.windowManager.selectedWorkspace?.id : nil
                 windowId = self.windowManager.addWindow(
                     title: Self._displayTitle(title),
                     appId: appId,
@@ -1446,6 +1452,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     ownerId = pending.agentId
                     launchReply = pending.onWindow
                 }
+                // Workspace mode: a window that opens while a workspace is on
+                // screen belongs to it. This is the path a GUI app started
+                // from the driver takes — the driver spawns it, it connects to
+                // the compositor, and its first toplevel arrives here.
+                var isWorkspaceWindow = false
+                if ownerId == nil, let wsId = workspaceOnEntry {
+                    ownerId = wsId
+                    isWorkspaceWindow = true
+                }
                 if let ownerId,
                    let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
                     win.ownerAgentId = ownerId
@@ -1453,7 +1468,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     win.pendingOpenAnimation = false
                     // Agent windows never move the human's view: undo the
                     // user-space hop addWindow performed (e.g. Ctrl+N in a
-                    // taken-over Chrome while watching the AI Space).
+                    // a broker client's Chrome opening a second window).
                     if self.windowManager.activeSpaceIndex != spaceBefore {
                         self.windowManager.switchToSpace(spaceBefore)
                     }
@@ -1462,8 +1477,14 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     // surfaceId in hand (the windowId→surface map is filled
                     // only after this callback returns; the fleet build
                     // re-evaluates the full policy from then on).
-                    wayland.setSurfaceThrottle(surfaceId: surfaceId, intervalMs: 200)
-                    self._agentThrottleApplied[windowId] = 200
+                    // Broker-owned windows are never drawn, so they are
+                    // throttled hard. A workspace tab IS drawn and has no
+                    // re-evaluation pass, so throttling it would leave the
+                    // visible tab stuck at 5fps forever.
+                    if !isWorkspaceWindow {
+                        wayland.setSurfaceThrottle(surfaceId: surfaceId, intervalMs: 200)
+                        self._agentThrottleApplied[windowId] = 200
+                    }
                     launchReply?(windowId)
                 }
             }
@@ -1801,6 +1822,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         self.setState {
                             if self._launcherQuery.isEmpty {
                                 self._launcherOpen = false
+                                self._launcherDriverTarget = nil
                             } else {
                                 self._launcherQuery = ""
                             }
@@ -1814,8 +1836,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         self._restartLauncherCaret()
                     case 0x28, 0x58:  // Enter / keypad Enter — launch the top match
                         if let first = self._launcherFilteredApps().first {
-                            self.setState { self._launcherOpen = false; self._launcherQuery = "" }
-                            self._launchOrFocusApp(first.appId)
+                            self._launchFromLauncher(first.appId)
                         }
                     default:
                         if let ch = keyData.character,
@@ -1887,7 +1908,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     } else if self._ctrlPressed, phys == 0x50 || phys == 0x4F {
                         let target = self.windowManager.activeSpaceIndex + (phys == 0x4F ? 1 : -1)
                         if self.windowManager.spaces.indices.contains(target),
-                           !self.windowManager.spaces[target].isAgent {
+                           !self.windowManager.spaces[target].isSpecial {
                             self._switchToSpace(target, animated: false)
                         }
                     }
@@ -1902,11 +1923,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // see them (macOS behaviour).
             if self._ctrlPressed, keyData.type == .down || keyData.type == .repeat {
                 if phys == 0x50 || phys == 0x4F {  // Left / Right arrow
-                    // Arrows never lead INTO the AI Space (dedicated entry
+                    // Arrows never lead INTO a workspace (dedicated entry
                     // only) — but they do lead out of it.
                     let target = self.windowManager.activeSpaceIndex + (phys == 0x4F ? 1 : -1)
                     if self.windowManager.spaces.indices.contains(target),
-                       !self.windowManager.spaces[target].isAgent {
+                       !self.windowManager.spaces[target].isSpecial {
                         if self._shiftPressed {
                             self._moveFocusedWindowToSpace(target)
                         } else {
@@ -1916,11 +1937,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     return true
                 }
                 if phys == 0x2B && keyData.type == .down {  // Tab
-                    // Cycle through the ordinary spaces; the AI Space (always
+                    // Cycle through the ordinary spaces; a workspace (always
                     // last) is skipped — from inside it, Tab exits to space 0.
                     let wm = self.windowManager
-                    let count = wm.spaces.count - (wm.agentSpaceIndex != nil ? 1 : 0)
-                    if count > 1 || wm.activeSpace.isAgent {
+                    let count = wm.spaces.count - wm.spaces.filter({ $0.isSpecial }).count
+                    if count > 1 || wm.activeSpace.isSpecial {
                         self._switchToSpace((wm.activeSpaceIndex + 1) % max(count, 1))
                     }
                     return true
@@ -1929,8 +1950,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     self._openMissionControl()
                     return true
                 }
-                if phys == 0x51 && keyData.type == .down {  // Down — AI Space
-                    self._toggleAgentSpace()
+                if phys == 0x51 && keyData.type == .down {  // Down
+                    // Ctrl+Up is Mission Control and Ctrl+←/→ cycle spaces,
+                    // so Down is the arrow left for workspace mode.
+                    self._toggleWorkspaceSpace()
                     return true
                 }
                 if phys == 0x2C && keyData.type == .down {  // Space — IME toggle
@@ -1962,19 +1985,6 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 return FocusManager.instance.dispatchKeyData(keyData)
             }
 
-            // Take-over release (Murmuration P2): Esc hands a taken-over
-            // agent window back to its agent instead of reaching the app.
-            if keyData.type == .down, phys == 0x29,
-               let ownerId = win.ownerAgentId,
-               self._humanControlledWindows.contains(win.id) {
-                self.setState {
-                    self._humanControlledWindows.remove(win.id)
-                    // Focus returns to the agent's terminal (supervision).
-                    self.windowManager.focusedWindowId = self.windowManager
-                        .agents.first(where: { $0.id == ownerId })?.terminalWindowId
-                }
-                return true
-            }
 
             // IME: while enabled, offer the key to fcitx first — consumed
             // keys are composition input (pinyin letters, candidate digits,
@@ -2193,24 +2203,30 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         _switchToSpace(target, carrying: winId)
     }
 
-    // MARK: - AI Space entry/exit (Murmuration)
+    // MARK: - Workspace entry/exit
 
-    /// Ctrl+Down / context menu: toggle between the AI Space and the
+    /// Ctrl+Down / context menu: toggle between workspace mode and the
     /// desktop. The space is created lazily on first entry and persists;
-    /// leaving returns to the space the user came from.
-    func _toggleAgentSpace() {
+    /// leaving returns to the space the user came from, and refuses to strand
+    /// them on it if that index has since gone away.
+    func _toggleWorkspaceSpace() {
         let wm = windowManager
-        if wm.activeSpace.isAgent {
-            var back = _agentReturnSpaceIndex
-            if !wm.spaces.indices.contains(back) || wm.spaces[back].isAgent {
+        if wm.activeSpace.isWorkspace {
+            var back = _workspaceReturnSpaceIndex
+            if !wm.spaces.indices.contains(back) || wm.spaces[back].isSpecial {
                 back = wm.spaces.indices.first(where: { wm.spaces[$0].isUser }) ?? 0
             }
             _switchToSpace(back)
             return
         }
-        _agentReturnSpaceIndex = wm.activeSpaceIndex
+        _workspaceReturnSpaceIndex = wm.activeSpaceIndex
         var idx: Int = 0
-        setState { idx = wm.ensureAgentSpace() }
+        setState {
+            idx = wm.ensureWorkspaceSpace()
+            // A workspace mode with no workspaces has nothing to show; the
+            // first entry gets one so the rail is never empty.
+            if wm.workspaces.isEmpty { wm.addWorkspace() }
+        }
         _switchToSpace(idx)
     }
 
@@ -2236,11 +2252,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// window picker instead (see _mcPickRecordTarget).
     func _openMissionControl(pickRecordTarget: Bool = false) {
         guard !_missionControlOpen else { return }
-        // Mission Control shows desktops; from inside the AI Space, exit to
-        // the return space first (the AI Space has no strip thumbnail).
-        if windowManager.activeSpace.isAgent {
-            var back = _agentReturnSpaceIndex
-            if !windowManager.spaces.indices.contains(back) || windowManager.spaces[back].isAgent {
+        // Mission Control shows desktops; from inside a special space, exit
+        // to the return space first (neither has a strip thumbnail).
+        if windowManager.activeSpace.isSpecial {
+            var back = _workspaceReturnSpaceIndex
+            if !windowManager.spaces.indices.contains(back)
+                || windowManager.spaces[back].isSpecial {
                 back = windowManager.spaces.indices.first(where: { windowManager.spaces[$0].isUser }) ?? 0
             }
             _switchToSpace(back, animated: false)
@@ -2361,7 +2378,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if let fid = windowManager.focusedWindowId,
            let win = windowManager.windows.first(where: { $0.id == fid }),
            // Agent-owned windows (e.g. the focused agent terminal in the
-           // AI Space) never move onto a desktop via carry.
+           // a workspace) never move onto a desktop via carry.
            win.ownerAgentId == nil,
            !win.isFullscreen, !win.isMinimized {
             setState {
@@ -2590,7 +2607,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             children.append(makeWallpaper())
         }
 
-        // [0.5] AI Space fleet UI (Murmuration) — rendered per slide layer,
+        // [0.5] Workspace mode — rendered per slide layer,
         // like the wallpaper, so entering/leaving slides it with the space.
         // Ordinary spaces contribute nothing; the ValueKey keeps the fleet's
         // element (and its terminal focus state) alive across slide/steady
@@ -2598,12 +2615,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if !_missionControlOpen {
             for layer in slideLayers {
                 guard let space = windowManager.spaces.first(where: { $0.id == layer.spaceId }),
-                      space.isAgent else { continue }
+                      space.isWorkspace else { continue }
                 children.append(Positioned(
-                    key: ValueKey("agent-space"),
+                    key: ValueKey("workspace-space"),
                     left: layer.dx, top: 0,
                     width: screenWidth, height: screenHeight,
-                    child: _buildAgentSpace(context)))
+                    child: _buildWorkspaceSpace(context)))
             }
         }
 
@@ -3025,16 +3042,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         } else {
             children.append(statusBarWidget)
         }
-        // The dock launches desktop apps — meaningless in the AI Space, where
+        // The dock launches desktop apps — meaningless in a workspace, where
         // every window belongs to an agent. Hide it there, cross-fading with
         // the space slide (the model flips at slide start, so the fade tracks
         // the incoming space's progress rather than snapping).
-        let agentTarget = windowManager.activeSpace.isAgent
+        let agentTarget = windowManager.activeSpace.isSpecial
         var dockOpacity = agentTarget ? 0.0 : 1.0
         if let s = _spaceSlide, let curve = _spaceSlideCurve,
            let from = windowManager.spaces.first(where: { $0.id == s.fromId }),
-           from.isAgent != agentTarget {
-            // Leaving the AI Space fades the dock in; entering fades it out.
+           from.isSpecial != agentTarget {
+            // Leaving a workspace fades the dock in; entering fades it out.
             dockOpacity = agentTarget ? 1.0 - curve.value : curve.value
         }
         // Fullscreen hides the dock like it hides the status bar — it only
@@ -3249,12 +3266,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         apps: _launcherFilteredApps(),
                         query: _launcherQuery,
                         caretOn: _launcherCaretOn,
-                        onLaunch: { [self] appId in
-                            setState { _launcherOpen = false; _launcherQuery = "" }
-                            _launchOrFocusApp(appId)
-                        },
+                        onLaunch: { [self] appId in _launchFromLauncher(appId) },
                         onDismiss: { [self] in
-                            setState { _launcherOpen = false; _launcherQuery = "" }
+                            setState {
+                                _launcherOpen = false
+                                _launcherQuery = ""
+                                _launcherDriverTarget = nil
+                            }
                         }
                     )
                 )
@@ -5077,7 +5095,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// newer restart has bumped the token, so no close path has to remember to
     /// cancel it (and there are five of them). `Foundation.Timer` never fires
     /// on the DRM embedder, so this is `asyncAfter` + a generation token — the
-    /// codebase idiom, see `AgentSpace._agentDemoToken`.
+    /// codebase idiom for cancelling an asyncAfter chain.
     func _restartLauncherCaret() {
         _launcherCaretToken &+= 1
         let token = _launcherCaretToken
@@ -6075,10 +6093,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
             ),
             MacosMenuItem(
-                text: "AI Space",
+                text: "Workspace",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
-                    if !windowManager.activeSpace.isAgent { _toggleAgentSpace() }
+                    if !windowManager.activeSpace.isWorkspace { _toggleWorkspaceSpace() }
                 }
             ),
         ]
@@ -6605,7 +6623,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// `extraArgs` reach a first-party app's argv on a fresh launch (e.g.
     /// Settings' `--pane=network` deep link). If the app is already running
     /// it is only focused — there is no runtime pane-switch channel.
-    private func _launchOrFocusApp(_ appId: String, extraArgs: [String] = []) {
+    // Not private: WorkspaceSpace.swift routes launcher launches through
+    // _launchFromLauncher, which falls back to this for anything that is not
+    // filling a workspace's driver slot.
+    func _launchOrFocusApp(_ appId: String, extraArgs: [String] = []) {
         // Ignore if this app is already being launched
         if _pendingAppLaunches.contains(appId) { return }
 

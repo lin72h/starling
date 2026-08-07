@@ -115,7 +115,7 @@ final class AgentBroker: @unchecked Sendable {
     /// Apps an agent may launch (design: scope.launch). Rects follow the
     /// dock launch table; position is irrelevant for agent windows.
     /// Apps an agent may launch. No sizes here on purpose: the window is
-    /// given the AI Space's pane size at launch, so a nominal size in this
+    /// given a nominal size at launch, so the size in this
     /// table could only ever disagree with the one that gets applied.
     private static let launchable: [String: (exec: String, title: String)] = [
         "files": ("FileExplorerApp", "Files"),
@@ -597,14 +597,6 @@ final class AgentBroker: @unchecked Sendable {
         /// a boundary. It was checked only in `inject` before, which by then
         /// was the one path an agent driving a web page did not use.
         ///
-        /// Not complete: a CDP session opened before the take-over keeps its
-        /// socket. Refusing `cdp_endpoint` stops an agent picking the controls
-        /// back up, not one already holding them; revoking mid-session needs
-        /// the shell to close the page's debugger connection.
-        func humanHasControls(_ win: WindowInfo) -> Bool {
-            shell._humanControlledWindows.contains(win.id)
-        }
-
         switch op {
         case "list_windows":
             let wins = wm.windows(ownedBy: agentId).map { w -> [String: Any] in
@@ -652,7 +644,7 @@ final class AgentBroker: @unchecked Sendable {
             let appId = "\(agentId):\(app)#\(launchSeq)"
             let replied = ReplyOnce()
             // Launch at the pane size this window will be given, not the
-            // table's nominal size: the panes are what the AI Space actually
+            // table's nominal size: _agentStageContentSize is what actually
             // lays out, and a child launched larger draws an overflow marker
             // on its first frame. It also means the `content` size we report
             // back is the one the agent will really get.
@@ -682,11 +674,6 @@ final class AgentBroker: @unchecked Sendable {
 
         case "inject":
             guard let win = ownedWindow() else { return fail("no such owned window") }
-            // Take-over (P2): while the human has the controls of this
-            // window, agent injections are refused — the agent sees why.
-            if shell._humanControlledWindows.contains(win.id) {
-                return fail("paused: human has the controls")
-            }
             guard let ev = req["ev"] as? [String: Any],
                   let type = ev["type"] as? String else { return fail("bad ev") }
             lastInjectMs[win.id] = nowMs
@@ -778,7 +765,6 @@ final class AgentBroker: @unchecked Sendable {
 
         case "capture":
             guard let win = ownedWindow() else { return fail("no such owned window") }
-            if humanHasControls(win) { return fail("paused: human has the controls") }
             guard let texId = win.textureId,
                   let info = linuxProcessAppManager?.dmaBufInfo(textureId: Int64(texId)) else {
                 return fail("window has no capturable buffer")
@@ -871,7 +857,6 @@ final class AgentBroker: @unchecked Sendable {
             // endpoint (same ownership chokepoint — the window must be
             // an owned Wayland toplevel).
             guard let win = ownedWindow() else { return fail("no such owned window") }
-            if humanHasControls(win) { return fail("paused: human has the controls") }
             guard win.appId.hasPrefix("wayland-") else {
                 return fail("not a Wayland client window")
             }
@@ -910,7 +895,6 @@ final class AgentBroker: @unchecked Sendable {
             // agent addresses labels and node ids — no coordinates, no
             // pixels; the same ownership chokepoint applies.
             guard let win = ownedWindow() else { return fail("no such owned window") }
-            if humanHasControls(win) { return fail("paused: human has the controls") }
             guard let endpoint = win.agentEndpointPath else {
                 return fail("window has no semantics endpoint")
             }
