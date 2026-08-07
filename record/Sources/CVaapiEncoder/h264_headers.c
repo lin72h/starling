@@ -204,3 +204,84 @@ size_t h264_write_slice_header(const H264Config* cfg, int is_idr,
     return h264_bw_emit_nal(&w, 3, is_idr ? NAL_IDR_SLICE : NAL_SLICE,
                             H264_NAL_START_CODE, out, cap);
 }
+
+// ─── reading back ───────────────────────────────────────────────────────────
+//
+// A minimal RBSP reader, enough to walk one slice header of the shape we
+// asked the driver to produce. It is not a general parser and does not try to
+// be: every field below is one this encoder configured, so the layout is
+// known rather than discovered.
+
+typedef struct {
+    const uint8_t* d;
+    size_t size;
+    size_t bit;      // absolute bit position in the UNESCAPED copy
+    int overrun;
+} RbspReader;
+
+static uint32_t rr_u(RbspReader* r, int n) {
+    uint32_t v = 0;
+    for (int i = 0; i < n; i++) {
+        size_t byi = r->bit >> 3;
+        if (byi >= r->size) { r->overrun = 1; return v; }
+        v = (v << 1) | ((r->d[byi] >> (7 - (r->bit & 7))) & 1u);
+        r->bit++;
+    }
+    return v;
+}
+
+static uint32_t rr_ue(RbspReader* r) {
+    int zeros = 0;
+    while (!r->overrun && rr_u(r, 1) == 0) {
+        if (++zeros > 32) { r->overrun = 1; return 0; }
+    }
+    if (r->overrun) return 0;
+    if (zeros == 0) return 0;
+    return (1u << zeros) - 1 + rr_u(r, zeros);
+}
+
+static int32_t rr_se(RbspReader* r) {
+    uint32_t k = rr_ue(r);
+    return (k & 1) ? (int32_t)((k + 1) / 2) : -(int32_t)(k / 2);
+}
+
+int h264_read_slice_qp_delta(const uint8_t* nal, size_t size, int* out_delta) {
+    if (!nal || size < 2 || !out_delta) return 0;
+    int type = nal[0] & 0x1f;
+    if (type != NAL_SLICE && type != NAL_IDR_SLICE) return 0;
+    int is_idr = type == NAL_IDR_SLICE;
+
+    // Strip emulation-prevention bytes so bit positions are the syntax's.
+    uint8_t buf[512];
+    size_t n = 0, zeros = 0;
+    for (size_t i = 1; i < size && n < sizeof buf; i++) {
+        uint8_t b = nal[i];
+        if (zeros == 2 && b == 0x03) { zeros = 0; continue; }
+        buf[n++] = b;
+        zeros = (b == 0) ? zeros + 1 : 0;
+    }
+
+    RbspReader r = { .d = buf, .size = n, .bit = 0, .overrun = 0 };
+    rr_ue(&r);                                  // first_mb_in_slice
+    uint32_t slice_type = rr_ue(&r);
+    rr_ue(&r);                                  // pic_parameter_set_id
+    rr_u(&r, 4 + 4);                            // frame_num, log2_max = 8
+    if (is_idr) rr_ue(&r);                      // idr_pic_id
+    rr_u(&r, 4 + 4);                            // pic_order_cnt_lsb
+    int is_p = (slice_type % 5) == 0;
+    if (is_p) {
+        rr_u(&r, 1);                            // num_ref_idx_active_override
+        rr_u(&r, 1);                            // ref_pic_list_modification_l0
+    }
+    if (is_idr) {
+        rr_u(&r, 1);                            // no_output_of_prior_pics
+        rr_u(&r, 1);                            // long_term_reference_flag
+    } else {
+        rr_u(&r, 1);                            // adaptive_ref_pic_marking
+    }
+    if (is_p) rr_ue(&r);                        // cabac_init_idc (CABAC, P only)
+    int32_t delta = rr_se(&r);
+    if (r.overrun) return 0;
+    *out_delta = (int)delta;
+    return 1;
+}

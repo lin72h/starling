@@ -80,4 +80,14 @@ size_t h264_write_slice_header(const H264Config* cfg, int is_idr,
                                uint8_t* out, size_t cap,
                                unsigned int* bit_length);
 
+/// Read back the `slice_qp_delta` a driver wrote into a slice NAL it emitted.
+/// `nal` is the bare NAL including its header byte, no start code.
+///
+/// This exists to check the one assumption in H264_PIC_INIT_QP that the API
+/// gives no way to ask about. Encode one picture in CQP with
+/// `pic_init_qp = H264_PIC_INIT_QP` and `slice_qp_delta = 0`; a driver that
+/// rebases against the same constant writes a delta of 0, and one that does
+/// not writes the difference. Returns 1 on success.
+int h264_read_slice_qp_delta(const uint8_t* nal, size_t size, int* out_delta);
+
 #endif  // STARLING_H264_HEADERS_H

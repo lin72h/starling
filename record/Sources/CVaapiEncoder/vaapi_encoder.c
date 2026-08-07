@@ -123,6 +123,168 @@ static void ve_log_null(void* ctx, const char* msg) { (void)ctx; (void)msg; }
 
 // ─── probe ──────────────────────────────────────────────────────────────────
 
+/// Encode one small IDR in CQP and check that the driver rebases
+/// slice_qp_delta against the same constant our PPS declares.
+///
+/// 256x256, not smaller: at 64x64 this hardware refuses the encode outright
+/// and the probe reports a disagreement that is really a size limit.
+///
+/// Submitting `pic_init_qp = H264_PIC_INIT_QP` with `slice_qp_delta = 0`, a
+/// driver that agrees writes a delta of 0. radeonsi does. A driver that
+/// rebases against something else writes the difference, and every P-frame it
+/// then produces decodes as garbage, because CABAC seeds its contexts from
+/// SliceQPY. That is not a failure we can paper over from here, so it fails
+/// the probe and the recorder stays on the pipe encoder, which always works.
+///
+/// Measured on radeonsi, submitting 22/26/30/34 gives deltas of -4/0/4/8 —
+/// exactly `submitted - 26` — which is what makes this a reliable test rather
+/// than a guess.
+static int ve_qp_base_agrees(VADisplay dpy) {
+    enum { S = 256 };
+    VAConfigAttrib attrs[3] = {
+        { .type = VAConfigAttribRTFormat, .value = VA_RT_FORMAT_YUV420 },
+        { .type = VAConfigAttribRateControl, .value = VA_RC_CQP },
+        { .type = VAConfigAttribEncPackedHeaders,
+          .value = VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_PICTURE
+                 | VA_ENC_PACKED_HEADER_SLICE },
+    };
+    VAConfigID cfg_id = VA_INVALID_ID;
+    VAContextID ctx = VA_INVALID_ID;
+    VABufferID coded = VA_INVALID_ID;
+    VASurfaceID surf[2] = { VA_INVALID_SURFACE, VA_INVALID_SURFACE };
+    int ok = 0;
+
+    if (vaCreateConfig(dpy, VAProfileH264Main, VAEntrypointEncSlice, attrs, 3,
+                       &cfg_id) != VA_STATUS_SUCCESS) return 0;
+    if (vaCreateSurfaces(dpy, VA_RT_FORMAT_YUV420, S, S, surf, 2, NULL, 0)
+        != VA_STATUS_SUCCESS) goto out;
+    if (vaCreateContext(dpy, cfg_id, S, S, VA_PROGRESSIVE, surf, 2, &ctx)
+        != VA_STATUS_SUCCESS) goto out;
+    if (vaCreateBuffer(dpy, ctx, VAEncCodedBufferType, S * S * 3 / 2, 1, NULL,
+                       &coded) != VA_STATUS_SUCCESS) goto out;
+
+    H264Config cfg;
+    h264_config_init(&cfg, S, S, 30);
+
+    VAEncSequenceParameterBufferH264 seq;
+    memset(&seq, 0, sizeof seq);
+    seq.level_idc = (uint8_t)cfg.level_idc;
+    seq.picture_width_in_mbs = (uint16_t)cfg.mb_width;
+    seq.picture_height_in_mbs = (uint16_t)cfg.mb_height;
+    seq.intra_period = 1; seq.intra_idr_period = 1; seq.ip_period = 1;
+    seq.max_num_ref_frames = 1;
+    seq.seq_fields.bits.chroma_format_idc = 1;
+    seq.seq_fields.bits.frame_mbs_only_flag = 1;
+    seq.seq_fields.bits.direct_8x8_inference_flag = 1;
+    seq.seq_fields.bits.log2_max_frame_num_minus4 = (uint32_t)cfg.log2_max_frame_num_minus4;
+    seq.seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 = (uint32_t)cfg.log2_max_poc_lsb_minus4;
+    seq.time_scale = 60; seq.num_units_in_tick = 1;
+
+    VAEncPictureParameterBufferH264 pic;
+    memset(&pic, 0, sizeof pic);
+    pic.CurrPic.picture_id = surf[1];
+    for (int i = 0; i < 16; i++) {
+        pic.ReferenceFrames[i].picture_id = VA_INVALID_SURFACE;
+        pic.ReferenceFrames[i].flags = VA_PICTURE_H264_INVALID;
+    }
+    pic.coded_buf = coded;
+    pic.pic_init_qp = (uint8_t)cfg.pic_init_qp;
+    pic.pic_fields.bits.idr_pic_flag = 1;
+    pic.pic_fields.bits.reference_pic_flag = 1;
+    pic.pic_fields.bits.entropy_coding_mode_flag = 1;
+    pic.pic_fields.bits.deblocking_filter_control_present_flag = 1;
+
+    VAEncSliceParameterBufferH264 sl;
+    memset(&sl, 0, sizeof sl);
+    sl.num_macroblocks = (uint32_t)(cfg.mb_width * cfg.mb_height);
+    sl.slice_type = 2;
+    for (int i = 0; i < 32; i++) {
+        sl.RefPicList0[i].picture_id = VA_INVALID_SURFACE;
+        sl.RefPicList0[i].flags = VA_PICTURE_H264_INVALID;
+        sl.RefPicList1[i].picture_id = VA_INVALID_SURFACE;
+        sl.RefPicList1[i].flags = VA_PICTURE_H264_INVALID;
+    }
+
+    uint8_t sps[512], pps[512], sh[512];
+    size_t sps_n = h264_write_sps(&cfg, H264_NAL_START_CODE, sps, sizeof sps);
+    size_t pps_n = h264_write_pps(&cfg, H264_NAL_START_CODE, pps, sizeof pps);
+    unsigned sh_bits = 0;
+    if (!sps_n || !pps_n ||
+        !h264_write_slice_header(&cfg, 1, 0, 0, 0, 0, sh, sizeof sh, &sh_bits)) {
+        goto out;
+    }
+
+    VABufferID ids[9];
+    int n = 0;
+    VAEncPackedHeaderParameterBuffer ph;
+    if (vaCreateBuffer(dpy, ctx, VAEncSequenceParameterBufferType, sizeof seq, 1,
+                       &seq, &ids[n]) != VA_STATUS_SUCCESS) goto out;
+    n++;
+    memset(&ph, 0, sizeof ph);
+    ph.type = VAEncPackedHeaderSequence; ph.bit_length = (uint32_t)sps_n * 8;
+    if (vaCreateBuffer(dpy, ctx, VAEncPackedHeaderParameterBufferType, sizeof ph,
+                       1, &ph, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    if (vaCreateBuffer(dpy, ctx, VAEncPackedHeaderDataBufferType, (unsigned)sps_n,
+                       1, sps, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    memset(&ph, 0, sizeof ph);
+    ph.type = VAEncPackedHeaderPicture; ph.bit_length = (uint32_t)pps_n * 8;
+    if (vaCreateBuffer(dpy, ctx, VAEncPackedHeaderParameterBufferType, sizeof ph,
+                       1, &ph, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    if (vaCreateBuffer(dpy, ctx, VAEncPackedHeaderDataBufferType, (unsigned)pps_n,
+                       1, pps, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    if (vaCreateBuffer(dpy, ctx, VAEncPictureParameterBufferType, sizeof pic, 1,
+                       &pic, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    memset(&ph, 0, sizeof ph);
+    ph.type = VAEncPackedHeaderSlice; ph.bit_length = sh_bits;
+    if (vaCreateBuffer(dpy, ctx, VAEncPackedHeaderParameterBufferType, sizeof ph,
+                       1, &ph, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    if (vaCreateBuffer(dpy, ctx, VAEncPackedHeaderDataBufferType,
+                       (sh_bits + 7) / 8, 1, sh, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+    if (vaCreateBuffer(dpy, ctx, VAEncSliceParameterBufferType, sizeof sl, 1,
+                       &sl, &ids[n]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    n++;
+
+    if (vaBeginPicture(dpy, ctx, surf[0]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+    VAStatus st = vaRenderPicture(dpy, ctx, ids, n);
+    if (vaEndPicture(dpy, ctx) != VA_STATUS_SUCCESS || st != VA_STATUS_SUCCESS) {
+        goto cleanup_bufs;
+    }
+    if (vaSyncSurface(dpy, surf[0]) != VA_STATUS_SUCCESS) goto cleanup_bufs;
+
+    VACodedBufferSegment* seg = NULL;
+    if (vaMapBuffer(dpy, coded, (void**)&seg) == VA_STATUS_SUCCESS) {
+        // Walk to the slice NAL and read the delta the driver chose.
+        for (VACodedBufferSegment* s = seg; s && !ok; s = (VACodedBufferSegment*)s->next) {
+            const uint8_t* d = (const uint8_t*)s->buf;
+            for (unsigned i = 0; i + 5 < s->size; i++) {
+                if (d[i] || d[i+1] || d[i+2] || d[i+3] != 1) continue;
+                int delta = 0;
+                if (h264_read_slice_qp_delta(d + i + 4, s->size - i - 4, &delta)) {
+                    ok = (delta == 0);
+                    break;
+                }
+            }
+        }
+        vaUnmapBuffer(dpy, coded);
+    }
+
+cleanup_bufs:
+    for (int i = 0; i < n; i++) vaDestroyBuffer(dpy, ids[i]);
+out:
+    if (coded != VA_INVALID_ID) vaDestroyBuffer(dpy, coded);
+    if (ctx != VA_INVALID_ID) vaDestroyContext(dpy, ctx);
+    if (cfg_id != VA_INVALID_ID) vaDestroyConfig(dpy, cfg_id);
+    if (surf[0] != VA_INVALID_SURFACE) vaDestroySurfaces(dpy, surf, 2);
+    return ok;
+}
+
 int vaapi_encoder_probe(const char* device) {
     if (!device) return 0;
     int fd = open(device, O_RDWR | O_CLOEXEC);
@@ -152,6 +314,13 @@ int vaapi_encoder_probe(const char* device) {
              && enc[1].value != VA_ATTRIB_NOT_SUPPORTED
              && (enc[1].value & VA_ENC_PACKED_HEADER_SEQUENCE)
              && (enc[1].value & VA_ENC_PACKED_HEADER_SLICE);
+        // The QP-base agreement is NOT checked here, deliberately. This runs
+        // during shell startup, warmed on a background queue, and it would
+        // mean submitting a GPU encode on the compositor's own render node
+        // while it is still bringing up EGL and GBM on that device. A
+        // capability query is safe there; a real encode is a risk taken for
+        // no benefit, since the answer is only needed when a recording
+        // actually starts. vaapi_encoder_open does it instead.
         vaTerminate(dpy);
     }
     close(fd);
@@ -304,6 +473,16 @@ VaapiEncoder* vaapi_encoder_open(const char* device,
     int major = 0, minor = 0;
     VAStatus st = vaInitialize(e->dpy, &major, &minor);
     if (st != VA_STATUS_SUCCESS) { ve_set_err(e, "vaInitialize", st); goto fail; }
+
+    // Before committing to this path, confirm the driver rebases
+    // slice_qp_delta against the constant our PPS declares. Refusing here
+    // costs one small throwaway encode and drops the caller onto the pipe
+    // encoder; getting it wrong costs every P-frame in the recording.
+    if (!ve_qp_base_agrees(e->dpy)) {
+        ve_set_err(e, "driver disagrees about pic_init_qp — using the pipe encoder",
+                   VA_STATUS_SUCCESS);
+        goto fail;
+    }
 
     st = vaCreateSurfaces(e->dpy, VA_RT_FORMAT_YUV420, (unsigned)out_w,
                           (unsigned)out_h, &e->input, 1, NULL, 0);
