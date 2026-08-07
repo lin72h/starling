@@ -970,11 +970,23 @@ public class GpuDmaBufRenderer {
 
     // MARK: - DPI Control
 
+    /// Write one control event to the shell, retrying an interrupted
+    /// syscall — a signal landing mid-write (SIGCHLD is near-constant in
+    /// these apps) must not eat a user's click. SOCK_SEQPACKET writes are
+    /// atomic, so there are no partials to worry about.
+    private func writeControlEvent(_ event: inout DmaBufInputEvent) {
+        while true {
+            let n = Glibc.write(socketFd, &event,
+                                MemoryLayout<DmaBufInputEvent>.size)
+            if n >= 0 || errno != EINTR { return }
+        }
+    }
+
     /// Send a DPI change request to the parent process via the socket.
     public func sendDpiChange(_ dpi: Double) {
         var event = DmaBufInputEvent(x: dpi, y: 0, buttons: 0,
                                      type: DMABUF_CONTROL_SET_DPI, phase: 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
         FileHandle.standardError.write(Data("[GpuDmaBufRenderer] Sent DPI change: \(dpi)\n".utf8))
     }
 
@@ -1009,13 +1021,13 @@ public class GpuDmaBufRenderer {
                                      buttons: Int64(bitPattern: packed),
                                      type: Int32(DMABUF_CARET),
                                      phase: visible ? 1 : 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
     }
 
     public func sendThemeChange(dark: Bool) {
         var event = DmaBufInputEvent(x: dark ? 1 : 0, y: 0, buttons: 0,
                                      type: DMABUF_CONTROL_SET_THEME, phase: 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
         FileHandle.standardError.write(Data("[GpuDmaBufRenderer] Sent theme change: dark=\(dark)\n".utf8))
     }
 
@@ -1023,7 +1035,7 @@ public class GpuDmaBufRenderer {
     public func sendLayoutChange(tiling: Bool) {
         var event = DmaBufInputEvent(x: tiling ? 1 : 0, y: 0, buttons: 0,
                                      type: DMABUF_CONTROL_SET_LAYOUT, phase: 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
     }
 
     /// Ask the shell to switch the wallpaper preset (Settings picker). The
@@ -1031,7 +1043,7 @@ public class GpuDmaBufRenderer {
     public func sendWallpaperChange(preset: Int) {
         var event = DmaBufInputEvent(x: Double(preset), y: 0, buttons: 0,
                                      type: DMABUF_CONTROL_SET_WALLPAPER, phase: 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
     }
 
     /// Ask the shell to change the screensaver idle timeout (Settings
@@ -1039,7 +1051,7 @@ public class GpuDmaBufRenderer {
     public func sendScreensaverChange(seconds: Int) {
         var event = DmaBufInputEvent(x: Double(seconds), y: 0, buttons: 0,
                                      type: DMABUF_CONTROL_SET_SCREENSAVER, phase: 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
     }
 
     /// Ask the shell to make `outputId` the primary display (Settings ›
@@ -1048,7 +1060,7 @@ public class GpuDmaBufRenderer {
         var event = DmaBufInputEvent(x: Double(outputId), y: 0, buttons: 0,
                                      type: DMABUF_CONTROL_SET_PRIMARY_DISPLAY,
                                      phase: 0)
-        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+        writeControlEvent(&event)
     }
 
     /// Global reference for child apps to send control messages.

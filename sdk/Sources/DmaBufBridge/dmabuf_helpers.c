@@ -113,7 +113,16 @@ ssize_t dmabuf_recv_with_fd(int socket, void* buf, size_t buf_len,
     msg.msg_control = cmsg_buf;
     msg.msg_controllen = sizeof(cmsg_buf);
 
-    ssize_t received = recvmsg(socket, &msg, 0);
+    // EINTR retry, not optional hygiene: the shell's per-child reader thread
+    // treats any <= 0 as EOF and exits FOREVER, and this process is drenched
+    // in signals (SIGCHLD from every spawned wpctl/nmcli, SIGUSR1 screenshots,
+    // SIGRTMIN recording toggles). One interrupted recvmsg silently killed the
+    // child->shell control channel: the Settings app kept receiving pushes and
+    // pointer events while every request it SENT went nowhere.
+    ssize_t received;
+    do {
+        received = recvmsg(socket, &msg, 0);
+    } while (received < 0 && errno == EINTR);
     if (out_fd) *out_fd = -1;
 
     if (received <= 0) return received;

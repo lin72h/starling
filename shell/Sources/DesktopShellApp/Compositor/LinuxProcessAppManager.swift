@@ -628,7 +628,18 @@ class LinuxProcessAppManager {
             while true {
                 var receivedFd: Int32 = -1
                 let n = dmabuf_recv_with_fd(clientSock, &buf, buf.count, &receivedFd)
-                if n <= 0 { break }
+                if n <= 0 {
+                    // This loop IS the child->shell control channel (DPI,
+                    // theme, primary display, caret) — its death must never
+                    // be silent again. n==0 is the child closing (normal
+                    // exit); anything else deserves an errno in the log.
+                    // EINTR is retried inside dmabuf_recv_with_fd.
+                    if n < 0 {
+                        FileHandle.standardError.write(Data(
+                            "[ProcessApp] child socket reader exiting: recv=\(n) errno=\(errno)\n".utf8))
+                    }
+                    break
+                }
 
                 let texId = launchState.value.texId
 
