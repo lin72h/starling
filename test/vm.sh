@@ -184,7 +184,20 @@ step "functional checks, against the installed .deb"
 # functional.py — forget this file and the check fails as "portal handshake
 # failed" with a python traceback about a missing script.
 "$HARNESS/scp-vm.sh" "$REPO/test/screencast_client.py" '~/' >/dev/null
+# Same trap for the clipboard check's stand-in for Chrome: resolved beside
+# functional.py, and without it the check reports SKIP rather than failing —
+# which reads as "covered" in the tally when it is not.
+"$HARNESS/scp-vm.sh" "$REPO/test/clipboard_gtk_client.py" '~/' >/dev/null
 "$HARNESS/scp-vm.sh" "$REPO/build/shell-drive.py" '~/' >/dev/null
+# The clipboard checks need wl-clipboard (a data-control peer to copy from and
+# paste to) and GTK 3 python bindings (a wl_data_device client, which is the
+# only kind that can catch the offer-on-interaction regression). Neither is in
+# the base image, and both checks SKIP silently without them — so install here,
+# the same way g3-check.sh pulls mesa-utils, rather than let the gate report a
+# clean run over a hole.
+ssh_vm 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        wl-clipboard python3-gi gir1.2-gtk-3.0' >/dev/null 2>&1 \
+    || echo "  note: clipboard test deps unavailable — those checks will skip"
 ssh_vm 'mkdir -p ~/fixtures'
 for f in "$REPO"/test/fixtures/*.app; do
     "$HARNESS/scp-vm.sh" "$f" '~/fixtures/' >/dev/null
