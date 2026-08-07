@@ -162,19 +162,24 @@ unauthenticated.
 
 What remains of the aerial's cost is the `hwdownload` and the texture
 upload, about 0.4 GB/s each way, and removing them needs the decoder to
-hand the compositor a dma-buf. There are only two ways there, and both
-are choices someone has to make rather than work to schedule:
+hand the compositor a dma-buf.
 
-- **Link libav\*** and use `vaExportSurfaceHandle`. Ubuntu builds ffmpeg
-  with `--enable-gpl`, so this reverses the deliberate decision in
-  ade2f64 and changes what the desktop's licence can be. Not a
-  performance call — ask first.
-- **Present it as a Wayland client.** A player (mpv with `--hwdec=vaapi`)
-  decodes and commits dma-bufs through the compositor's existing, already
-  battle-tested import path, and the screensaver composites that surface
-  instead of its own texture. No new decode code and no licensing
-  question, but it makes the aerial layer a client whose lifecycle the
-  shell has to own, and adds a Recommends.
+**An earlier version of this section said that meant either linking GPL
+libraries or shelling out to a player. That was wrong, and the answer was
+already in the tree.** `apps/VideoPlayerApp/Sources/CH264Decoder/`
+decodes H.264 straight into a dma-buf over libva — which is MIT — with
+its own MP4 demuxer and its own SPS/PPS and slice-header parsing. No GPL,
+no spawned process, no new dependency. It is deliberately narrow: it
+refuses B-frames, multiple references and multi-slice pictures rather
+than guessing, and falls back to the pipe. Aerial clips are exactly the
+kind of content that can be re-encoded to fit that envelope, and clips
+that don't fit already have a working fallback.
+
+So the remaining work is not a decision, it is plumbing: give
+`AerialPlayer` a second backend that opens the clip with
+`h264_decoder_open`, hands each frame's dma-buf to
+`LinuxTextureRegistry.importDmaBuf`, and keeps the ffmpeg pipe for
+anything the narrow decoder refuses.
 
 Worth weighing against what it buys: with the GPU decode in place the
 whole screensaver costs about 1.1 cores while it is up, and a machine

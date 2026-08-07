@@ -31,9 +31,11 @@ import Glibc
 ///
 /// What is still NOT zero-copy: the download itself, and the upload into
 /// glTexImage2D on the far side. Removing those needs the decoder to hand the
-/// compositor a dma-buf, which means either linking libav* (GPL, refused in
-/// ade2f64) or presenting through the Wayland path as an ordinary client.
-/// See docs/plans/screensaver.md.
+/// compositor a dma-buf — and the way to do that is already in the tree.
+/// VideoPlayerApp's `CH264Decoder` decodes H.264 into a dma-buf with its own
+/// MP4 demuxer and its own bitstream parsing, over libva directly, which is
+/// MIT. No GPL question, no spawned process. Pointing the screensaver at it
+/// is the remaining work; see docs/plans/screensaver.md.
 ///
 /// Pacing is the READER's job: the pipe is forced to exact CFR, so holding the
 /// reader to one frame per interval IS holding playback to real time.

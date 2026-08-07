@@ -9,11 +9,12 @@ import Glibc
 #endif
 
 /// The zero-copy sibling of FfmpegEncoder: dmabuf frames from the engine's
-/// capture ring go straight into VAAPI (import → GPU convert/scale → GPU
+/// capture ring go straight into VA-API (import → GPU convert/scale → GPU
 /// encode → MP4), so recording costs the CPU only the compressed bitstream.
-/// ffmpeg's libraries are dlopen'd on first use — on a machine without them
-/// (or without a working VAAPI encoder) `probe`/`detectDevice` fail and the
-/// caller stays on the pipe path.
+/// No libav anywhere — the C side links libva directly and writes its own
+/// H.264 parameter sets and MP4 index. On a machine whose driver cannot do
+/// the encode, `probe`/`detectDevice` fail and the caller stays on the pipe
+/// path, which spawns the `ffmpeg` binary.
 ///
 /// Same threading contract as FfmpegEncoder: all methods synchronous, none
 /// main-thread-appropriate — use a dedicated queue, one session at a time.

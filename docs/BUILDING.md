@@ -213,8 +213,6 @@ sudo apt-get install -y \
     libwayland-dev libxkbcommon-dev libdrm-dev libgbm-dev libegl-dev \
     libgles-dev libinput-dev libudev-dev libsystemd-dev libxshmfence-dev \
     libx11-dev libxcb1-dev libpixman-1-dev libpipewire-0.3-dev
-sudo apt-get install -y \
-    libavcodec-dev libavutil-dev libavformat-dev libavfilter-dev
 sudo apt-get install -y libva-dev
 sudo apt-get install -y \
     netpbm ffmpeg mesa-va-drivers seatd
@@ -225,14 +223,16 @@ compile and link against — the Wayland compositor (`wayland-server`,
 `xkbcommon`), the DRM/GBM/EGL stack, `libinput`/`libudev`, sd-bus for the portal
 (`libsystemd`), the in-tree X server's `xshmfence`, and PipeWire for the
 portal's ScreenCast stream (linked, not dlopen'd — `libpipewire-0.3-0` is in
-every Ubuntu desktop install as the audio stack). Third: the ffmpeg
-headers the zero-copy screen recorder compiles against (`record/`'s
-`CVaapiEncoder`) — headers only; at runtime the libraries are `dlopen`'d,
-pinned to the sonames these headers describe, and their absence just means
-recording falls back to piping frames to the `ffmpeg` binary. Fourth:
-`libva-dev`, which the video player's `CH264Decoder` links directly — libva is
-MIT and present wherever VA-API is, so it needs none of the dlopen dance libav
-gets.
+every Ubuntu desktop install as the audio stack). Third: `libva-dev`, which
+both halves of the hardware video path link directly — the video player's
+`CH264Decoder` and the screen recorder's `CVaapiEncoder`. libva is MIT and
+present wherever VA-API is, so it needs no dlopen dance.
+
+The libav headers (`libavcodec-dev` and friends) used to be here, for the
+recorder's encoder. They are gone: it writes its own H.264 parameter sets and
+its own MP4 index now, so nothing in the tree compiles or links against
+libav at all. The `ffmpeg` *binary* is still used, as a spawned process — see
+below.
 
 Fourth: nothing compiles against these, so the build succeeds without them and
 each one instead fails later, at run time, in a way that does not name the

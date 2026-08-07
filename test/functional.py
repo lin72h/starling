@@ -1377,9 +1377,22 @@ def check_recording() -> None:
                    and abs(r["capture_h"] - ph / d) <= 1 for d in (1, 2)), \
             f"capture {r['capture_w']}x{r['capture_h']} is neither " \
             f"{pw:.0f}x{ph:.0f} nor half of it"
+        # Every frame must actually DECODE. ffprobe reading the container's
+        # headers is not evidence of that: a bitstream whose slices are
+        # malformed still reports the right codec, size and frame count, and
+        # ffmpeg still emits pictures for it — so this check passed a
+        # recorder that was corrupting every P-frame. Decoding the whole file
+        # and insisting on a silent stderr is what catches it.
+        decode = subprocess.run(
+            ["ffmpeg", "-threads", "1", "-v", "error", "-i", path, "-f", "null", "-"],
+            capture_output=True, text=True)
+        bad = [ln for ln in decode.stderr.splitlines() if ln.strip()]
+        assert not bad, (
+            f"{len(bad)} decode error(s) in the recording, first: {bad[0]}")
+
         enc = "zero-copy vaapi" if r.get("zero_copy") \
             else ("vaapi" if r["hardware"] else "x264")
-        log(f"{codec} {w}x{h} via {enc}, {os.path.getsize(path)} bytes")
+        log(f"{codec} {w}x{h} via {enc}, {os.path.getsize(path)} bytes, decodes clean")
     finally:
         # The tier must not grow the session user's Videos on every run.
         with contextlib.suppress(OSError):
