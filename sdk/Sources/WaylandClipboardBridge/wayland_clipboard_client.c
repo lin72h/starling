@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,8 +28,13 @@
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 
 /* Every transfer is bounded. A selection owner that is stopped, wedged, or
- * simply slow must degrade to an empty paste, never to a hung app. */
+ * simply slow must degrade to an empty paste, never to a hung app.
+ *
+ * Overridable so the unit test can assert the bound in milliseconds instead of
+ * spending two seconds per case proving it. */
+#ifndef WLCLIP_TIMEOUT_MS
 #define WLCLIP_TIMEOUT_MS 2000
+#endif
 #define WLCLIP_MAX_BYTES  (16 * 1024 * 1024)
 
 /* Preference order for "this offer is text". Highest rank wins. */
@@ -373,6 +379,24 @@ static void run_pending(WlClipboard* c) {
 
 static void* clip_thread(void* arg) {
     WlClipboard* c = arg;
+
+    /* Block SIGPIPE here, because every write in this file goes to a pipe
+     * owned by somebody else. A client that asks to paste and then closes its
+     * end — cancelling, crashing, or just reading less than it asked for —
+     * makes our write raise SIGPIPE, whose default action TERMINATES THE
+     * PROCESS. That is the app dying because another program changed its mind
+     * about a paste. Blocked, write() returns EPIPE instead and
+     * write_all_bounded gives up like any other failed transfer.
+     *
+     * Blocked on this thread rather than SIG_IGN process-wide: this is library
+     * code inside somebody else's app, and stamping on a global signal
+     * disposition would be ours to answer for. Every write lives on this
+     * thread, so the narrower fix is also the complete one. */
+    sigset_t pipe_only;
+    sigemptyset(&pipe_only);
+    sigaddset(&pipe_only, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_only, NULL);
+
     while (!c->quit) {
         wl_display_flush(c->dpy);
         struct pollfd pfds[2] = {
