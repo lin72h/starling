@@ -28,6 +28,8 @@ private let GL_UNPACK_ALIGNMENT: UInt32 = 0x0CF5
 private typealias GLGenTexturesFunc     = @convention(c) (Int32, UnsafeMutablePointer<UInt32>?) -> Void
 private typealias GLBindTextureFunc     = @convention(c) (UInt32, UInt32) -> Void
 private typealias GLTexImage2DFunc      = @convention(c) (UInt32, Int32, Int32, Int32, Int32, Int32, UInt32, UInt32, UnsafeRawPointer?) -> Void
+// glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels)
+private typealias GLTexSubImage2DFunc   = @convention(c) (UInt32, Int32, Int32, Int32, Int32, Int32, UInt32, UInt32, UnsafeRawPointer?) -> Void
 private typealias GLTexParameteriFunc   = @convention(c) (UInt32, UInt32, Int32) -> Void
 private typealias GLDeleteTexturesFunc  = @convention(c) (Int32, UnsafePointer<UInt32>?) -> Void
 private typealias GLPixelStoreiFunc     = @convention(c) (UInt32, Int32) -> Void
@@ -69,6 +71,13 @@ private class TextureEntry {
     var height: Int = 0
     var glTextureName: UInt32 = 0
     var dirty: Bool = false
+
+    /// Dimensions the GL texture's storage was last allocated at, so the CPU
+    /// upload path can tell a re-upload from a resize. 0 = no storage yet.
+    /// A client that keeps its size — which is every client, most frames —
+    /// then re-uploads with glTexSubImage2D instead of reallocating.
+    var glTexWidth: Int = 0
+    var glTexHeight: Int = 0
 
     /// Optional GL renderer for GPU-based rendering (bypasses CPU pixel upload).
     var glRenderer: GLRenderer?
@@ -167,6 +176,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
     private var _glGenTextures: GLGenTexturesFunc!
     private var _glBindTexture: GLBindTextureFunc!
     private var _glTexImage2D: GLTexImage2DFunc!
+    private var _glTexSubImage2D: GLTexSubImage2DFunc!
     private var _glTexParameteri: GLTexParameteriFunc!
     private var _glDeleteTextures: GLDeleteTexturesFunc!
     private var _glPixelStorei: GLPixelStoreiFunc!
@@ -198,6 +208,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         _glGenTextures   = loadGL("glGenTextures")
         _glBindTexture   = loadGL("glBindTexture")
         _glTexImage2D    = loadGL("glTexImage2D")
+        _glTexSubImage2D = loadGL("glTexSubImage2D")
         _glTexParameteri = loadGL("glTexParameteri")
         _glDeleteTextures = loadGL("glDeleteTextures")
         _glPixelStorei   = loadGL("glPixelStorei")
@@ -665,11 +676,29 @@ class LinuxTextureRegistry: @unchecked Sendable {
             let pixelFormat = GL_RGBA
             _glBindTexture(GL_TEXTURE_2D, texName)
             _glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-            _glTexImage2D(
-                GL_TEXTURE_2D, 0, Int32(GL_RGBA),
-                texWidth, texHeight, 0,
-                pixelFormat, GL_UNSIGNED_BYTE, entry.pixelData!
-            )
+            // Re-upload into existing storage when the size hasn't changed.
+            // glTexImage2D *reallocates* the texture every call, so using it
+            // per frame makes the driver orphan and re-create a 16MB image 24
+            // times a second for a playing video — and once per commit for
+            // every wl_shm client. glTexSubImage2D writes into the storage
+            // that is already there. The full call still runs on the first
+            // frame and on any resize, which is what establishes the format.
+            if entry.glTexWidth == entry.width, entry.glTexHeight == entry.height,
+               _glTexSubImage2D != nil {
+                _glTexSubImage2D(
+                    GL_TEXTURE_2D, 0, 0, 0,
+                    texWidth, texHeight,
+                    pixelFormat, GL_UNSIGNED_BYTE, entry.pixelData!
+                )
+            } else {
+                _glTexImage2D(
+                    GL_TEXTURE_2D, 0, Int32(GL_RGBA),
+                    texWidth, texHeight, 0,
+                    pixelFormat, GL_UNSIGNED_BYTE, entry.pixelData!
+                )
+                entry.glTexWidth = entry.width
+                entry.glTexHeight = entry.height
+            }
             _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
             _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             _glBindTexture(GL_TEXTURE_2D, 0)
