@@ -417,6 +417,12 @@ void wayland_clipboard_set(struct WaylandServer* server, void* owner,
  * (implemented in the respective file). */
 void wayland_data_device_broadcast_selection(struct WaylandServer* server);
 void wayland_data_control_broadcast_selection(struct WaylandServer* server);
+/* Offer the current selection to a client that is starting to interact with a
+ * surface, if it has not already been told about this selection. Without it a
+ * client never sees a selection that predates it. Called from the pointer- and
+ * keyboard-enter paths; cheap (serial-guarded) and a no-op when empty. */
+void wayland_data_device_offer_on_interaction(struct WaylandServer* server,
+                                              struct WaylandSurface* surface);
 void wayland_fractional_scale_init(struct WaylandServer* server);
 void wayland_viewporter_init(struct WaylandServer* server);
 void wayland_cursor_shape_init(struct WaylandServer* server);

@@ -557,22 +557,25 @@ class _TextEditorAppState: State<StatefulWidget>, @unchecked Sendable {
         buffer.moveTo(row: pos.row, col: pos.col, selecting: shiftDown)
     }
 
-    // MARK: - Clipboard (file-based, shared with TerminalApp)
-
-    private var _clipboardPath: String {
-        (ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp")
-            + "/starling-clipboard"
-    }
+    // MARK: - Clipboard (the system selection, shared with every application)
 
     private func _copySelection() {
         guard let text = buffer.selectedText else { return }
-        try? text.write(toFile: _clipboardPath, atomically: true, encoding: .utf8)
+        Clipboard.setData(ClipboardData(text: text))
     }
 
     private func _paste() {
-        guard let text = try? String(contentsOfFile: _clipboardPath,
-                                     encoding: .utf8), !text.isEmpty else { return }
-        _insertMultiline(text)
+        // Asynchronous by nature: the current owner may be another process
+        // that has to be asked to write. The completion lands on the UI thread.
+        // The key handler's own setState has already run by the time this
+        // lands, so the insert has to drive its own rebuild.
+        Clipboard.getData(Clipboard.kTextPlain) { [weak self] data in
+            guard let self = self,
+                  let text = data?.text, !text.isEmpty else { return }
+            self._insertMultiline(text)
+            self._ensureCaretVisible()
+            self.setState {}
+        }
     }
 
     /// Insert text that may span lines (buffer.insert is single-line).

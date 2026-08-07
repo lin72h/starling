@@ -51,6 +51,11 @@ struct WaylandDataDevice {
     struct wl_resource* resource;
     struct WaylandServer* server;
     struct wl_list link;               /* in server->data_device_resources */
+    /* Clipboard serial this device has already been told about. 0 = none.
+     * Lets the interaction hooks below re-offer a selection to a client that
+     * missed the broadcast (it bound afterwards) without re-minting an offer
+     * on every pointer crossing. */
+    uint64_t sent_serial;
 };
 
 /* Forward declarations (offer impl + destructor are defined further down but
@@ -73,9 +78,11 @@ static void wl_source_cancel(void* owner) {
 }
 
 /* Mint a wl_data_offer for the current selection and hand it to one device
- * (used on every set + when a device binds). NULL selection → send NULL. */
+ * (used on every set + on keyboard focus enter). NULL selection → send NULL. */
 static void wl_send_selection_to_device(struct WaylandServer* server,
-                                        struct wl_resource* dd) {
+                                        struct WaylandDataDevice* dev) {
+    struct wl_resource* dd = dev->resource;
+    dev->sent_serial = server->clipboard.serial;
     if (!server->clipboard.owner) {
         wl_data_device_send_selection(dd, NULL);
         return;
@@ -101,7 +108,44 @@ static void wl_send_selection_to_device(struct WaylandServer* server,
 void wayland_data_device_broadcast_selection(struct WaylandServer* server) {
     struct WaylandDataDevice* dd;
     wl_list_for_each(dd, &server->data_device_resources, link)
-        wl_send_selection_to_device(server, dd->resource);
+        wl_send_selection_to_device(server, dd);
+}
+
+/* Give a client the current selection when it starts interacting with a
+ * surface, if it has not already been told about this one.
+ *
+ * Why this exists: the broadcast above only reaches devices bound at the time
+ * of the copy. A client that starts LATER never learns about the selection —
+ * copy a URL, then launch Chrome, and Chrome's clipboard is empty until
+ * somebody copies again. That was a real, shipping bug.
+ *
+ * Why it hangs off interaction rather than focus: keyboard focus here is lazy,
+ * sent from the first keystroke (see sendKeyEvent in WaylandIntegration.swift),
+ * so a window that is merely focused and clicked has no wl_keyboard.enter and
+ * would never get the offer — right-click → Paste would find nothing. Pointer
+ * enter is the earliest reliable "the user is working in this window" signal.
+ *
+ * Why it is NOT sent from get_data_device: a selection event during client
+ * init crashes Qt6, whose handler runs before QGuiApplication has built its
+ * clipboard — the trap documented at length in wayland_primary_selection.c.
+ * Any interaction is comfortably after init.
+ *
+ * The serial guard keeps this cheap: in the steady state every device is
+ * already current from the broadcast, so crossing windows with the mouse mints
+ * nothing. It fires once per client per selection, exactly for the client that
+ * missed the broadcast. */
+void wayland_data_device_offer_on_interaction(struct WaylandServer* server,
+                                              struct WaylandSurface* surface) {
+    if (!server || !surface || !surface->resource) return;
+    if (!server->clipboard.owner) return;   /* nothing to offer */
+    struct wl_client* client = wl_resource_get_client(surface->resource);
+    if (!client) return;
+    struct WaylandDataDevice* dd;
+    wl_list_for_each(dd, &server->data_device_resources, link) {
+        if (wl_resource_get_client(dd->resource) == client &&
+            dd->sent_serial != server->clipboard.serial)
+            wl_send_selection_to_device(server, dd);
+    }
 }
 
 void wayland_clipboard_set(struct WaylandServer* server, void* owner,

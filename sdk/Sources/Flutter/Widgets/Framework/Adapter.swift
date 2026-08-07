@@ -148,6 +148,25 @@ private final class SecondaryViewPipeline {
 public nonisolated(unsafe) var gpuDmaBufRendererState: GpuRendererState? = nil
 #endif
 
+#if os(Linux)
+/// Give a Starling child app the system clipboard.
+///
+/// The shell passes its Wayland socket name as STARLING_WAYLAND_DISPLAY — a
+/// name of our own rather than WAYLAND_DISPLAY, which would tell every toolkit
+/// linked into the app to switch to a Wayland backend and stop rendering
+/// through the dma-buf socket.
+///
+/// Absent or unreachable, `Clipboard` stays process-local rather than failing:
+/// an app run outside the shell still copies and pastes within itself.
+private func _installStarlingClipboard() {
+    let env = ProcessInfo.processInfo.environment
+    guard let display = env["STARLING_WAYLAND_DISPLAY"], !display.isEmpty else { return }
+    if let provider = WaylandClipboardProvider(display: display) {
+        Clipboard.provider = provider
+    }
+}
+#endif
+
 public func runApp(_ app: Widget) {
     #if os(Linux)
     if let socketPath = ProcessInfo.processInfo.environment["FLUTTER_DMABUF_SOCKET"],
@@ -160,6 +179,7 @@ public func runApp(_ app: Widget) {
         }
         gpuDmaBufRendererState = gpu.state
         GpuDmaBufRenderer.current = gpu
+        _installStarlingClipboard()
         _setupWidgetBinding(app)
         gpu.run()  // initializes engine + enters event loop (never returns)
         return

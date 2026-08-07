@@ -27,6 +27,9 @@ public enum GTKWindowedHost {
     /// Point runStarlingApp/startPeriodicTimer at GTK. Call once, before
     /// runStarlingApp.
     public static func install() {
+        // The system clipboard, so copy/paste reaches the rest of the desktop
+        // this window is running on rather than staying inside the process.
+        Clipboard.provider = GtkClipboardProvider()
         windowedHostBoot = { title, width, height, root in
             setbuf(stdout, nil)
             print("[\(title)] Starting (GTK host)")
