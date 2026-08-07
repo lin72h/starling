@@ -243,3 +243,11 @@ Chrome arrive as Wayland clients and need the launch-chain claim.
   workspace" will want an affordance eventually.
 - **Persistence.** Do workspaces and their driver choice survive a logout? The
   windows cannot, but the list and the remembered driver could.
+- **Which monitor.** Settled for now: workspace mode opens on the output the
+  pointer was over when it was toggled, and its client windows are sized to
+  that output's panes. It still cannot be on two at once —
+  `_applyWorkspaceWindowGeometry` resizes the real clients, and one client
+  cannot be two sizes. What is *not* settled is that spaces are global, so
+  entering a workspace still blanks whatever was sitting on the other
+  monitors: their windows belong to the space you left. A workspace per output
+  needs the per-output space model in `multi-output.md`.

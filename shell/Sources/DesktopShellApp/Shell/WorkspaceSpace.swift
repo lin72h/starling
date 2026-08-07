@@ -35,12 +35,26 @@ private enum WS {
     static let tabGap: Double = 6
     static let tabTop: Double = 11
     static let paneGap: Double = 10
+    /// Floor for the right-hand column, so the shared divider position cannot
+    /// collapse it when the workspace is shown on a narrow output.
+    static let minTabColumnW: Double = 280
 }
 
 extension _DesktopShellState {
 
-    func _buildWorkspaceSpace(_ context: any BuildContext) -> Widget {
-        _applyWorkspaceWindowGeometry()
+    /// The workspace UI, laid out for ONE output — the one it was invoked from
+    /// (`_workspaceOutputId`). Everything here is in that output's local
+    /// coordinates, so the caller positions it at the output's origin and the
+    /// same code serves the primary tree and any secondary screen.
+    ///
+    /// It cannot be drawn on two outputs at once, and not for a rendering
+    /// reason: `_applyWorkspaceWindowGeometry` resizes the real client windows
+    /// to the pane, and one client has one buffer size. See
+    /// `docs/plans/multi-output.md`.
+    func _buildWorkspaceSpace(output: DisplayOutput) -> Widget {
+        let w = output.logicalWidth
+        let h = output.logicalHeight
+        _applyWorkspaceWindowGeometry(output: output)
         var layers: [Widget] = []
         let top = DesktopTheme.kStatusBarHeight
 
@@ -49,32 +63,41 @@ extension _DesktopShellState {
         layers.append(Positioned(fill: (), child: ColoredBox(
             color: Color(0x8A0E0F15), child: SizedBox(expand: ()))))
 
-        layers.append(contentsOf: _workspaceRail(top: top))
+        layers.append(contentsOf: _workspaceRail(top: top, h: h))
 
         guard let ws = windowManager.selectedWorkspace else {
             return Stack(children: layers)
         }
 
-        let driverW = _workspaceDriverW
+        let driverW = _workspaceDriverWidth(forOutputWidth: w)
         let driverLeft = WS.railW
         let rightLeft = driverLeft + driverW + WS.dividerW
 
         layers.append(contentsOf: _workspaceDriverColumn(
-            ws, left: driverLeft, width: driverW, top: top))
+            ws, left: driverLeft, width: driverW, top: top, h: h))
         layers.append(contentsOf: _workspaceDivider(
-            left: driverLeft + driverW, top: top))
+            left: driverLeft + driverW, top: top, h: h))
         layers.append(contentsOf: _workspaceTabColumn(
-            ws, left: rightLeft, width: screenWidth - rightLeft, top: top))
+            ws, left: rightLeft, width: w - rightLeft, top: top, h: h))
 
         return Stack(children: layers)
     }
 
+    /// The divider position is one shared number, but the outputs it may be
+    /// rendered on are not the same width. Clamp it so a narrower monitor
+    /// cannot push the tab column to zero (or negative) width.
+    func _workspaceDriverWidth(forOutputWidth w: Double) -> Double {
+        let maxForOutput = max(WS.driverMin,
+                               w - WS.railW - WS.dividerW - WS.minTabColumnW)
+        return min(min(WS.driverMax, maxForOutput), max(WS.driverMin, _workspaceDriverW))
+    }
+
     // MARK: Rail
 
-    private func _workspaceRail(top: Double) -> [Widget] {
+    private func _workspaceRail(top: Double, h: Double) -> [Widget] {
         var out: [Widget] = []
         out.append(Positioned(
-            left: 0, top: top, width: WS.railW, height: screenHeight - top,
+            left: 0, top: top, width: WS.railW, height: h - top,
             child: DecoratedBox(
                 decoration: BoxDecoration(
                     color: Color(0xE60F1118),
@@ -132,10 +155,10 @@ extension _DesktopShellState {
     // MARK: Driver column
 
     private func _workspaceDriverColumn(
-        _ ws: WorkspaceInfo, left: Double, width: Double, top: Double
+        _ ws: WorkspaceInfo, left: Double, width: Double, top: Double, h outputH: Double
     ) -> [Widget] {
         var out: [Widget] = []
-        let h = screenHeight - top - WS.paneGap * 2
+        let h = outputH - top - WS.paneGap * 2
 
         guard let driverId = ws.driverWindowId,
               let win = windowManager.windows.first(where: { $0.id == driverId }) else {
@@ -146,13 +169,7 @@ extension _DesktopShellState {
                 left: left + WS.paneGap, top: top + WS.paneGap,
                 width: width - WS.paneGap * 2, height: h,
                 child: GestureDetector(
-                    onTap: { [self] in
-                        setState {
-                            _launcherDriverTarget = wsId
-                            _launcherOpen = true
-                            _launcherQuery = ""
-                        }
-                    },
+                    onTap: { [self] in openLauncher(driverTarget: wsId) },
                     behavior: .opaque,
                     child: DecoratedBox(
                         decoration: BoxDecoration(
@@ -185,7 +202,7 @@ extension _DesktopShellState {
     // MARK: Tab column
 
     private func _workspaceTabColumn(
-        _ ws: WorkspaceInfo, left: Double, width: Double, top: Double
+        _ ws: WorkspaceInfo, left: Double, width: Double, top: Double, h: Double
     ) -> [Widget] {
         var out: [Widget] = []
         // The driver is shown in the middle, never as a tab.
@@ -194,7 +211,7 @@ extension _DesktopShellState {
 
         guard !tabs.isEmpty else {
             out.append(Positioned(
-                left: left, top: top + screenHeight * 0.34,
+                left: left, top: top + h * 0.34,
                 width: width, height: 24,
                 child: IgnorePointer(child: Center(child: Text(
                     "Apps opened here will appear in this panel",
@@ -204,7 +221,7 @@ extension _DesktopShellState {
                 left: left + WS.paneGap, top: top + WS.tabTop,
                 width: 30, height: WS.tabH,
                 child: _workspaceButton("+", fontSize: 14) { [self] in
-                    setState { _launcherOpen = true; _launcherQuery = "" }
+                    openLauncher()
                 }))
             return out
         }
@@ -250,7 +267,7 @@ extension _DesktopShellState {
         out.append(Positioned(
             left: x, top: top + WS.tabTop, width: 30, height: WS.tabH,
             child: _workspaceButton("+", fontSize: 14) { [self] in
-                setState { _launcherOpen = true; _launcherQuery = "" }
+                openLauncher()
             }))
 
         let paneTop = top + WS.tabTop + WS.tabH + WS.paneGap
@@ -258,7 +275,7 @@ extension _DesktopShellState {
             key: ValueKey("ws-pane-\(active.id)"),
             left: left + WS.paneGap, top: paneTop,
             width: width - WS.paneGap * 2,
-            height: screenHeight - paneTop - WS.paneGap,
+            height: h - paneTop - WS.paneGap,
             child: _workspacePane(
                 active, focused: windowManager.focusedWindowId == active.id)))
         return out
@@ -266,9 +283,9 @@ extension _DesktopShellState {
 
     // MARK: Divider
 
-    private func _workspaceDivider(left: Double, top: Double) -> [Widget] {
+    private func _workspaceDivider(left: Double, top: Double, h: Double) -> [Widget] {
         [Positioned(
-            left: left, top: top, width: WS.dividerW, height: screenHeight - top,
+            left: left, top: top, width: WS.dividerW, height: h - top,
             child: Listener(
                 onPointerDown: { [self] _ in _workspaceDividerDragging = true },
                 onPointerMove: { [self] event in
@@ -357,17 +374,22 @@ extension _DesktopShellState {
     /// The pane rect is authoritative and the client follows it. Diff-guarded:
     /// onContentResize reconfigures a live app, so calling it with the size it
     /// already has is a wasted round trip through the child.
-    func _applyWorkspaceWindowGeometry() {
+    /// Size the workspace's client windows to their panes on the output the
+    /// workspace is shown on. This configures the REAL clients (each
+    /// `onContentResize` is a Wayland configure or a DMA-BUF child resize),
+    /// which is why the workspace can only live on one output at a time.
+    func _applyWorkspaceWindowGeometry(output: DisplayOutput? = nil) {
         guard let ws = windowManager.selectedWorkspace else { return }
+        let out = output ?? workspaceOutput
         let top = DesktopTheme.kStatusBarHeight
-        let driverW = _workspaceDriverW
+        let driverW = _workspaceDriverWidth(forOutputWidth: out.logicalWidth)
         let rightLeft = WS.railW + driverW + WS.dividerW
 
         let driverSize = (w: driverW - WS.paneGap * 2,
-                          h: screenHeight - top - WS.paneGap * 2)
+                          h: out.logicalHeight - top - WS.paneGap * 2)
         let paneTop = top + WS.tabTop + WS.tabH + WS.paneGap
-        let tabSize = (w: screenWidth - rightLeft - WS.paneGap * 2,
-                       h: screenHeight - paneTop - WS.paneGap)
+        let tabSize = (w: out.logicalWidth - rightLeft - WS.paneGap * 2,
+                       h: out.logicalHeight - paneTop - WS.paneGap)
 
         for win in windowManager.windows(inWorkspace: ws.id) {
             let isDriver = win.id == ws.driverWindowId
@@ -428,8 +450,12 @@ extension _DesktopShellState {
         }
         guard let mgr = linuxProcessAppManager else { return }
 
-        let paneW = _workspaceDriverW - 20
-        let paneH = screenHeight - DesktopTheme.kStatusBarHeight - 20
+        // Sized for the output the workspace is on, not the primary: a driver
+        // launched into a workspace living on a 2560x1600 panel must not come
+        // up sized for a 1920x1080 one.
+        let wsOut = workspaceOutput
+        let paneW = _workspaceDriverWidth(forOutputWidth: wsOut.logicalWidth) - 20
+        let paneH = wsOut.logicalHeight - DesktopTheme.kStatusBarHeight - 20
         let title = rec.name
         // Namespaced per workspace.
         // Two things depend on it: keystrokes are routed by looking the

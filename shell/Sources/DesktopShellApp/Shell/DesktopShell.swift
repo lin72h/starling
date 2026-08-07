@@ -378,6 +378,60 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// app it launches lands in the middle column instead of on the desktop.
     var _launcherDriverTarget: String? = nil
     /// Live width of the driver column; the divider drags it.
+    /// Which output the workspace UI is drawn on — the one the pointer was
+    /// over when it was toggled on. Spaces are still global (see
+    /// `docs/plans/multi-output.md`), so the other outputs show this space's
+    /// desktop, which for a workspace means wallpaper: its windows are owned
+    /// and have no desktop presence anywhere.
+    var _workspaceOutputId: Int = 0
+
+    /// The output the pointer is currently over, as reported by each output's
+    /// screen. Not `setState`-tracked: nothing renders from it directly, it
+    /// only decides where the next workspace toggle lands.
+    var _pointerOutputId: Int? = nil
+
+    /// `_workspaceOutputId` resolved against the live layout, falling back to
+    /// the primary — the chosen output may have been unplugged since.
+    var workspaceOutput: DisplayOutput {
+        guard let dl = displayLayout else {
+            return DisplayOutput(
+                id: 0, name: "primary",
+                physicalWidth: Int(screenWidth * currentShellDpi),
+                physicalHeight: Int(screenHeight * currentShellDpi),
+                scale: currentShellDpi, originX: 0, originY: 0,
+                isPrimary: true, refreshMhz: 60000)
+        }
+        return dl.outputs.first(where: { $0.id == _workspaceOutputId }) ?? dl.primary
+    }
+
+    /// Called by every output's screen as the pointer moves over it.
+    func notePointerOutput(_ outputId: Int) {
+        _pointerOutputId = outputId
+    }
+
+    /// Which output the launcher is drawn on. It follows whatever opened it —
+    /// the dock lives on the primary, but the workspace's `+` buttons do not,
+    /// and an app picker that opens on a different monitor from the thing that
+    /// asked for it is worse than no multi-output support at all.
+    var _launcherOutputId: Int = 0
+
+    /// Open the launcher on the output the request came from. Every call site
+    /// goes through here; setting `_launcherOpen` directly leaves the picker on
+    /// whichever monitor it happened to be on last.
+    func openLauncher(driverTarget: String? = nil) {
+        _launcherOutputId = _pointerOutputId ?? displayLayout?.primary.id ?? 0
+        setState {
+            _launcherDriverTarget = driverTarget
+            _launcherQuery = ""
+            _launcherOpen = true
+            contextMenuPosition = nil
+            activeStatusBarPopup = nil
+        }
+        // The pill is focused the moment it appears; start the caret so it
+        // says so.
+        _restartLauncherCaret()
+    }
+
     var _workspaceDriverW: Double = 688
     /// True between pointer-down and pointer-up on the divider.
     var _workspaceDividerDragging: Bool = false
@@ -2325,6 +2379,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             return
         }
         _workspaceReturnSpaceIndex = wm.activeSpaceIndex
+        // Open it on the monitor the user is actually looking at. Falls back to
+        // the primary before the pointer has been seen anywhere.
+        _workspaceOutputId = _pointerOutputId ?? displayLayout?.primary.id ?? 0
         var idx: Int = 0
         setState {
             idx = wm.ensureWorkspaceSpace()
@@ -2717,7 +2774,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // Ordinary spaces contribute nothing; the ValueKey keeps the fleet's
         // element (and its terminal focus state) alive across slide/steady
         // transitions.
-        if !_missionControlOpen {
+        // Only when this output owns it: a workspace toggled on from a second
+        // monitor draws there instead, and the primary keeps its desktop.
+        let primaryOutput = displayLayout?.primary
+        let workspaceIsHere = _workspaceOutputId == (primaryOutput?.id ?? 0)
+        if !_missionControlOpen && workspaceIsHere {
             for layer in slideLayers {
                 guard let space = windowManager.spaces.first(where: { $0.id == layer.spaceId }),
                       space.isWorkspace else { continue }
@@ -2725,7 +2786,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     key: ValueKey("workspace-space"),
                     left: layer.dx, top: 0,
                     width: screenWidth, height: screenHeight,
-                    child: _buildWorkspaceSpace(context)))
+                    child: _buildWorkspaceSpace(output: workspaceOutput)))
             }
         }
 
@@ -3292,7 +3353,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // Full-screen app launcher (Launchpad), opened from the dock grid icon.
         // Above windows + dock; tap an app to launch it, tap empty space to
         // dismiss.
-        if _launcherOpen {
+        if _launcherOpen && _launcherOutputId == (primaryOutput?.id ?? 0) {
             children.append(
                 Positioned(
                     fill: (),
@@ -3438,10 +3499,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // framework layer-retention quirk); a remount repaints everything
         // from scratch and the switch is a rare, deliberate action. Window
         // open-zooms stay silent (pendingOpenAnimation already consumed).
-        return Stack(
-            key: ValueKey("shell-\(shellTheme.name)"),
-            fit: .expand,
-            children: children
+        // Which monitor the pointer is on, for whatever needs to open "here"
+        // — today that is the workspace toggle. An ancestor Listener sees
+        // events that hit anything inside it and consumes nothing, so this is
+        // observation only; `.translucent` keeps it out of the way of the
+        // wallpaper's own right-click handling.
+        return Listener(
+            onPointerDown: { [self] _ in notePointerOutput(displayLayout?.primary.id ?? 0) },
+            onPointerHover: { [self] _ in notePointerOutput(displayLayout?.primary.id ?? 0) },
+            behavior: .translucent,
+            child: Stack(
+                key: ValueKey("shell-\(shellTheme.name)"),
+                fit: .expand,
+                children: children
+            )
         )
     }
 
@@ -5884,15 +5955,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                 // Pick up icons for anything installed since
                                 // login before the grid is built.
                                 _loadIconTextures()
-                                setState {
-                                    contextMenuPosition = nil
-                                    activeStatusBarPopup = nil
-                                    _launcherQuery = ""
-                                    _launcherOpen = true
-                                }
-                                // The pill is focused the moment it appears;
-                                // start the caret so it says so.
-                                _restartLauncherCaret()
+                                openLauncher()
                             },
                             behavior: .opaque,
                             child: tile

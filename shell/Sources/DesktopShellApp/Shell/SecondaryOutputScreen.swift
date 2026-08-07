@@ -54,6 +54,23 @@ final class SecondaryViewOutputsMap: @unchecked Sendable {
 
 let secondaryViewOutputs = SecondaryViewOutputsMap()
 
+/// Whether the workspace UI belongs on `output` right now: the active space is
+/// a workspace AND this is the output it was invoked from. Spaces are global,
+/// so the other outputs are in the workspace space too — they just have nothing
+/// of it to draw, its windows being owned.
+func workspaceIsOn(output: DisplayOutput) -> Bool {
+    guard let shell = _shellState else { return false }
+    return shell.windowManager.activeSpace.isWorkspace
+        && shell._workspaceOutputId == output.id
+}
+
+/// Whether the app launcher belongs on `output` — it opens on whichever output
+/// asked for it (the dock, or a workspace's `+`).
+func launcherIsOn(output: DisplayOutput) -> Bool {
+    guard let shell = _shellState else { return false }
+    return shell._launcherOpen && shell._launcherOutputId == output.id
+}
+
 /// The topmost window shown on `output`, if it is fullscreen — the one whose
 /// title bar the reveal zone uncovers. Shared by the screen's build and by the
 /// host's rebuild signature, so the two cannot disagree about whether this
@@ -153,6 +170,13 @@ class _SecondaryScreenHostState: State<StatefulWidget> {
         if let fs = fullscreenWindow(onOutput: output) {
             sig += "|tb:\(fs.id):\(_shellState?.topBarRevealed == true ? 1 : 0)"
         }
+        // Whether this output is hosting a shell overlay. `_poke` bypasses the
+        // gate WHILE hosting, but that is edge-blind on the way out: the moment
+        // the overlay closes the bypass stops applying, and without this the
+        // signature would be unchanged and the closed launcher would stay
+        // painted. Caught exactly that way.
+        sig += "|ovl:\(workspaceIsOn(output: output) ? 1 : 0)"
+            + ":\(launcherIsOn(output: output) ? 1 : 0)"
         return sig
     }
 
@@ -162,6 +186,15 @@ class _SecondaryScreenHostState: State<StatefulWidget> {
     }
 
     private func _poke() {
+        // While this output hosts the workspace UI, skip the gate entirely and
+        // rebuild on every shell change. The workspace has far more state than
+        // a signature could summarise — rail rows, window counts, tab strip,
+        // active tab, divider — and an under-described signature here is a
+        // stale pane, which is the same failure the traffic lights had.
+        if workspaceIsOn(output: output) || launcherIsOn(output: output) {
+            setState {}
+            return
+        }
         let sig = _signature()
         if sig != _lastSignature {
             setState {}
@@ -318,10 +351,48 @@ struct SecondaryOutputScreen {
                     child: SizedBox(expand: ()))))
         }
 
+        // The workspace UI, when this is the output it was invoked from. Drawn
+        // over this output's desktop and in its own local coordinates — the
+        // same code the primary runs, just handed a different output. It goes
+        // last so it covers the status bar, exactly as on the primary.
+        if workspaceIsOn(output: output), let shell = _shellState {
+            layers.append(Positioned(
+                key: ValueKey("workspace-space-\(output.id)"),
+                left: 0, top: 0,
+                width: output.logicalWidth, height: output.logicalHeight,
+                child: shell._buildWorkspaceSpace(output: output)))
+        }
+
+        // The launcher, when it was opened from this output. Above the
+        // workspace UI, which is what opens it from in here.
+        if launcherIsOn(output: output), let shell = _shellState {
+            layers.append(Positioned(
+                fill: (),
+                child: AppLauncher(
+                    apps: shell._launcherFilteredApps(),
+                    query: shell._launcherQuery,
+                    caretOn: shell._launcherCaretOn,
+                    onLaunch: { appId in shell._launchFromLauncher(appId) },
+                    onDismiss: {
+                        shell.setState {
+                            shell._launcherOpen = false
+                            shell._launcherQuery = ""
+                            shell._launcherDriverTarget = nil
+                        }
+                    })))
+        }
+
         // This tree has no MacosApp above it, so establish text direction
         // ourselves — Stack/Row alignment resolution traps without it.
+        // The outer Listener reports which monitor the pointer is on, so a
+        // workspace toggled from here opens here (observation only; it
+        // consumes nothing).
         return Directionality(
             textDirection: .ltr,
-            child: Stack(fit: .expand, children: layers))
+            child: Listener(
+                onPointerDown: { _ in _shellState?.notePointerOutput(output.id) },
+                onPointerHover: { _ in _shellState?.notePointerOutput(output.id) },
+                behavior: .translucent,
+                child: Stack(fit: .expand, children: layers)))
     }
 }
