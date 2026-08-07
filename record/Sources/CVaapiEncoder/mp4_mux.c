@@ -183,6 +183,17 @@ int mp4_mux_write_sample(Mp4Mux* m, const uint8_t* data, size_t size,
     }
     if (out == 0) { mux_err(m, "access unit had no codable NAL"); return -1; }
 
+    // Decode timestamps must strictly increase. The capture ring can hand us
+    // two frames stamped the same microsecond — the engine's pacer works to an
+    // absolute schedule and a catch-up frame can land in the same tick as its
+    // predecessor — and a zero-duration sample makes stts emit a 0 delta,
+    // which players and remuxers reject ("non monotonically increasing dts").
+    // One tick is 1µs here, so nudging costs nothing measurable.
+    if (m->sample_count > 0) {
+        uint64_t prev = m->samples[m->sample_count - 1].dts;
+        if (dts <= prev) dts = prev + 1;
+    }
+
     Mp4Sample s = {
         .offset = (uint64_t)ftell(m->f),
         .size = (uint32_t)out,

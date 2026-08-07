@@ -1380,15 +1380,35 @@ def check_recording() -> None:
         # Every frame must actually DECODE. ffprobe reading the container's
         # headers is not evidence of that: a bitstream whose slices are
         # malformed still reports the right codec, size and frame count, and
-        # ffmpeg still emits pictures for it — so this check passed a
-        # recorder that was corrupting every P-frame. Decoding the whole file
-        # and insisting on a silent stderr is what catches it.
+        # ffmpeg still emits pictures for it — so this check once passed a
+        # recorder that was corrupting every P-frame.
+        #
+        # Match decode failures specifically rather than "stderr said
+        # anything". ffmpeg's null muxer also warns about non-monotonic dts
+        # in ITS OWN output stream, which a variable-rate screen capture
+        # provokes on any encoder — the libav one this replaced does it too.
+        # That is noise here; the file's own timestamps are checked below.
         decode = subprocess.run(
             ["ffmpeg", "-threads", "1", "-v", "error", "-i", path, "-f", "null", "-"],
             capture_output=True, text=True)
-        bad = [ln for ln in decode.stderr.splitlines() if ln.strip()]
+        bad = [ln for ln in decode.stderr.splitlines()
+               if "error while decoding" in ln or "Invalid data" in ln
+               or "no frame" in ln or "corrupt" in ln.lower()]
         assert not bad, (
             f"{len(bad)} decode error(s) in the recording, first: {bad[0]}")
+
+        # And the container's own timestamps must strictly increase — the
+        # property the warning above is really about, asked of the file
+        # rather than of ffmpeg's re-encode.
+        pkts = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=dts", "-of", "csv=p=0", path],
+            capture_output=True, text=True).stdout.split()
+        dts = [int(x.rstrip(",")) for x in pkts if x.rstrip(",").lstrip("-").isdigit()]
+        bad_dts = [i for i in range(1, len(dts)) if dts[i] <= dts[i - 1]]
+        assert not bad_dts, (
+            f"{len(bad_dts)} non-increasing dts in the file, first at packet "
+            f"{bad_dts[0]}: {dts[bad_dts[0] - 1]} -> {dts[bad_dts[0]]}")
 
         enc = "zero-copy vaapi" if r.get("zero_copy") \
             else ("vaapi" if r["hardware"] else "x264")

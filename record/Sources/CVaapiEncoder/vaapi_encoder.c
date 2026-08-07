@@ -21,6 +21,11 @@
 // decoder will touch. So h264_headers.c emits the SPS, PPS and slice header,
 // and they must agree exactly with the VAEnc*ParameterBufferH264 structs
 // submitted alongside them.
+//
+// "Agree exactly" includes one thing the API appears to let you choose and
+// does not: pic_init_qp. See H264_PIC_INIT_QP — the driver writes every
+// slice_qp_delta against a hard-wired 26 and ignores what we put in the
+// picture parameter buffer, so the PPS has to say 26 too.
 
 #include "include/vaapi_encoder.h"
 
@@ -79,6 +84,7 @@ struct VaapiEncoder {
     int import_next;          // round-robin eviction
 
     H264Config cfg;
+    int quality_qp;   // the caller's knob — sets the bitrate budget, NOT pic_init_qp
     Mp4Mux* mux;
 
     int in_w, in_h;
@@ -282,7 +288,8 @@ VaapiEncoder* vaapi_encoder_open(const char* device,
     e->in_h = in_h;
     snprintf(e->path, sizeof e->path, "%s", out_path);
     if (fps <= 0) fps = 30;
-    h264_config_init(&e->cfg, out_w, out_h, fps, qp > 0 ? qp : 24);
+    h264_config_init(&e->cfg, out_w, out_h, fps);
+    e->quality_qp = qp > 0 ? qp : 24;
     // A keyframe every two seconds: enough for seeking without spending the
     // bitrate an all-intra stream would.
     e->gop = fps * 2;
@@ -550,7 +557,7 @@ int vaapi_encoder_encode(VaapiEncoder* e, int fd, uint32_t stride,
     }
     pic.coded_buf = e->coded;
     pic.frame_num = (uint16_t)e->frame_num;
-    pic.pic_init_qp = (uint8_t)e->cfg.qp;
+    pic.pic_init_qp = (uint8_t)e->cfg.pic_init_qp;
     pic.num_ref_idx_l0_active_minus1 = 0;
     pic.num_ref_idx_l1_active_minus1 = 0;
     pic.pic_fields.bits.idr_pic_flag = (uint32_t)is_idr;
@@ -648,7 +655,7 @@ int vaapi_encoder_encode(VaapiEncoder* e, int fd, uint32_t stride,
     if (st == VA_STATUS_SUCCESS && is_idr) {
         // Rate control is per-sequence state; resend it with each IDR so a
         // long recording cannot drift away from the configured budget.
-        if (ve_send_rate_control(e, e->cfg.fps, e->cfg.qp) != 0) {
+        if (ve_send_rate_control(e, e->cfg.fps, e->quality_qp) != 0) {
             vaEndPicture(e->dpy, e->enc_ctx);
             goto submit_fail;
         }

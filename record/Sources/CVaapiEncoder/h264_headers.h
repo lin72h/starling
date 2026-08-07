@@ -25,11 +25,25 @@
 // scaling-list block that we would only ever fill with defaults, and nothing
 // in the extra syntax buys quality at these settings.
 
+/// The QP the PPS declares, and the only value that may appear there.
+///
+/// **This is not a quality knob and must not be derived from one.** radeonsi
+/// ignores `VAEncPictureParameterBufferH264.pic_init_qp` and writes each
+/// slice's `slice_qp_delta` relative to a hard-wired 26. Declare anything else
+/// and SliceQPY comes out wrong by exactly that difference — which changes the
+/// CABAC context initialisation, so the entropy decode diverges and every
+/// P-frame decodes as garbage from macroblock 0. Measured: with this at 26
+/// a recording decodes clean, and at 20/24/28/30 it does not.
+///
+/// Quality is set by the rate-control budget instead, which is where the
+/// caller's `qp` argument has always gone.
+#define H264_PIC_INIT_QP 26
+
 typedef struct {
     int width, height;        // visible pixels
     int mb_width, mb_height;  // macroblocks (16px), >= visible
     int fps;
-    int qp;                   // pic_init_qp
+    int pic_init_qp;          // always H264_PIC_INIT_QP — see above
     int level_idc;
     // Wrap points, as log2(x) - 4. Both 4 here, i.e. 256 — comfortably more
     // than one IDR period, which is all that matters with no reordering.
@@ -38,8 +52,9 @@ typedef struct {
 } H264Config;
 
 /// Fill `cfg` for these output dimensions. Picks a level that covers the
-/// frame size and rate.
-void h264_config_init(H264Config* cfg, int width, int height, int fps, int qp);
+/// frame size and rate. There is no qp argument by design — see
+/// H264_PIC_INIT_QP.
+void h264_config_init(H264Config* cfg, int width, int height, int fps);
 
 /// Write the SPS into `out`. `flags` is the H264_NAL_* mask from
 /// h264_bitwriter.h: packed headers want START_CODE and no EMULATION (the

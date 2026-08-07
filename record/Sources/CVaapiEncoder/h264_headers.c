@@ -16,13 +16,13 @@
 #define NAL_SPS        7
 #define NAL_PPS        8
 
-void h264_config_init(H264Config* cfg, int width, int height, int fps, int qp) {
+void h264_config_init(H264Config* cfg, int width, int height, int fps) {
     cfg->width = width;
     cfg->height = height;
     cfg->mb_width = (width + 15) / 16;
     cfg->mb_height = (height + 15) / 16;
     cfg->fps = fps > 0 ? fps : 30;
-    cfg->qp = qp;
+    cfg->pic_init_qp = H264_PIC_INIT_QP;
     cfg->log2_max_frame_num_minus4 = 4;
     cfg->log2_max_poc_lsb_minus4 = 4;
 
@@ -107,7 +107,13 @@ size_t h264_write_sps(const H264Config* cfg, int flags, uint8_t* out, size_t cap
     h264_bw_u(&w, 1, 1);                   // timing_info_present_flag
     h264_bw_u(&w, 32, 1);                  // num_units_in_tick
     h264_bw_u(&w, 32, (uint32_t)(cfg->fps * 2));  // time_scale (field rate)
-    h264_bw_u(&w, 1, 1);                   // fixed_frame_rate_flag
+    // NOT fixed: a screen capture is genuinely variable-rate. The engine's
+    // pacer works to an absolute schedule, so a present missed to client
+    // jitter is repaid by the next one and two frames can arrive within a
+    // third of the nominal interval. Claiming CFR here makes players and
+    // remuxers adopt a 1/fps timebase and then reject the real sample times
+    // as non-monotonic, because two of them round into one slot.
+    h264_bw_u(&w, 1, 0);                   // fixed_frame_rate_flag
     h264_bw_u(&w, 1, 0);                   // nal_hrd_parameters_present_flag
     h264_bw_u(&w, 1, 0);                   // vcl_hrd_parameters_present_flag
     h264_bw_u(&w, 1, 0);                   // pic_struct_present_flag
@@ -130,7 +136,7 @@ size_t h264_write_pps(const H264Config* cfg, int flags, uint8_t* out, size_t cap
     h264_bw_ue(&w, 0);                     // num_ref_idx_l1_default_active_minus1
     h264_bw_u(&w, 1, 0);                   // weighted_pred_flag
     h264_bw_u(&w, 2, 0);                   // weighted_bipred_idc
-    h264_bw_se(&w, cfg->qp - 26);          // pic_init_qp_minus26
+    h264_bw_se(&w, cfg->pic_init_qp - 26);  // pic_init_qp_minus26 — always 0
     h264_bw_se(&w, 0);                     // pic_init_qs_minus26
     h264_bw_se(&w, 0);                     // chroma_qp_index_offset
     h264_bw_u(&w, 1, 1);                   // deblocking_filter_control_present
