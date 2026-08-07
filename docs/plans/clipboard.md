@@ -345,6 +345,23 @@ Still owed:
 - **Primary selection:** currently must fail with "does not seem to support
   primary selection"; flip the assertion when Stage 3 lands.
 
+### A cancelled paste used to kill the app
+
+Found by writing the unit tests, not by using the feature — it needs a peer that
+closes its read end mid-transfer, which nothing does by hand.
+
+Every write in the bridge goes to a pipe owned by somebody else. A client that
+asks to paste and then closes that pipe — cancelling, crashing, or reading less
+than it asked for — makes our `write()` raise `SIGPIPE`, whose **default action
+terminates the process**. So another program changing its mind about a paste
+would take our app down with it.
+
+The bridge thread now blocks `SIGPIPE`, so `write()` returns `EPIPE` and the
+transfer is abandoned like any other failure. Blocked on that thread rather than
+`SIG_IGN` process-wide, because this is library code inside somebody else's app
+and a global signal disposition is not ours to change; every write lives on that
+thread, so the narrow fix is also the complete one.
+
 ### Cost of the clipboard on app startup
 
 `_installStarlingClipboard()` runs on the app's main thread before the widget
