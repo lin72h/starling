@@ -270,7 +270,7 @@ Note a deliberate regression on Windows: `TerminalApp` used to share a clipboard
 file between its own instances there, and now falls back to a process-local
 clipboard until Stage 2 lands `Win32Host`'s provider.
 
-**Stage 2 — off-desktop backends. GTK done, Win32 outstanding.** So the public
+**Stage 2 — off-desktop backends. GTK done and verified; Win32 written but never compiled.** So the public
 SDK's `Clipboard` is not a stub outside Starling.
 
 `GtkClipboardProvider` (`sdk/Sources/FlutterGTK`) over `flgtk_clipboard.c`,
@@ -285,9 +285,13 @@ selection, another reads it). Note it could *not* be verified through a
 first-party app: `STARLING_APP_GTK=1`, the opt-in GTK build of `TerminalApp`,
 has been removed, so nothing shipped links the GTK host any more.
 
-Win32 still to do: `OpenClipboard`/`GetClipboardData` behind `Win32Host`. Until
-it lands, `TerminalApp` on Windows has a process-local clipboard where it used
-to share a file between its own instances.
+`Win32ClipboardProvider` over `flwin32_clipboard.c` is written and installed by
+`Win32WindowedHost.install()`, but **has never been compiled** — the toolchain
+lives on the win11 VM and SSH to it refuses the keys on this box. SwiftPM globs
+target directories, so that C file *will* be picked up by a Windows build; if it
+does not compile, it breaks that build. Verify with
+`sdk/tools/build-windows.ps1 -PackagePath sdk`, expecting the documented cold
+module-cache failures first.
 
 **Stage 3 — later.** Primary selection (net-new on both protocols, per above),
 `image/png`, and the text-field/selection workstream.
