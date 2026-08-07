@@ -2147,6 +2147,111 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         return toRect
     }
 
+    // MARK: Window chrome actions
+
+    // What the traffic lights and the title-bar double-click do, as ONE
+    // definition. Every widget tree that renders window chrome calls these:
+    // this state's own build, and each secondary output's screen, whose
+    // windows are separate DesktopWindow instances in their own Flutter view.
+    // Spelling the closures out per tree is what left all three buttons dead
+    // on a second monitor — the secondary passed only move/resize/raise, and
+    // the rest defaulted to nil, so the buttons rendered and did nothing.
+
+    /// Fullscreen chrome reveal — the shared flag behind the auto-hidden title
+    /// bar. Every output's screen drives it from its own reveal zone; the
+    /// pointer is only ever over one output, so whichever it is wins.
+    ///
+    /// A secondary output needs its own zone: the primary's lives in the
+    /// primary tree and never sees a pointer event on another monitor. Without
+    /// one, a window sent fullscreen on a second monitor has no title bar, no
+    /// traffic lights, and no way back.
+    var topBarRevealed: Bool { _topBarRevealed }
+
+    func setTopBarRevealed(_ on: Bool) {
+        guard _topBarRevealed != on else { return }
+        setState { _topBarRevealed = on }
+    }
+
+    /// Yellow. Deferred: the scale-effect zoom into the dock plays first;
+    /// `_finalizeWindowMinimize` hides the window.
+    func requestWindowMinimize(_ winId: String) {
+        setState {
+            _minimizingWindows.insert(winId)
+        }
+    }
+
+    /// Red. Teardown is deferred to `_finalizeWindowClose` (fired by the close
+    /// animation) so the shrink-out plays over live window content.
+    func requestWindowClose(_ winId: String) {
+        setState {
+            _closingWindows.insert(winId)
+        }
+    }
+
+    /// Green — fullscreen toggle, with the client reconfigured from the rect
+    /// the zoom lands on.
+    func requestWindowMaximize(_ winId: String) {
+        let wasFullscreen = windowManager.windows.first(where: { $0.id == winId })?.isFullscreen ?? false
+        setState {
+            // The zoom animates win.rect — configure clients from the FINAL
+            // rect it returns.
+            guard let finalRect = _fullscreenWithZoom(winId) else { return }
+            guard let w = windowManager.windows.first(where: { $0.id == winId }) else { return }
+            if let surfId = waylandIntegration?.surfaceId(forWindowId: winId) {
+                if w.isFullscreen {
+                    // Entering fullscreen — content fills the window; title bar
+                    // overlays on top only when revealed.
+                    waylandIntegration?.sendFullscreenResize(
+                        surfaceId: surfId,
+                        width: Int(finalRect.width),
+                        height: Int(finalRect.height))
+                } else {
+                    // Exiting fullscreen → restored to pre-fullscreen rect
+                    let contentW = finalRect.width
+                    let contentH = finalRect.height - DesktopTheme.kTitleBarHeight
+                    if wasFullscreen {
+                        waylandIntegration?.sendExitFullscreen(
+                            surfaceId: surfId,
+                            width: Int(contentW),
+                            height: Int(contentH))
+                    } else {
+                        w.onContentResize?(contentW, contentH)
+                    }
+                }
+            } else {
+                // DMA-BUF child process (Settings, viewer, …): without this it
+                // keeps its old buffer and the shell stretches it — 2x-scaled
+                // UI whose hit-testing no longer matches the screen.
+                let contentH = w.isFullscreen
+                    ? finalRect.height
+                    : finalRect.height - DesktopTheme.kTitleBarHeight
+                if finalRect.width > 0 && contentH > 0 {
+                    w.onContentResize?(finalRect.width, contentH)
+                }
+            }
+        }
+    }
+
+    /// macOS-style: double-click the title bar toggles maximized state. Skipped
+    /// while fullscreen — the green button owns that.
+    func requestWindowTitleBarDoubleTap(_ winId: String) {
+        guard let w = windowManager.windows.first(where: { $0.id == winId }),
+              !w.isFullscreen else { return }
+        setState {
+            windowManager.maximizeWindow(
+                winId,
+                screenWidth: screenWidth,
+                screenHeight: screenHeight
+            )
+        }
+        // Tell the wayland client about its new content size.
+        let contentW = w.rect.width
+        let contentH = w.rect.height - DesktopTheme.kTitleBarHeight
+        if contentW > 0 && contentH > 0 {
+            w.onContentResize?(contentW, contentH)
+        }
+    }
+
     // MARK: Edge-drag carry
 
     /// Called on every window-drag move: arm (or re-arm/cancel) the dwell
@@ -2731,82 +2836,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             windowManager.resizeWindow(winId, edge: edge, delta: delta)
                         }
                     },
-                    onMinimize: { [self] in
-                        // Deferred: the scale-effect zoom into the dock plays
-                        // first; _finalizeWindowMinimize hides the window.
-                        setState {
-                            _minimizingWindows.insert(winId)
-                        }
-                    },
-                    onMaximize: { [self] in
-                        let wasFullscreen = windowManager.windows.first(where: { $0.id == winId })?.isFullscreen ?? false
-                        setState {
-                            // The zoom animates win.rect — configure clients
-                            // from the FINAL rect it returns.
-                            guard let finalRect = _fullscreenWithZoom(winId) else { return }
-                            guard let w = windowManager.windows.first(where: { $0.id == winId }) else { return }
-                            if let surfId = waylandIntegration?.surfaceId(forWindowId: winId) {
-                                if w.isFullscreen {
-                                    // Entering fullscreen — content fills the window;
-                                    // title bar overlays on top only when revealed.
-                                    waylandIntegration?.sendFullscreenResize(
-                                        surfaceId: surfId,
-                                        width: Int(finalRect.width),
-                                        height: Int(finalRect.height))
-                                } else {
-                                    // Exiting fullscreen → restored to pre-fullscreen rect
-                                    let contentW = finalRect.width
-                                    let contentH = finalRect.height - DesktopTheme.kTitleBarHeight
-                                    if wasFullscreen {
-                                        waylandIntegration?.sendExitFullscreen(
-                                            surfaceId: surfId,
-                                            width: Int(contentW),
-                                            height: Int(contentH))
-                                    } else {
-                                        w.onContentResize?(contentW, contentH)
-                                    }
-                                }
-                            } else {
-                                // DMA-BUF child process (Settings, viewer, …):
-                                // without this it keeps its old buffer and the
-                                // shell stretches it — 2x-scaled UI whose
-                                // hit-testing no longer matches the screen.
-                                let contentH = w.isFullscreen
-                                    ? finalRect.height
-                                    : finalRect.height - DesktopTheme.kTitleBarHeight
-                                if finalRect.width > 0 && contentH > 0 {
-                                    w.onContentResize?(finalRect.width, contentH)
-                                }
-                            }
-                        }
-                    },
-                    onClose: { [self] in
-                        // Teardown is deferred to _finalizeWindowClose (fired
-                        // by the close animation) so the shrink-out plays
-                        // over live window content.
-                        setState {
-                            _closingWindows.insert(winId)
-                        }
-                    },
+                    onMinimize: { [self] in requestWindowMinimize(winId) },
+                    onMaximize: { [self] in requestWindowMaximize(winId) },
+                    onClose: { [self] in requestWindowClose(winId) },
                     onTitleBarDoubleTap: { [self] in
-                        // macOS-style: double-click toggles maximized state.
-                        // Skip if the window is in fullscreen (handled by the
-                        // green button there).
-                        guard let w = windowManager.windows.first(where: { $0.id == winId }),
-                              !w.isFullscreen else { return }
-                        setState {
-                            windowManager.maximizeWindow(
-                                winId,
-                                screenWidth: screenWidth,
-                                screenHeight: screenHeight
-                            )
-                        }
-                        // Tell the wayland client about its new content size.
-                        let contentW = w.rect.width
-                        let contentH = w.rect.height - DesktopTheme.kTitleBarHeight
-                        if contentW > 0 && contentH > 0 {
-                            w.onContentResize?(contentW, contentH)
-                        }
+                        requestWindowTitleBarDoubleTap(winId)
                     }
                 )
                 _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed)

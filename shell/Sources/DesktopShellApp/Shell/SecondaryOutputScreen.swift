@@ -54,6 +54,20 @@ final class SecondaryViewOutputsMap: @unchecked Sendable {
 
 let secondaryViewOutputs = SecondaryViewOutputsMap()
 
+/// The topmost window shown on `output`, if it is fullscreen — the one whose
+/// title bar the reveal zone uncovers. Shared by the screen's build and by the
+/// host's rebuild signature, so the two cannot disagree about whether this
+/// output is currently showing fullscreen chrome.
+func fullscreenWindow(onOutput output: DisplayOutput) -> WindowInfo? {
+    guard let wm = _shellState?.windowManager else { return nil }
+    let top = wm.visibleWindows.last(where: { w in
+        w.rect.right > output.logicalLeft && w.rect.left < output.logicalRight &&
+        w.rect.bottom > output.logicalTop && w.rect.top < output.logicalBottom
+    })
+    guard let top, top.isFullscreen else { return nil }
+    return top
+}
+
 /// Rebuild hooks for the secondary-output screens, keyed by output id.
 /// Populated by SecondaryScreenHost states; poked by the primary shell
 /// whenever its state changes (window moves, opens, closes, focus).
@@ -133,6 +147,12 @@ class _SecondaryScreenHostState: State<StatefulWidget> {
                     ":\(win.id == wm.focusedWindowId ? 1 : 0):\(win.zIndex)"
             }
         }
+        // Revealing a fullscreen window's title bar changes no rect, so
+        // without this the hover would set the flag and nothing would ever
+        // repaint — the bar would stay hidden and the window stay stuck.
+        if let fs = fullscreenWindow(onOutput: output) {
+            sig += "|tb:\(fs.id):\(_shellState?.topBarRevealed == true ? 1 : 0)"
+        }
         return sig
     }
 
@@ -211,12 +231,18 @@ struct SecondaryOutputScreen {
     }
 
     /// Windows intersecting this output, in output-local coordinates.
-    /// Callbacks mutate the shared shell state (and re-invalidate every
-    /// screen through the shell's setState) — inert until pointer events
-    /// route to secondary views, but correct once they do.
+    /// Callbacks mutate the shared shell state, which re-invalidates every
+    /// screen through the shell's setState.
+    ///
+    /// Chrome actions (the traffic lights, title-bar double-click) go through
+    /// the shell's `requestWindow*` methods rather than being respelled here:
+    /// this tree is a second set of `DesktopWindow`s, and anything it leaves
+    /// nil is a button that draws normally and does nothing once the window is
+    /// on this monitor.
     private func _windows() -> [Widget] {
         guard let shell = _shellState else { return [] }
         let wm = shell.windowManager
+        let fullscreenId = fullscreenWindow(onOutput: output)?.id
         var widgets: [Widget] = []
         for win in wm.visibleWindows {
             let r = win.rect
@@ -232,6 +258,7 @@ struct SecondaryOutputScreen {
                 child: DesktopWindow(
                     windowInfo: win,
                     isFocused: winId == wm.focusedWindowId,
+                    isTopBarRevealed: winId == fullscreenId && shell.topBarRevealed,
                     onBringToFront: {
                         _shellState?.setState {
                             _shellState?.windowManager.bringToFront(winId)
@@ -246,6 +273,12 @@ struct SecondaryOutputScreen {
                         _shellState?.setState {
                             _shellState?.windowManager.resizeWindow(winId, edge: edge, delta: delta)
                         }
+                    },
+                    onMinimize: { _shellState?.requestWindowMinimize(winId) },
+                    onMaximize: { _shellState?.requestWindowMaximize(winId) },
+                    onClose: { _shellState?.requestWindowClose(winId) },
+                    onTitleBarDoubleTap: {
+                        _shellState?.requestWindowTitleBarDoubleTap(winId)
                     })))
         }
         return widgets
@@ -259,6 +292,31 @@ struct SecondaryOutputScreen {
             width: output.logicalWidth,
             height: DesktopTheme.kStatusBarHeight,
             child: _statusBar()))
+
+        // Fullscreen chrome reveal, mirroring the primary's zones: a 4px
+        // sliver at the top catches the approach, and once revealed the zone
+        // grows to cover the status bar plus the title-bar overlay so moving
+        // onto the traffic lights doesn't count as leaving it. Hovering below
+        // hides it again. `.translucent` over a bare SizedBox — a ColoredBox
+        // would hit-test opaque even at alpha 0 and eat the window's events.
+        if fullscreenWindow(onOutput: output) != nil {
+            let revealed = _shellState?.topBarRevealed == true
+            let zoneH = revealed
+                ? DesktopTheme.kStatusBarHeight + DesktopTheme.kTitleBarHeight
+                : 4.0
+            layers.append(Positioned(
+                left: 0, top: 0, right: 0, height: zoneH,
+                child: Listener(
+                    onPointerHover: { _ in _shellState?.setTopBarRevealed(true) },
+                    behavior: .translucent,
+                    child: SizedBox(expand: ()))))
+            layers.append(Positioned(
+                left: 0, top: zoneH, right: 0, bottom: 0,
+                child: Listener(
+                    onPointerHover: { _ in _shellState?.setTopBarRevealed(false) },
+                    behavior: .translucent,
+                    child: SizedBox(expand: ()))))
+        }
 
         // This tree has no MacosApp above it, so establish text direction
         // ourselves — Stack/Row alignment resolution traps without it.

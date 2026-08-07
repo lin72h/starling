@@ -526,6 +526,183 @@ def check_result_builders() -> None:
     print(f"  widget builders: {checked} overload(s) checked")
 
 
+# ── check: every window-chrome callback is wired in every tree ───────────────
+
+# Call sites that deliberately leave a chrome callback nil. Each needs a
+# reason, for the same purpose as KNOWN_UNREGISTERED above: a nil callback
+# draws a perfectly normal button that does nothing, so "it looks fine" is
+# never evidence.
+CHROME_EXEMPT = {
+    ("DesktopShell.swift", "_makeOverviewWindow"): {
+        "onMinimize":
+            "the scale-to-fit virtual-desktop harness has no dock to zoom "
+            "into and skips the lifecycle-animation machinery entirely; its "
+            "windows exist to be dragged across simulated seams.",
+        "isTopBarRevealed":
+            "the same harness renders every output shrunk onto one panel, so "
+            "there is no per-output top edge to hover; it never puts a window "
+            "in fullscreen either.",
+    },
+}
+
+# Anything in DesktopWindow's init named on* that is NOT window chrome.
+CHROME_NOT_A_CALLBACK: set[str] = set()
+
+# Not an on* callback, but the identical trap: it defaults to false, and a
+# tree that omits it can never reveal a fullscreen window's title bar — which
+# leaves that window with no traffic lights and no way out of fullscreen on
+# the monitor it is on.
+CHROME_EXTRA_REQUIRED = {"isTopBarRevealed"}
+
+
+def _strip_swift_noise(src: str) -> str:
+    """Blank out comments and string literals, preserving offsets, so paren
+    and comma counting can't be thrown by a `(macOS)` in a comment."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        two = src[i:i + 2]
+        if two == "//":
+            while i < n and src[i] != "\n":
+                out[i] = " "
+                i += 1
+        elif two == "/*":
+            depth = 1
+            out[i] = out[i + 1] = " "
+            i += 2
+            while i < n and depth:
+                if src[i:i + 2] == "/*":
+                    depth += 1
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                elif src[i:i + 2] == "*/":
+                    depth -= 1
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                else:
+                    if src[i] != "\n":
+                        out[i] = " "
+                    i += 1
+        elif src[i] == '"':
+            out[i] = " "
+            i += 1
+            while i < n and src[i] != '"':
+                if src[i] == "\\" and i + 1 < n:
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                    continue
+                if src[i] != "\n":
+                    out[i] = " "
+                i += 1
+            if i < n:
+                out[i] = " "
+                i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _top_level_labels(src: str, open_paren: int) -> tuple[set[str], int]:
+    """Argument labels passed at the top level of the call whose `(` is at
+    `open_paren`. Returns (labels, index just past the matching `)`)."""
+    labels: set[str] = set()
+    depth = 0
+    i, n = open_paren, len(src)
+    chunk_start = open_paren + 1
+    chunks: list[str] = []
+    while i < n:
+        c = src[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                chunks.append(src[chunk_start:i])
+                i += 1
+                break
+        elif c == "," and depth == 1:
+            chunks.append(src[chunk_start:i])
+            chunk_start = i + 1
+        i += 1
+    for chunk in chunks:
+        m = re.match(r"\s*(\w+)\s*:", chunk)
+        if m:
+            labels.add(m.group(1))
+    return labels, i
+
+
+def check_window_chrome() -> None:
+    """Every `DesktopWindow(...)` call site must pass every chrome callback
+    `DesktopWindow` accepts.
+
+    The shell renders window chrome in more than one widget tree — the primary
+    shell's build, and one `SecondaryOutputScreen` per extra monitor, each in
+    its own Flutter view. Every callback is optional and defaults to nil, so a
+    tree that forgets one gets a button that draws in the right place, hovers,
+    presses, and does nothing at all.
+
+    That is not hypothetical: the secondary-output screen passed only
+    move/resize/raise, so all three traffic lights and the title-bar
+    double-click were dead for any window dragged onto a second monitor —
+    while being perfectly alive for the same window on the primary.
+    """
+    check = "window-chrome"
+    shell_src = REPO / "shell/Sources/DesktopShellApp"
+    widget = shell_src / "Window/DesktopWindow.swift"
+    src = _strip_swift_noise(widget.read_text())
+
+    m = re.search(r"\n    init\s*\(", src)
+    if not m:
+        fail(check, f"no init( found in {widget.name}")
+        return
+    accepted, _ = _top_level_labels(src, src.index("(", m.start()))
+    required = {p for p in accepted
+                if re.match(r"on[A-Z]", p)} - CHROME_NOT_A_CALLBACK
+    if not required:
+        fail(check, f"no on* callbacks found in {widget.name}'s init")
+        return
+    missing_extra = CHROME_EXTRA_REQUIRED - accepted
+    if missing_extra:
+        fail(check, f"{widget.name}'s init no longer accepts "
+                    f"{', '.join(sorted(missing_extra))} — update "
+                    "CHROME_EXTRA_REQUIRED to match")
+        return
+    required |= CHROME_EXTRA_REQUIRED
+
+    sites = 0
+    for path in sorted(shell_src.rglob("*.swift")):
+        if path == widget:
+            continue
+        text = _strip_swift_noise(path.read_text())
+        for hit in re.finditer(r"\bDesktopWindow\s*\(", text):
+            passed, _ = _top_level_labels(text, text.index("(", hit.start()))
+            # Name the call site by its enclosing func, for the exemption
+            # table and for a message that says where to look.
+            before = text[:hit.start()]
+            fn = re.findall(r"\bfunc\s+(\w+)", before)
+            where = fn[-1] if fn else "<top level>"
+            exempt = CHROME_EXEMPT.get((path.name, where), {})
+            sites += 1
+            for cb in sorted(required - passed):
+                if cb in exempt:
+                    note(check, f"{path.name}:{where} leaves {cb} nil — "
+                                f"{exempt[cb]}")
+                elif cb in passed:
+                    continue
+                else:
+                    line = before.count("\n") + 1
+                    fail(check,
+                         f"{path.name}:{line} ({where}) builds a DesktopWindow "
+                         f"without {cb}: that control renders and hovers "
+                         f"normally, and silently does nothing, for every "
+                         f"window this tree draws")
+            for cb in sorted(required & passed):
+                ok(f"{path.name}:{where} {cb}")
+    if sites == 0:
+        fail(check, "no DesktopWindow call sites found — did the widget move?")
+    print(f"  window chrome: {len(required)} callback(s) × {sites} call site(s)")
+
+
 # ── check: the scripts parse ─────────────────────────────────────────────────
 
 def check_script_syntax() -> None:
@@ -569,6 +746,7 @@ def main() -> int:
     check_wayland_callbacks()
     check_engine_header_mirror()
     check_result_builders()
+    check_window_chrome()
     check_script_syntax()
 
     for check, msg in notes:
