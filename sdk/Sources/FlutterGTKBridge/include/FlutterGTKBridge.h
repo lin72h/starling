@@ -68,6 +68,22 @@ void flgtk_dmabuf_texture_update(FlGtkDmaBufTexture* texture,
 // Unregisters and releases the texture.
 void flgtk_dmabuf_texture_destroy(FlGtkDmaBufTexture* texture);
 
+// ── Clipboard ───────────────────────────────────────────────────────────────
+// The system clipboard via GtkClipboard, so a Flutter-Swift app in a normal
+// GNOME/KDE window copies and pastes with everything else on that desktop.
+//
+// The callback fires on the GLib main loop, which IS the UI thread under
+// gtk_main. Callers must NOT hop it through GCD's main queue: that queue is
+// never drained here, so the hop would silently swallow every paste.
+typedef void (*FlGtkClipboardTextCallback)(void* ctx, const char* text);
+
+// Take ownership of the selection with `text` (copied by GTK).
+void flgtk_clipboard_set_text(const char* text);
+
+// Ask for the selection as text. `cb` runs exactly once, on the GLib main
+// loop; `text` is NULL when there is nothing to paste.
+void flgtk_clipboard_get_text(FlGtkClipboardTextCallback cb, void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

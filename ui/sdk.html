@@ -699,9 +699,21 @@
           </div>
         </div>
         <div class="status-row">
-          <div class="status-k">Windows, mobile <span class="badge plan">reachable</span></div>
+          <div class="status-k">Windows <span class="badge ok">tested</span></div>
           <div class="status-v">
-            Not started, and listed only because keeping the engine is what makes them
+            Ships as its own bundle. Apps are hosted by the engine's own Win32 embedder
+            (<code>flutter_windows.dll</code>) driven in Swift mode, so windowing, input,
+            IME and accessibility come from the same code path real Flutter Windows apps
+            use — the counterpart of the GTK host on Linux. Verified the way the Linux
+            bundle is: unpack the published archive on a clean machine, build an app
+            against it by path, run it. The framework itself needed almost nothing to
+            get there.
+          </div>
+        </div>
+        <div class="status-row">
+          <div class="status-k">Mobile <span class="badge plan">reachable</span></div>
+          <div class="status-v">
+            Not started, and listed only because keeping the engine is what makes it
             tractable: the embedders already exist, so the work is bridging rather than
             porting a renderer. No timeline.
           </div>

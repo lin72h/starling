@@ -17,9 +17,12 @@
  * data-control half: broadcasting the shared selection to bound control
  * clients, minting control offers, and routing a control source's data.
  *
- * Advertised at version 2; set_primary_selection is accepted but not wired
- * to the primary selection (a no-op) — the separate zwp_primary_selection
- * protocol already serves native primary selection.
+ * Advertised at version 2; set_primary_selection is accepted but not wired to
+ * the primary selection (a no-op). Note this leaves primary selection
+ * (middle-click paste) unimplemented DESKTOP-WIDE: zwp_primary_selection is
+ * itself a stub that accepts requests and transfers nothing, so `wl-paste
+ * --primary` reports the compositor does not support it. See
+ * docs/plans/clipboard.md.
  */
 
 #include "wayland_server_internal.h"

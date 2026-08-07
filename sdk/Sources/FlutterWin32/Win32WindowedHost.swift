@@ -23,6 +23,9 @@ public enum Win32WindowedHost {
     /// Point runStarlingApp/startPeriodicTimer at the Win32 host. Call once,
     /// before runStarlingApp.
     public static func install() {
+        // The system clipboard, so copy/paste reaches the rest of Windows
+        // rather than staying inside the process.
+        Clipboard.provider = Win32ClipboardProvider()
         windowedHostBoot = { title, width, height, root in
             setbuf(stdout, nil)
             print("[\(title)] Starting (Win32 host)")

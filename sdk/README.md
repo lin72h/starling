@@ -170,8 +170,14 @@ lands. `FLUTTER_SWIFT_LINK=static|dynamic` overrides the mode choice.
 
 ### As a download-and-point SDK (dynamic engine)
 
-`tools/make-bundle.sh` produces a self-contained tree carrying the framework and
-the engine binaries together:
+`tools/make-bundle.sh` (Linux/macOS) and `tools/make-bundle.ps1` (Windows)
+produce a self-contained tree carrying the framework and the engine binaries
+together. Same layout on both, so a consumer's manifest differs only in which
+host product it imports — `FlutterGTK` or `FlutterWin32`. The Windows bundle
+carries each DLL beside its `.lib` import library, because the link step needs
+the import library and the run needs the DLL; it does **not** carry the Swift
+runtime DLLs, which belong to the consumer's toolchain exactly as
+`libswiftCore` does on Linux.
 
     starling-sdk-linux-aarch64/
       Package.swift Sources/ Examples/ Tests/ tools/ LICENSE

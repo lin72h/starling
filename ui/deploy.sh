@@ -13,11 +13,22 @@
 set -euo pipefail
 
 UI="$(cd "$(dirname "$0")" && pwd)"
-# SSH, not HTTPS: this repo's own remote is SSH, so that is what has
-# credentials here. The HTTPS default this used to carry failed the deploy with
-# "could not read Username for 'https://github.com'" — git had no way to
-# authenticate and no terminal to ask on.
-REPO="${1:-${STARLING_SITE_REPO:-git@github.com:starling-build/www.git}}"
+# Follow whatever protocol THIS repo's origin uses, because that is the one
+# with working credentials — and which one that is has now changed twice.
+# An HTTPS default once failed with "could not read Username for
+# 'https://github.com'"; it was pinned to SSH for that reason, and then the
+# 2026-08-06 deploy failed the other way, "Permission to starling-build/www.git
+# denied to sudison", because origin had moved to HTTPS and the SSH key on this
+# box belongs to a different account. Deriving it removes the guess.
+if [ -n "${1:-}" ]; then
+    REPO="$1"
+elif [ -n "${STARLING_SITE_REPO:-}" ]; then
+    REPO="$STARLING_SITE_REPO"
+elif git -C "$UI" remote get-url origin 2>/dev/null | grep -q '^https://'; then
+    REPO="https://github.com/starling-build/www.git"
+else
+    REPO="git@github.com:starling-build/www.git"
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

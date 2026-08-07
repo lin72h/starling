@@ -89,17 +89,6 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
     /// True while a selection drag is in flight (primary button held).
     private var _selecting = false
 
-    /// Clipboard shared across terminal instances (and, later, the shell).
-    private var _clipboardPath: String {
-        #if os(Windows)
-        // No XDG_RUNTIME_DIR; the per-user temp directory is the equivalent
-        // scope — per-user and cleaned by the system, not world-writable /tmp.
-        return NSTemporaryDirectory() + "starling-clipboard"
-        #else
-        return (ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp")
-            + "/starling-clipboard"
-        #endif
-    }
 
     override func initState() {
         super.initState()
@@ -301,8 +290,8 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
         return (base + row, col)
     }
 
-    /// Serialize the selection (linear, terminal-style) and write it to the
-    /// shared clipboard file. Trailing blanks are trimmed per line.
+    /// Serialize the selection (linear, terminal-style) onto the system
+    /// clipboard. Trailing blanks are trimmed per line.
     private func _copySelection() {
         guard let a = _selAnchor, let h = _selHead else { return }
         let (start, end) = _ordered(a, h)
@@ -326,25 +315,30 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
         }
         let text = lines.joined(separator: "\n")
         guard !text.isEmpty else { return }
-        try? text.write(toFile: _clipboardPath, atomically: true, encoding: .utf8)
+        Clipboard.setData(ClipboardData(text: text))
     }
 
     /// Feed the clipboard to the PTY — bracketed when the application asked
     /// for it (mode 2004), LFs normalized to CRs like every terminal.
+    ///
+    /// Asynchronous: the selection may be owned by another process that has to
+    /// be asked to write it. The completion lands on the UI thread.
     private func _paste() {
-        guard !_exited,
-              let text = try? String(contentsOfFile: _clipboardPath, encoding: .utf8),
-              !text.isEmpty else { return }
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\r")
-            .replacingOccurrences(of: "\n", with: "\r")
-        _lock.lock()
-        let bracketed = emulator.bracketedPaste
-        _lock.unlock()
-        if bracketed {
-            pty?.write("\u{1B}[200~" + normalized + "\u{1B}[201~")
-        } else {
-            pty?.write(normalized)
+        guard !_exited else { return }
+        Clipboard.getData(Clipboard.kTextPlain) { [weak self] data in
+            guard let self = self, !self._exited,
+                  let text = data?.text, !text.isEmpty else { return }
+            let normalized = text
+                .replacingOccurrences(of: "\r\n", with: "\r")
+                .replacingOccurrences(of: "\n", with: "\r")
+            self._lock.lock()
+            let bracketed = self.emulator.bracketedPaste
+            self._lock.unlock()
+            if bracketed {
+                self.pty?.write("\u{1B}[200~" + normalized + "\u{1B}[201~")
+            } else {
+                self.pty?.write(normalized)
+            }
         }
     }
 

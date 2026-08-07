@@ -86,6 +86,30 @@ step "unit tests: record"
     | grep -vE "libxml2.so.2: no version information" \
     | grep -E "Test run with|error:|failed") || fails=$((fails + 1))
 
+step "unit tests: clipboard bridge"
+# The bridge's bounded pipe I/O — the part that keeps a slow or wedged peer
+# from turning a paste into a hang. Plain C over pipes: no compositor, no GPU,
+# no display, so it belongs in this tier rather than the functional one.
+# WLCLIP_TIMEOUT_MS is shortened so the deadline cases cost milliseconds.
+if [ -f /usr/include/wayland-client.h ]; then
+    clip_bin="$(mktemp -d)/clipboard_bridge_test"
+    if "${CC:-cc}" -O1 -DWLCLIP_TIMEOUT_MS=150 -o "$clip_bin" \
+            "$REPO/test/clipboard_bridge_test.c" \
+            "$REPO/sdk/Sources/WaylandClipboardBridge/wlr-data-control-unstable-v1-protocol.c" \
+            -I "$REPO/sdk/Sources/WaylandClipboardBridge" \
+            -lwayland-client -lpthread 2>&1 | grep -E "error|warning: implicit"; then
+        fails=$((fails + 1))          # compiler said something worth reading
+    fi
+    if [ -x "$clip_bin" ]; then
+        as_user "$clip_bin" || fails=$((fails + 1))
+    else
+        echo "  did not build"; fails=$((fails + 1))
+    fi
+    rm -rf "$(dirname "$clip_bin")"
+else
+    echo "  SKIPPED — no wayland-client headers (apt install libwayland-dev)"
+fi
+
 step "xdg-open routing"
 python3 "$REPO/test/xdg_open_routing.py" || fails=$((fails + 1))
 

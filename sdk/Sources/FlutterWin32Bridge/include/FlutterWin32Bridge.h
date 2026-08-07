@@ -48,6 +48,21 @@ void flwin32_host_run(FlWin32Host* host);
 // Fullscreens or restores the window.
 void flwin32_host_set_fullscreen(FlWin32Host* host, int32_t fullscreen);
 
+// Clipboard. Text is UTF-8 on this boundary and converted to/from UTF-16
+// inside, so the Swift side never handles wide strings.
+//
+// Unlike the Wayland and GTK backends this is synchronous: Win32 hands over
+// the data itself rather than asking the current owner to write it, so there
+// is nothing to wait on and no way for another process to stall a paste.
+
+// Puts UTF-8 `text` on the clipboard. Returns 1 on success.
+int32_t flwin32_clipboard_set_text(const char* text);
+
+// Reads the clipboard as UTF-8 into `out`. Returns the number of bytes
+// written including the terminator, 0 when the clipboard holds no text, or
+// -1 if `out` is too small (retry with a larger buffer).
+int32_t flwin32_clipboard_get_text(char* out, int32_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

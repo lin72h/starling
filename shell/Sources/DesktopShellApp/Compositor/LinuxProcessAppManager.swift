@@ -494,6 +494,16 @@ class LinuxProcessAppManager {
         if !extraArgs.isEmpty { process.arguments = extraArgs }
         var env = ProcessInfo.processInfo.environment
         env["FLUTTER_DMABUF_SOCKET"] = socketPath
+        // The system clipboard: the SDK connects back as a data-control client
+        // so a copy here pastes into Chrome. Deliberately NOT WAYLAND_DISPLAY —
+        // that name would tell toolkits linked into the app to switch to a
+        // Wayland backend instead of rendering through the dma-buf socket. The
+        // socket name is dynamic (an unclean exit leaves wayland-0.lock behind
+        // and the next run listens on wayland-1), so it must be read from the
+        // live server rather than assumed.
+        if let socketName = waylandIntegration?.socketName, !socketName.isEmpty {
+            env["STARLING_WAYLAND_DISPLAY"] = socketName
+        }
         for (k, v) in extraEnv { env[k] = v }
         // Host-GL dev mode (tools/run-shell-gpu.sh sets the flag): the shell
         // renders on Starling's own Mesa (zink), but child apps must use the
