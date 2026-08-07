@@ -311,36 +311,48 @@ place the desktop-wide freeze risk comes back.
 
 ## Verification
 
-The probes used to diagnose this are the regression tests — all scriptable, no
-browser needed.
+**Written and passing** — four checks in `test/functional.py`, plus
+`test/clipboard_gtk_client.py` as their stand-in for Chrome. All assert by
+round-tripping text through the selection, never by reading pixels, per this
+suite's standing rule.
 
-- **Stage 0 regression, the exact failing case:** set the selection with
-  `wl-copy`, *then* start a `wl_data_device` client, and assert it reads the
-  text. A ~20-line GTK3 Python client (`Gtk.Clipboard.request_text`) is enough;
-  `python3-gi` is present on the box. Assert the ordering both ways — the
-  "client first" case already passes and must keep passing.
-- **Cross-protocol, both directions:** GTK owner → `wl-paste`, and `wl-copy` →
-  GTK reader.
+| check | what it guards |
+| --- | --- |
+| a copy in a first-party app reaches the whole desktop | `setData` — the file-based clipboard is gone |
+| a copy made outside pastes into a first-party app | `getData` |
+| a client started AFTER a copy still sees it | the Stage 0 bug that shipped |
+| a frozen selection owner cannot wedge the desktop | the property the design was chosen for |
+
+Two things about them are worth keeping:
+
+- **The regression test was seen red before it was trusted.** With the two
+  `wayland_data_device_offer_on_interaction` call sites disabled, rebuilt and
+  redeployed, it fails with exactly its intended message; restored, it passes. A
+  regression test that has only ever been green is a guess.
+- **The paste checks seed the editor before pasting** and copy the result back
+  out. Without the seed, a paste that silently did nothing would look identical
+  to a pass: the editor refuses to copy an empty selection, so the value the
+  test put on the clipboard would still be there and read back clean.
+
+`wl-paste` cannot substitute for the GTK client. wl-clipboard speaks
+data-control, which is focus-free and is handed the selection at bind time —
+the very path that always worked. Only a `wl_data_device` client sees the bug.
+
+Still owed:
+
+- **Unit tier:** serial invalidation, mime negotiation, empty and oversized
+  payloads. Nothing at the `test/run.sh` level touches the clipboard yet.
 - **Primary selection:** currently must fail with "does not seem to support
-  primary selection"; flip the assertion when stage 3 lands.
-- **Unit (`test/run.sh`):** serial invalidation, mime negotiation, empty and
-  oversized payloads.
-- **Functional (`sudo test/run.sh --functional`):** copy in Terminal → paste in
-  Text Editor and the reverse, driven through the semantics-tree agent the
-  harness already has.
-- **Hang regression:** `kill -STOP` the selection owner, then paste. Assert the
-  desktop keeps compositing *and* that only the pasting app stalls. This is the
-  failure the architecture is chosen for, so it needs the test that would catch a
-  regression back to shell-brokered transfer.
-- **VM gate** before release: this changes the shipped shell, and stage 1 adds an
-  env hand-off on the app-launch path — exactly the kind of privilege/session
-  difference `CLAUDE.md` says the dev box hides.
+  primary selection"; flip the assertion when Stage 3 lands.
 
-One caution on testing this on the dev box: **the session runs unprivileged as
-uid 1001**, and the clipboard socket is chowned to the runtime dir's owner by a
-`getuid() == 0`-gated block (`WaylandIntegration.swift:245`). That is a
-dev-vs-shipping privilege split of the kind that has burned this project before;
-exercise the unprivileged path.
+### Cost of the clipboard on app startup
+
+`_installStarlingClipboard()` runs on the app's main thread before the widget
+tree exists, and `wlclip_connect()` does two blocking `wl_display_roundtrip`
+calls — so it couples first-party app launch to the compositor answering.
+Measured against the live compositor: **0.1–0.3 ms**, five runs. Not a
+meaningful startup cost, and not a plausible cause of a launch timeout. Worth
+re-measuring if that ever changes, because the coupling itself is real.
 
 ## Open question
 
