@@ -199,15 +199,23 @@ step "functional checks, against the installed .deb"
 # which reads as "covered" in the tally when it is not.
 "$HARNESS/scp-vm.sh" "$REPO/test/clipboard_gtk_client.py" '~/' >/dev/null
 "$HARNESS/scp-vm.sh" "$REPO/build/shell-drive.py" '~/' >/dev/null
+# The screensaver inhibit check compiles this in the guest. Resolved beside
+# functional.py, like the two clients above — there is no repo in the VM.
+"$HARNESS/scp-vm.sh" "$REPO/test/fixtures/idle-inhibit-client.c" '~/' >/dev/null
 # The clipboard checks need wl-clipboard (a data-control peer to copy from and
 # paste to) and GTK 3 python bindings (a wl_data_device client, which is the
 # only kind that can catch the offer-on-interaction regression). Neither is in
 # the base image, and both checks SKIP silently without them — so install here,
 # the same way g3-check.sh pulls mesa-utils, rather than let the gate report a
 # clean run over a hole.
+# The screensaver inhibit check builds its zwp_idle_inhibit_manager_v1 client
+# in the guest — wayland-scanner for the bindings, the protocol XML, and a
+# compiler — rather than shipping a binary that would rot against libwayland.
+# Without them it SKIPs, which is the hole this whole block exists to close.
 ssh_vm 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        wl-clipboard python3-gi gir1.2-gtk-3.0' >/dev/null 2>&1 \
-    || echo "  note: clipboard test deps unavailable — those checks will skip"
+        wl-clipboard python3-gi gir1.2-gtk-3.0 \
+        libwayland-bin libwayland-dev wayland-protocols gcc' >/dev/null 2>&1 \
+    || echo "  note: test deps unavailable — clipboard/screensaver checks will skip"
 ssh_vm 'mkdir -p ~/fixtures'
 for f in "$REPO"/test/fixtures/*.app; do
     "$HARNESS/scp-vm.sh" "$f" '~/fixtures/' >/dev/null

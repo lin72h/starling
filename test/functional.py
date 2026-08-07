@@ -1088,10 +1088,14 @@ def _build_idle_inhibit_client(into: str) -> str:
     checked-in a.out would rot against libwayland.
     """
     xml = "/usr/share/wayland-protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml"
-    src = REPO / "test/fixtures/idle-inhibit-client.c"
+    # Beside functional.py as well as in the repo: inside the VM gate there is
+    # no repo, and REPO resolves to the parent of wherever this file was
+    # dropped. Same two-place lookup as APP_RUN and SHELL_DRIVE above.
+    src = _first(REPO / "test/fixtures/idle-inhibit-client.c",
+                 Path(__file__).resolve().parent / "idle-inhibit-client.c")
     if not shutil.which("wayland-scanner") or not shutil.which("cc"):
         raise Skip("needs wayland-scanner and a C compiler")
-    if not os.path.exists(xml) or not src.exists():
+    if not os.path.exists(xml) or src is None:
         raise Skip("idle-inhibit protocol XML or fixture source missing")
     hdr = os.path.join(into, "idle-inhibit-unstable-v1-client-protocol.h")
     code = os.path.join(into, "idle-inhibit-unstable-v1-protocol.c")
