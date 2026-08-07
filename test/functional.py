@@ -1413,7 +1413,12 @@ def check_recording() -> None:
 
         enc = "zero-copy vaapi" if r.get("zero_copy") \
             else ("vaapi" if r["hardware"] else "x264")
-        log(f"{codec} {w}x{h} via {enc}, {os.path.getsize(path)} bytes, decodes clean")
+        # Printed, not log()'d: which encoder ran is the difference between
+        # "recording works" and "the encoder we changed was exercised", and
+        # the VM gate runs without -v. A green gate that silently took the
+        # pipe fallback is not coverage of the zero-copy path.
+        print(f"        {codec} {w}x{h} via {enc}, "
+              f"{os.path.getsize(path)} bytes, decodes clean")
     finally:
         # The tier must not grow the session user's Videos on every run.
         with contextlib.suppress(OSError):

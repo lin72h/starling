@@ -133,6 +133,16 @@ ssh_vm 'dpkg -s starling >/dev/null 2>&1' \
 # ── 4. a real login, through the display manager ─────────────────────────────
 step "set up the GDM login and reboot into it (g2)"
 ssh_vm 'bash ~/g2-setup-login.sh' 2>&1 | tail -8
+# Shorten the screensaver's idle timeout before the session starts. The two
+# screensaver checks need one they can actually wait out, and the shipped
+# default is ten minutes — without this they SKIP, and the gate reports a
+# clean run over a hole, exactly as it would without wl-clipboard above.
+#
+# Through the config file, not the environment: the session is started by GDM,
+# so this is the same constraint the fixture catalog has further down, and the
+# same answer. It also means the persistence path is what gets exercised,
+# which is the one a user actually takes.
+ssh_vm 'mkdir -p ~/.config/starling && echo 15 > ~/.config/starling/screensaver'
 ssh_vm 'sudo systemctl reboot' >/dev/null 2>&1
 sleep 20
 echo -n "waiting for the graphical boot"
