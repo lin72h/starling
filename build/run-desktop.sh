@@ -209,9 +209,16 @@ for v in FLUTTER_DRM_DPI FLUTTER_DRM_CONNECTOR FLUTTER_DRM_MODE FLUTTER_VT \
     [ -n "${!v:-}" ] && ENV_ARGS+=("$v=${!v}")
 done
 
+# Drop terminal-multiplexer markers, as build/session/starling-session does:
+# started from inside tmux, they reach every app the desktop launches and are
+# believed. Only the seatd branch needs it — sudo's env_reset does the same
+# job for free on the direct one, which is exactly why this leak is invisible
+# on the dev path and shows up only on the shipping-shaped one.
+NO_MUX=(-u TMUX -u TMUX_PANE -u TERM_PROGRAM -u TERM_PROGRAM_VERSION -u STY -u WINDOW)
+
 cd "$LIB"
 if [ "$SEAT" = direct ]; then
     exec sudo env "${ENV_ARGS[@]}" ./DesktopShellApp --drm "${ARGS[@]+"${ARGS[@]}"}"
 else
-    exec env "${ENV_ARGS[@]}" ./DesktopShellApp --drm "${ARGS[@]+"${ARGS[@]}"}"
+    exec env "${NO_MUX[@]}" "${ENV_ARGS[@]}" ./DesktopShellApp --drm "${ARGS[@]+"${ARGS[@]}"}"
 fi

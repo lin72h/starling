@@ -86,7 +86,17 @@ if [ -S "$REAL_RUN/${PIPEWIRE_REMOTE:-pipewire-0}" ]; then
     PW_ENV=(PIPEWIRE_RUNTIME_DIR="$REAL_RUN")
 fi
 
+# Terminal-multiplexer markers must not reach the session. GDM never sets
+# them, but a session started by hand from inside tmux/screen (the supported
+# unprivileged test path) hands TMUX and TERM_PROGRAM to every app the
+# desktop launches, and they are believed: Claude Code takes its tmux
+# rendering path and its whole TUI comes out underlined, which reads as a
+# terminal bug. Same shape as the GNOME_DESKTOP_SESSION_ID leak app-run
+# already scrubs — the session's environment is ours to define, not the
+# launching shell's.
 exec env \
+    -u TMUX -u TMUX_PANE -u TERM_PROGRAM -u TERM_PROGRAM_VERSION \
+    -u STY -u WINDOW \
     "${PW_ENV[@]}" \
     LD_LIBRARY_PATH="$LIB" \
     FLUTTER_DRM_SEAT=libseat \
