@@ -7,9 +7,13 @@
 > Video playback holds it off through `zwp_idle_inhibit_manager_v1`.
 > Aerial footage decodes, scales and colour-converts on the GPU, which cut
 > the whole feature's CPU cost by 28%. `sudo test/functional.sh` is green
-> — 20 passed, 10 skipped, including both screensaver checks. What remains
-> is the zero-copy question below, which is a licensing/architecture
-> decision rather than an optimisation, and the deferred items at the end.
+> — 20 passed, 10 skipped, including both screensaver checks.
+>
+> **The feature is done.** Everything under "Done since" shipped and was
+> verified on hardware. What is left is one optimisation (zero-copy
+> aerials, below) and three things deferred on purpose — none of them
+> block using the screensaver, and the shipped default, with no aerial
+> installed, does not touch the aerial path at all.
 
 ## What exists
 
@@ -158,7 +162,7 @@ unauthenticated.
 
 ## Next
 
-### Zero-copy aerials — a decision, not an optimisation
+### Zero-copy aerials — plumbing, and only an optimisation
 
 What remains of the aerial's cost is the `hwdownload` and the texture
 upload, about 0.4 GB/s each way, and removing them needs the decoder to
@@ -181,9 +185,18 @@ So the remaining work is not a decision, it is plumbing: give
 `LinuxTextureRegistry.importDmaBuf`, and keeps the ffmpeg pipe for
 anything the narrow decoder refuses.
 
-Worth weighing against what it buys: with the GPU decode in place the
-whole screensaver costs about 1.1 cores while it is up, and a machine
-with no aerial installed — the shipped default — pays 0.29.
+Worth weighing against what it buys, before anyone treats it as
+outstanding work. With the GPU decode in place the whole screensaver
+costs about 1.1 cores while it is up, and a machine with no aerial
+installed — the shipped default — pays 0.29. So this is a saving on an
+opt-in path, not a fix.
+
+Two things to settle first, neither of them hard, both of them real:
+CH264Decoder lives in `apps/VideoPlayerApp/`, so the shell cannot reach
+it without extracting it into a shared package the way `record/` and
+`registry/` already are; and the narrow decoder refuses B-frames, which
+plenty of downloaded footage has, so the ffmpeg path stays regardless
+and this buys nothing for those clips.
 
 ### Later, deliberately not now
 
