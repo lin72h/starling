@@ -270,7 +270,7 @@ Note a deliberate regression on Windows: `TerminalApp` used to share a clipboard
 file between its own instances there, and now falls back to a process-local
 clipboard until Stage 2 lands `Win32Host`'s provider.
 
-**Stage 2 — off-desktop backends. GTK done and verified; Win32 written but never compiled.** So the public
+**Stage 2 — off-desktop backends. DONE, both verified.** So the public
 SDK's `Clipboard` is not a stub outside Starling.
 
 `GtkClipboardProvider` (`sdk/Sources/FlutterGTK`) over `flgtk_clipboard.c`,
@@ -285,13 +285,20 @@ selection, another reads it). Note it could *not* be verified through a
 first-party app: `STARLING_APP_GTK=1`, the opt-in GTK build of `TerminalApp`,
 has been removed, so nothing shipped links the GTK host any more.
 
-`Win32ClipboardProvider` over `flwin32_clipboard.c` is written and installed by
-`Win32WindowedHost.install()`, but **has never been compiled** — the toolchain
-lives on the win11 VM and SSH to it refuses the keys on this box. SwiftPM globs
-target directories, so that C file *will* be picked up by a Windows build; if it
-does not compile, it breaks that build. Verify with
-`sdk/tools/build-windows.ps1 -PackagePath sdk`, expecting the documented cold
-module-cache failures first.
+`Win32ClipboardProvider` over `flwin32_clipboard.c`, installed by
+`Win32WindowedHost.install()`. Built and exercised on the win11 VM
+(`swift build -c release --target FlutterWin32`, 236s), then round-tripped
+against Windows' own clipboard:
+
+- our setter → PowerShell `Get-Clipboard` reads it back;
+- PowerShell `Set-Clipboard` → our getter reads it back;
+- UTF-8 is exact. Verified by code point, not by glyph: bytes baked into the
+  test source come back from Windows as `99,97,102,233,32,10003` (`café ✓`) and
+  read back byte-identical. An earlier attempt that passed the string as a
+  command-line argument showed `?n?c?d?` — that was PowerShell's argv encoding
+  mangling it before our code ever saw it, which is exactly the sort of thing
+  that gets misread as a conversion bug;
+- an undersized buffer returns -1 so the caller retries larger.
 
 **Stage 3 — later.** Primary selection (net-new on both protocols, per above),
 `image/png`, and the text-field/selection workstream.
