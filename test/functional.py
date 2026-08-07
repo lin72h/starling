@@ -27,6 +27,7 @@ import json
 import os
 import pwd
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1503,6 +1504,218 @@ def check_screencast() -> None:
     finally:
         session_busctl("call", "org.freedesktop.portal.Desktop", info["session"],
                        "org.freedesktop.portal.Session", "Close")
+
+
+# ── clipboard ────────────────────────────────────────────────────────────────
+#
+# One selection for the whole desktop (docs/plans/clipboard.md). Two halves that
+# fail independently and must both be covered:
+#
+#   * first-party apps reach the system selection at all — they used to keep
+#     their own clipboard in a file, shared with nobody;
+#   * a third-party wl_data_device client (Chrome, Electron, GTK) can read a
+#     selection that PREDATES it. That one shipped broken: the compositor only
+#     ever broadcast on change, so copying and then launching a browser left
+#     the browser's clipboard empty until somebody copied again.
+#
+# Asserted by round-tripping text, never by reading pixels. Where a paste has to
+# be proved, the app is seeded with a marker first and the result copied back
+# out — otherwise a paste that silently did nothing looks identical to a pass,
+# because the editor refuses to copy an empty selection and the old value is
+# still on the clipboard.
+
+CLIP_MARK = "starling-clip-check"
+
+
+def _wl_env() -> dict:
+    """XDG_RUNTIME_DIR + WAYLAND_DISPLAY for the session under test.
+
+    The socket name is not fixed: an unclean exit leaves wayland-0.lock behind
+    and the next run listens on wayland-1, so it is discovered, never assumed.
+    """
+    rundir = os.path.dirname(broker_path())
+    socks = sorted(p for p in glob.glob(os.path.join(rundir, "wayland-*"))
+                   if not p.endswith(".lock"))
+    if not socks:
+        raise Skip(f"no wayland socket in {rundir}")
+    return dict(os.environ, XDG_RUNTIME_DIR=rundir,
+                WAYLAND_DISPLAY=os.path.basename(socks[0]))
+
+
+def _need_wl_clipboard() -> None:
+    if not (shutil.which("wl-copy") and shutil.which("wl-paste")):
+        raise Skip("wl-clipboard not installed (apt install wl-clipboard)")
+
+
+def wl_paste(timeout: float = 10) -> str:
+    r = subprocess.run(["wl-paste", "-n"], env=_wl_env(), capture_output=True,
+                       text=True, timeout=timeout)
+    return r.stdout if r.returncode == 0 else ""
+
+
+@contextlib.contextmanager
+def wl_copy(text: str):
+    """Own the selection for the body of the block.
+
+    wl-copy stays resident to serve the data, and it inherits our stdout — so
+    it is given DEVNULL, or a pipeline waiting on EOF hangs on a process that
+    is behaving perfectly.
+    """
+    p = subprocess.Popen(["wl-copy", text], env=_wl_env(),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(1.0)   # let it bind and take the selection
+        yield p
+    finally:
+        p.kill()
+        p.wait(timeout=5)
+
+
+def _editor_session():
+    """Launch the Text Editor and put the caret in its text area."""
+    assert not apps()["editor"]["window"], "Text Editor already running"
+    drive("move 300 300", "dock editor", "click")
+    wait_for(lambda: apps()["editor"]["window"], "Text Editor window")
+    time.sleep(3)                      # first frame + engine warm-up
+    drive("click 900 500")             # caret into the document
+    time.sleep(1)
+
+
+def _close_editor():
+    """Quit and wait for the SHELL to drop the window.
+
+    pkill returning is not enough: the next check asserts the editor is not
+    running, and the shell learns of the exit on its own tick. Without this the
+    checks pass or fail depending on which one ran first.
+    """
+    quit_app("TextEditorApp")
+    wait_for(lambda: not apps()["editor"]["window"], "Text Editor to close")
+
+
+@check("clipboard: a copy in a first-party app reaches the whole desktop")
+def check_clipboard_app_to_desktop() -> None:
+    _need_wl_clipboard()
+    text = f"{CLIP_MARK}-out"
+    _editor_session()
+    try:
+        drive("key ctrl+a", "key backspace", f"type {text}",
+              "key ctrl+a", "key ctrl+c")
+        time.sleep(2)
+        got = wl_paste()
+        assert got == text, f"desktop sees {got!r}, editor copied {text!r}"
+        log(f"editor copy readable desktop-wide: {got!r}")
+    finally:
+        _close_editor()
+
+
+@check("clipboard: a copy made outside pastes into a first-party app")
+def check_clipboard_desktop_to_app() -> None:
+    _need_wl_clipboard()
+    seed, pasted = f"{CLIP_MARK}-seed-", "OUTSIDE"
+    _editor_session()
+    try:
+        drive("key ctrl+a", "key backspace", f"type {seed}")
+        time.sleep(1)
+        with wl_copy(pasted):
+            drive("key ctrl+v")
+            time.sleep(2)
+        # Copy the document back out: the only way to see what landed without
+        # asserting on pixels. Seeding is what makes this honest — with an
+        # empty document a failed paste would leave `pasted` on the clipboard
+        # and read back as a pass.
+        drive("key ctrl+a", "key ctrl+c")
+        time.sleep(2)
+        got = wl_paste()
+        assert got == seed + pasted, \
+            f"editor holds {got!r}, expected {seed + pasted!r}"
+        log(f"outside copy landed in the editor: {got!r}")
+    finally:
+        _close_editor()
+
+
+@check("clipboard: a client started AFTER a copy still sees it")
+def check_clipboard_predates_client() -> None:
+    """The regression test for a bug that shipped.
+
+    wl_data_device is focus-based and the compositor only broadcast on change,
+    so a client that started after the copy never learned about the selection.
+    In practice: copy a URL, then launch Chrome, and Chrome pasted nothing.
+
+    A GTK3 client stands in for Chrome — same protocol. It needs a real pointer
+    interaction before the offer arrives, because keyboard focus here is lazy
+    (sent from the first keystroke) and the compositor hands the selection over
+    on pointer enter.
+    """
+    _need_wl_clipboard()
+    probe = Path(__file__).parent / "clipboard_gtk_client.py"
+    if not probe.exists():
+        raise Skip(f"{probe.name} missing")
+    r = subprocess.run([sys.executable, str(probe), "--check-gtk"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Skip("python3-gi with Gtk 3.0 not available")
+
+    text = f"{CLIP_MARK}-predates"
+    with wl_copy(text):
+        # Only NOW start the reader, so the selection genuinely predates it.
+        proc = subprocess.Popen([sys.executable, str(probe), "--read"],
+                                env=_wl_env(), stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        try:
+            time.sleep(4)                      # window mapped and composited
+            drive("move 700 400", "click 900 500")   # pointer enter + focus
+            out, _ = proc.communicate(timeout=25)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+    got = ""
+    for line in out.splitlines():
+        if line.startswith("GOT:"):
+            got = line[4:]
+    assert got == text, (
+        f"a wl_data_device client started after the copy read {got!r}, "
+        f"expected {text!r} — the selection is not being offered on interaction")
+    log(f"client started after the copy read it: {got!r}")
+
+
+@check("clipboard: a frozen selection owner cannot wedge the desktop")
+def check_clipboard_frozen_owner() -> None:
+    """Wayland clipboard is pull-based: a paste waits on the CURRENT OWNER to
+    write. This is the failure the whole design is shaped around — brokered
+    through the compositor's event loop, a stopped owner would freeze every
+    window on the desktop rather than one app.
+
+    The paste is expected to come back empty. What must not happen is a hang.
+    """
+    _need_wl_clipboard()
+    _editor_session()
+    try:
+        with wl_copy(f"{CLIP_MARK}-frozen") as owner:
+            owner.send_signal(signal.SIGSTOP)
+            try:
+                start = time.time()
+                drive("key ctrl+a", "key backspace", "key ctrl+v")
+                time.sleep(4)
+                # The shell still answers its broker, and still lays the dock
+                # out — i.e. it is dispatching, not blocked on a clipboard fd.
+                assert apps()["editor"]["window"], "shell lost the editor window"
+                assert dock(), "shell stopped reporting a dock layout"
+                elapsed = time.time() - start
+                assert elapsed < 20, f"paste path took {elapsed:.0f}s"
+                log(f"desktop still live with the owner frozen ({elapsed:.0f}s)")
+            finally:
+                owner.send_signal(signal.SIGCONT)
+        # And it recovers: a fresh copy pastes normally again.
+        with wl_copy(f"{CLIP_MARK}-after"):
+            drive("key ctrl+a", "key backspace", "key ctrl+v")
+            time.sleep(2)
+        drive("key ctrl+a", "key ctrl+c")
+        time.sleep(2)
+        assert wl_paste() == f"{CLIP_MARK}-after", "paste did not recover"
+        log("paste recovers once the owner resumes")
+    finally:
+        _close_editor()
 
 
 CHECKS = [v for v in dict(globals()).values()
