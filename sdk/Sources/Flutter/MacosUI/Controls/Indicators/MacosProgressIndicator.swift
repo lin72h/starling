@@ -110,6 +110,11 @@ public class MacosSlider: StatefulWidget {
     public let min: Double
     public let max: Double
     public let color: Color?
+    /// Number of equal steps between `min` and `max`. Nil is continuous.
+    /// AppKit spells this as tick marks with `allowsTickMarkValuesOnly`; the
+    /// value is snapped to the nearest step, so a caller that only accepts
+    /// discrete settings (display scale, say) never sees anything else.
+    public let divisions: Int?
 
     public init(
         key: (any Key)? = nil,
@@ -119,6 +124,7 @@ public class MacosSlider: StatefulWidget {
         onChangeEnd: ((Double) -> Void)? = nil,
         min: Double = 0.0,
         max: Double = 1.0,
+        divisions: Int? = nil,
         color: Color? = nil
     ) {
         self.value = value
@@ -127,6 +133,7 @@ public class MacosSlider: StatefulWidget {
         self.onChangeEnd = onChangeEnd
         self.min = min
         self.max = max
+        self.divisions = divisions
         self.color = color
         super.init(key: key)
     }
@@ -148,7 +155,10 @@ private class _MacosSliderState: State<StatefulWidget> {
 
     private func valueAt(_ x: Double) -> Double {
         let usable = Swift.max(trackW - Self.kThumbD, 1)
-        let f = Swift.min(Swift.max((x - Self.kThumbD / 2) / usable, 0), 1)
+        var f = Swift.min(Swift.max((x - Self.kThumbD / 2) / usable, 0), 1)
+        if let d = w.divisions, d > 0 {
+            f = (f * Double(d)).rounded() / Double(d)
+        }
         return w.min + f * (w.max - w.min)
     }
 

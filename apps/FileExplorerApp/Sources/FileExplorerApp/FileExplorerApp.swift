@@ -620,61 +620,61 @@ class _FileExplorerAppState: State<StatefulWidget>, @unchecked Sendable {
 
     private func _buildContextMenu(_ context: any BuildContext) -> Widget {
         let s = bloc.state
-        var items: [MenuFlyoutItemBase] = []
+        var items: [MacosMenuEntry] = []
 
         if let idx = contextMenuIndex, idx < s.entries.count {
             let entry = s.entries[idx]
             if entry.isDirectory {
-                items.append(MenuFlyoutItem(
-                    text: Text("Open"),
+                items.append(MacosMenuItem(
+                    text: "Open",
                     onPressed: { [self] in
                         setState { contextMenuPosition = nil }
                         bloc.add(.doubleClick(idx))
                     }
                 ))
-                items.append(MenuFlyoutSeparator())
+                items.append(MacosMenuSeparator())
             }
-            items.append(MenuFlyoutItem(
-                text: Text("Rename\u{2026}"),
+            items.append(MacosMenuItem(
+                text: "Rename\u{2026}",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
                     _showRenameDialog(context)
                 }
             ))
-            items.append(MenuFlyoutItem(
-                text: Text("Delete"),
+            items.append(MacosMenuItem(
+                text: "Delete",
                 onPressed: { [self] in
                     setState { contextMenuPosition = nil }
                     _showDeleteDialog(context)
                 }
             ))
-            items.append(MenuFlyoutSeparator())
+            items.append(MacosMenuSeparator())
         }
 
-        items.append(MenuFlyoutItem(
-            text: Text("New Folder\u{2026}"),
+        items.append(MacosMenuItem(
+            text: "New Folder\u{2026}",
             onPressed: { [self] in
                 setState { contextMenuPosition = nil }
                 _showNewFolderDialog(context)
             }
         ))
-        items.append(MenuFlyoutItem(
-            text: Text("Refresh"),
+        items.append(MacosMenuItem(
+            text: "Refresh",
             onPressed: { [self] in
                 setState { contextMenuPosition = nil }
                 bloc.add(.refresh)
             }
         ))
-        items.append(MenuFlyoutSeparator())
-        items.append(MenuFlyoutItem(
-            text: Text(s.showHidden ? "Hide Hidden Files" : "Show Hidden Files"),
+        items.append(MacosMenuSeparator())
+        items.append(MacosMenuItem(
+            text: s.showHidden ? "Hide Hidden Files" : "Show Hidden Files",
             onPressed: { [self] in
                 setState { contextMenuPosition = nil }
                 bloc.add(.toggleHidden)
             }
         ))
 
-        return MenuFlyout(items: items)
+        return MacosMenu(items: items)
     }
 
     // MARK: - Path Bar

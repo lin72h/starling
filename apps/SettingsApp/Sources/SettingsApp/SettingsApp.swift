@@ -571,7 +571,7 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     Text("1x", style: TextStyle(color: pal.textSecondary, fontSize: 11)),
                                     SizedBox(
                                         width: 300,
-                                        child: Slider(
+                                        child: MacosSlider(
                                             value: min(s.dpiValue, maxDpi),
                                             onChanged: { [self] (val: Double) in
                                                 bloc.add(.changeDpi(val))
@@ -954,7 +954,7 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                   color: pal.textSecondary, size: 14),
                         SizedBox(width: 10),
                         Expanded(
-                            child: Slider(
+                            child: MacosSlider(
                                 value: min(a.volume, 1.0) * 100,
                                 onChanged: { [self] (val: Double) in
                                     bloc.add(.changeVolume(val / 100))
@@ -1107,7 +1107,7 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                   color: pal.textSecondary, size: 14),
                         SizedBox(width: 10),
                         Expanded(
-                            child: Slider(
+                            child: MacosSlider(
                                 value: Double(bl.percent),
                                 onChanged: { [self] (val: Double) in
                                     bloc.add(.changeBrightness(Int(val.rounded())))
