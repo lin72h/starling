@@ -19,6 +19,17 @@ private enum TermTheme {
 
 enum TerminalFont {
     static let family = "RobotoMono"
+    /// Roboto Mono maps 878 codepoints and has none of U+2500 (box drawing),
+    /// U+2580 (blocks), U+25A0 (shapes), U+2190 (arrows) or ✓✗ — and there is
+    /// no system font fallback here, so those cells painted *nothing*: every
+    /// TUI frame (Claude Code, vim, htop, mc) was invisible while its text
+    /// rendered fine. DejaVu Sans Mono covers all four ranges completely and
+    /// its advance is 0.6021 em against Roboto Mono's 0.6001, so a run of box
+    /// characters stays on the grid to well under half a cell.
+    static let fallbackFamily = "DejaVuSansMono"
+    /// Every text style in the terminal carries this, so a glyph missing from
+    /// the primary family is looked up here instead of dropping out.
+    static let fallback = [fallbackFamily]
     private nonisolated(unsafe) static var _registered = false
 
     @discardableResult
@@ -26,7 +37,9 @@ enum TerminalFont {
         guard !_registered else { return true }
         var ok = false
         for (name, family) in [("RobotoMono-Regular", family),
-                               ("RobotoMono-Bold", family)] {
+                               ("RobotoMono-Bold", family),
+                               ("DejaVuSansMono-Regular", fallbackFamily),
+                               ("DejaVuSansMono-Bold", fallbackFamily)] {
             guard let url = Bundle.module.url(forResource: name, withExtension: "ttf"),
                   let data = try? Data(contentsOf: url) else { continue }
             let success = data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Bool in
@@ -670,7 +683,8 @@ class _TerminalAppState: State<StatefulWidget>, @unchecked Sendable {
             fontWeight: style.attrs.contains(.bold) ? .w700 : .normal,
             fontStyle: style.attrs.contains(.italic) ? .italic : .normal,
             decoration: style.attrs.contains(.underline) ? .underline : nil,
-            fontFamily: TerminalFont.family
+            fontFamily: TerminalFont.family,
+            fontFamilyFallback: TerminalFont.fallback
         )
     }
 }

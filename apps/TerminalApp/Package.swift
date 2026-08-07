@@ -58,6 +58,9 @@ var targets: [Target] = [
                 resources: [
                     .copy("Resources/RobotoMono-Regular.ttf"),
                     .copy("Resources/RobotoMono-Bold.ttf"),
+                    .copy("Resources/DejaVuSansMono-Regular.ttf"),
+                    .copy("Resources/DejaVuSansMono-Bold.ttf"),
+                    .copy("Resources/DejaVuSansMono-LICENSE.txt"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
@@ -91,6 +94,9 @@ var targets: [Target] = [
                 resources: [
                     .copy("Resources/RobotoMono-Regular.ttf"),
                     .copy("Resources/RobotoMono-Bold.ttf"),
+                    .copy("Resources/DejaVuSansMono-Regular.ttf"),
+                    .copy("Resources/DejaVuSansMono-Bold.ttf"),
+                    .copy("Resources/DejaVuSansMono-LICENSE.txt"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
@@ -111,6 +117,9 @@ var targets: [Target] = [
                 resources: [
                     .copy("Resources/RobotoMono-Regular.ttf"),
                     .copy("Resources/RobotoMono-Bold.ttf"),
+                    .copy("Resources/DejaVuSansMono-Regular.ttf"),
+                    .copy("Resources/DejaVuSansMono-Bold.ttf"),
+                    .copy("Resources/DejaVuSansMono-LICENSE.txt"),
                 ],
                 swiftSettings: [
                     .interoperabilityMode(.Cxx),
