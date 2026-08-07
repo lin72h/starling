@@ -54,6 +54,14 @@ struct SettingsState {
     // Display
     var dpiValue: Double = SystemInfo.currentDPI()
 
+    /// The connected displays, as the shell reports them. Empty on the hosts
+    /// that push no list (the windowed dev host), which is what the pane keys
+    /// off to fall back to describing the one screen it can see.
+    #if os(Linux)
+    var displays: [GpuDmaBufRenderer.DisplayInfo] =
+        GpuDmaBufRenderer.lastPushedDisplays ?? []
+    #endif
+
     // Personalization. The shell owns the desktop appearance and pushes it at
     // connect, before this bloc exists — seed from it so the Dark Mode switch
     // agrees with the theme the app is actually drawn in.
@@ -127,6 +135,13 @@ enum SettingsEvent {
 
     // Display
     case changeDpi(Double)
+    /// Make this display the primary one — where the dock lives and new
+    /// windows open. The value is the output id the shell reported.
+    case selectPrimaryDisplay(Int)
+    #if os(Linux)
+    /// Display list pushed by the shell (no echo back).
+    case displaysApplied([GpuDmaBufRenderer.DisplayInfo])
+    #endif
 
     // Personalization
     case toggleDarkMode(Bool)
@@ -202,6 +217,24 @@ final class SettingsBloc: @unchecked Sendable {
         case .changeDpi(let value):
             state.dpiValue = value
             _applyDpi(value)
+        case .selectPrimaryDisplay(let outputId):
+            // Optimistic, like the wallpaper picker: the shell echoes the new
+            // list back and `displaysApplied` is what makes it stick, so a
+            // refused pick reverts on the next push instead of lying.
+            #if os(Linux)
+            state.displays = state.displays.map {
+                GpuDmaBufRenderer.DisplayInfo(
+                    id: $0.id, name: $0.name,
+                    physicalWidth: $0.physicalWidth,
+                    physicalHeight: $0.physicalHeight,
+                    scale: $0.scale, isPrimary: $0.id == outputId)
+            }
+            #endif
+            _applyPrimaryDisplay(outputId)
+        #if os(Linux)
+        case .displaysApplied(let displays):
+            state.displays = displays
+        #endif
         case .toggleDarkMode(let value):
             state.darkMode = value
             _applyTheme(value)
@@ -392,6 +425,15 @@ final class SettingsBloc: @unchecked Sendable {
     private func _applyDpi(_ dpi: Double) {
         #if os(Linux)
         GpuDmaBufRenderer.current?.sendDpiChange(dpi)
+        #endif
+    }
+
+    /// Forward the primary-display pick to the shell, which moves the dock,
+    /// re-orders the wl_outputs, persists the choice, and pushes the new list
+    /// back to every child.
+    private func _applyPrimaryDisplay(_ outputId: Int) {
+        #if os(Linux)
+        GpuDmaBufRenderer.current?.sendPrimaryDisplayChange(outputId: outputId)
         #endif
     }
 

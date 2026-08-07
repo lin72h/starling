@@ -178,6 +178,29 @@ class LinuxProcessAppManager {
 
     private let pendingScreensaverRequests = AtomicBox<[Int]>([])
 
+    /// Fired on the platform thread when a child (SettingsApp's Displays pane)
+    /// asks to make an output the primary display.
+    var onPrimaryDisplayChangeRequested: ((Int) -> Void)?
+
+    /// The connected displays as the shell sees them, pushed to children at
+    /// connect and re-broadcast whenever the arrangement changes (hotplug, a
+    /// new primary). Kept in sync by `broadcastDisplays`.
+    nonisolated(unsafe) var currentDisplays: [ChildDisplay] = []
+
+    /// What a child is told about one display. The shell's `DisplayOutput`
+    /// minus everything a child has no business acting on (origins, which
+    /// output hosts the shell's own view).
+    struct ChildDisplay: Equatable {
+        var id: Int
+        var name: String
+        var physicalWidth: Int
+        var physicalHeight: Int
+        var scale: Double
+        var isPrimary: Bool
+    }
+
+    private let pendingPrimaryDisplayRequests = AtomicBox<[Int]>([])
+
     /// Pending caret reports from child processes (textureId, x, y, width,
     /// height in the child's logical content coords, visible).
     private let pendingCaretUpdates =
@@ -250,6 +273,7 @@ class LinuxProcessAppManager {
                 sendLayout(textureId: texId, tiling: currentLayoutIsTiling)
                 sendWallpaper(textureId: texId, preset: currentWallpaper)
                 sendScreensaver(textureId: texId, seconds: currentScreensaverIdle)
+                sendDisplays(textureId: texId)
 
                 // Import DMA-BUF as EGLImage → GL texture (zero-copy)
                 textureRegistry.importDmaBuf(
@@ -354,6 +378,13 @@ class LinuxProcessAppManager {
         if !screensaverRequests.isEmpty {
             if let lastIdle = screensaverRequests.last {
                 onScreensaverChangeRequested?(lastIdle)
+            }
+        }
+
+        let primaryDisplayRequests = pendingPrimaryDisplayRequests.take([])
+        if !primaryDisplayRequests.isEmpty {
+            if let lastOutputId = primaryDisplayRequests.last {
+                onPrimaryDisplayChangeRequested?(lastOutputId)
             }
         }
 
@@ -530,6 +561,7 @@ class LinuxProcessAppManager {
         let pendingLayoutRequests = self.pendingLayoutRequests
         let pendingWallpaperRequests = self.pendingWallpaperRequests
         let pendingScreensaverRequests = self.pendingScreensaverRequests
+        let pendingPrimaryDisplayRequests = self.pendingPrimaryDisplayRequests
         let pendingCaretUpdates = self.pendingCaretUpdates
         let pendingTerminations = self.pendingTerminations
         let capturedEngine = unsafeBitCast(engine, to: Int.self)
@@ -633,6 +665,9 @@ class LinuxProcessAppManager {
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CONTROL_SET_SCREENSAVER {
                         pendingScreensaverRequests.withLock { $0.append(Int(event.x)) }
+                        FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
+                    } else if event.type == DMABUF_CONTROL_SET_PRIMARY_DISPLAY {
+                        pendingPrimaryDisplayRequests.withLock { $0.append(Int(event.x)) }
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CARET {
                         let bits = UInt64(bitPattern: event.buttons)
@@ -760,6 +795,55 @@ class LinuxProcessAppManager {
         currentScreensaverIdle = seconds
         for texId in apps.keys {
             sendScreensaver(textureId: texId, seconds: seconds)
+        }
+    }
+
+    /// Pushes the whole display list to one child: each display's name in
+    /// 8-byte chunks, then its info record. The run is self-delimiting
+    /// (index/count in `phase`), so a child that connects mid-change still
+    /// assembles exactly one complete list.
+    func sendDisplays(textureId: Int64) {
+        guard let entry = apps[textureId], !currentDisplays.isEmpty else { return }
+        // Capped so `index << 16` cannot overflow the Int32 `phase` field —
+        // a trap, not a wrong number. DRM tops out at a couple of dozen
+        // connectors, so this only ever bites a bug.
+        let count = min(currentDisplays.count, 64)
+        for (index, display) in currentDisplays.prefix(count).enumerated() {
+            var bytes = Array(display.name.utf8)
+            // The child reads chunks until the run's info record; a name
+            // longer than the connector names DRM produces is truncated
+            // rather than spilling into the next display's.
+            if bytes.count > 32 { bytes = Array(bytes.prefix(32)) }
+            for chunk in stride(from: 0, to: max(bytes.count, 1), by: 8) {
+                var packed: UInt64 = 0
+                for i in 0..<8 where chunk + i < bytes.count {
+                    packed |= UInt64(bytes[chunk + i]) << (8 * UInt64(i))
+                }
+                var nameEvent = DmaBufInputEvent(
+                    x: Double(chunk / 8), y: 0,
+                    buttons: Int64(bitPattern: packed),
+                    type: Int32(DMABUF_DISPLAY_NAME), phase: 0)
+                entry.sock.write(&nameEvent, MemoryLayout<DmaBufInputEvent>.size)
+            }
+            var packed = UInt64(UInt16(truncatingIfNeeded: display.id))
+            if display.isPrimary { packed |= 1 << 16 }
+            packed |= UInt64(Float(display.scale).bitPattern) << 32
+            var event = DmaBufInputEvent(
+                x: Double(display.physicalWidth),
+                y: Double(display.physicalHeight),
+                buttons: Int64(bitPattern: packed),
+                type: Int32(DMABUF_DISPLAY_INFO),
+                phase: Int32(index << 16 | count))
+            entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
+        }
+    }
+
+    /// Arrangement change (hotplug, or a new primary): push to every child so
+    /// the Displays pane stays live.
+    func broadcastDisplays(_ displays: [ChildDisplay]) {
+        currentDisplays = displays
+        for texId in apps.keys {
+            sendDisplays(textureId: texId)
         }
     }
 

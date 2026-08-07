@@ -1042,6 +1042,15 @@ public class GpuDmaBufRenderer {
         _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
     }
 
+    /// Ask the shell to make `outputId` the primary display (Settings ›
+    /// Displays). The id is the one the shell reported in `DisplayInfo`.
+    public func sendPrimaryDisplayChange(outputId: Int) {
+        var event = DmaBufInputEvent(x: Double(outputId), y: 0, buttons: 0,
+                                     type: DMABUF_CONTROL_SET_PRIMARY_DISPLAY,
+                                     phase: 0)
+        _ = Glibc.write(socketFd, &event, MemoryLayout<DmaBufInputEvent>.size)
+    }
+
     /// Global reference for child apps to send control messages.
     public nonisolated(unsafe) static var current: GpuDmaBufRenderer? = nil
 
@@ -1155,6 +1164,90 @@ public class GpuDmaBufRenderer {
         }
     }
 
+    // Connected-display list push — same latch/replay contract as the theme.
+
+    /// One display as the shell sees it. `id` is what
+    /// `sendPrimaryDisplayChange` takes back.
+    public struct DisplayInfo: Sendable, Equatable {
+        public let id: Int
+        /// The DRM connector name, e.g. "eDP-1", "HDMI-A-1".
+        public let name: String
+        public let physicalWidth: Int
+        public let physicalHeight: Int
+        public let scale: Double
+        public let isPrimary: Bool
+
+        public init(id: Int, name: String, physicalWidth: Int,
+                    physicalHeight: Int, scale: Double, isPrimary: Bool) {
+            self.id = id
+            self.name = name
+            self.physicalWidth = physicalWidth
+            self.physicalHeight = physicalHeight
+            self.scale = scale
+            self.isPrimary = isPrimary
+        }
+
+        /// Logical size at this display's own scale.
+        public var logicalWidth: Int { Int((Double(physicalWidth) / scale).rounded()) }
+        public var logicalHeight: Int { Int((Double(physicalHeight) / scale).rounded()) }
+    }
+
+    public nonisolated(unsafe) static var onDisplaysChanged: (([DisplayInfo]) -> Void)? = nil {
+        didSet {
+            guard let cb = onDisplaysChanged, let list = pendingDisplays else { return }
+            pendingDisplays = nil
+            deliverDisplaysChange(cb, list)
+        }
+    }
+
+    /// The most recent display list the parent pushed, or nil if it never has
+    /// (every non-shell host: the windowed GLFW host, the macOS dev path).
+    public private(set) nonisolated(unsafe) static var lastPushedDisplays: [DisplayInfo]? = nil
+
+    private nonisolated(unsafe) static var pendingDisplays: [DisplayInfo]? = nil
+
+    /// The run being assembled: names arrive in chunks ahead of each info
+    /// record, and the list is published only once the run's last record
+    /// lands, so a reader never sees a half-built arrangement.
+    private nonisolated(unsafe) static var displayRun: [DisplayInfo] = []
+    private nonisolated(unsafe) static var displayNameBytes: [UInt8] = []
+
+    /// Eight more bytes of the next display's connector name.
+    fileprivate static func receiveDisplayNameChunk(_ chunk: Int64, index: Int) {
+        if index == 0 { displayNameBytes.removeAll(keepingCapacity: true) }
+        let bits = UInt64(bitPattern: chunk)
+        for i in 0..<8 {
+            let byte = UInt8(truncatingIfNeeded: bits >> (8 * UInt64(i)))
+            if byte == 0 { break }
+            displayNameBytes.append(byte)
+        }
+    }
+
+    fileprivate static func receiveDisplayInfo(width: Double, height: Double,
+                                               packed: Int64, phase: Int32) {
+        let index = Int(phase >> 16) & 0xFFFF
+        let count = Int(phase) & 0xFFFF
+        let bits = UInt64(bitPattern: packed)
+        let info = DisplayInfo(
+            id: Int(bits & 0xFFFF),
+            name: String(decoding: displayNameBytes, as: UTF8.self),
+            physicalWidth: Int(width), physicalHeight: Int(height),
+            scale: Double(Float(bitPattern: UInt32(truncatingIfNeeded: bits >> 32))),
+            isPrimary: (bits >> 16) & 1 == 1)
+        displayNameBytes.removeAll(keepingCapacity: true)
+        if index == 0 { displayRun.removeAll(keepingCapacity: true) }
+        displayRun.append(info)
+        guard count > 0, displayRun.count == count else { return }
+        let list = displayRun
+        displayRun.removeAll(keepingCapacity: true)
+        lastPushedDisplays = list
+        if let cb = onDisplaysChanged {
+            deliverDisplaysChange(cb, list)
+        } else {
+            pendingDisplays = list
+        }
+    }
+
     /// App UI state is main-thread only; hop before touching it.
     private static func deliverThemeChange(_ cb: @escaping (Bool) -> Void, _ dark: Bool) {
         let call: () -> Void = { cb(dark) }
@@ -1163,6 +1256,14 @@ public class GpuDmaBufRenderer {
     }
 
     private static func deliverIntChange(_ cb: @escaping (Int) -> Void, _ value: Int) {
+        let call: () -> Void = { cb(value) }
+        DispatchQueue.main.async(
+            execute: unsafeBitCast(call, to: (@Sendable () -> Void).self))
+    }
+
+    private static func deliverDisplaysChange(
+        _ cb: @escaping ([DisplayInfo]) -> Void, _ value: [DisplayInfo]
+    ) {
         let call: () -> Void = { cb(value) }
         DispatchQueue.main.async(
             execute: unsafeBitCast(call, to: (@Sendable () -> Void).self))
@@ -1586,6 +1687,19 @@ public class GpuDmaBufRenderer {
 
                     if inputEvent.type == DMABUF_CONTROL_SET_SCREENSAVER {
                         GpuDmaBufRenderer.receiveScreensaverPush(Int(inputEvent.x))
+                        continue
+                    }
+
+                    if inputEvent.type == DMABUF_DISPLAY_NAME {
+                        GpuDmaBufRenderer.receiveDisplayNameChunk(
+                            inputEvent.buttons, index: Int(inputEvent.x))
+                        continue
+                    }
+
+                    if inputEvent.type == DMABUF_DISPLAY_INFO {
+                        GpuDmaBufRenderer.receiveDisplayInfo(
+                            width: inputEvent.x, height: inputEvent.y,
+                            packed: inputEvent.buttons, phase: inputEvent.phase)
                         continue
                     }
 

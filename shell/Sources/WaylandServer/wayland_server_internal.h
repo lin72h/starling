@@ -124,6 +124,12 @@ struct WaylandSurface {
     // Outputs this mapped toplevel currently intersects (bit i = server
     // outputs[i]); wl_surface.enter/leave are sent on changes. 0 = unmapped.
     uint32_t outputs_mask;
+
+    // The single output this surface's frame callbacks pace off (a straddler
+    // intersects two panels with different refresh rates, and firing on both
+    // over-paces the client). One bit; 0 = default to the primary, which is
+    // always bit 0 (the shell advertises the primary first).
+    uint32_t pace_mask;
 };
 
 struct DmaBufBuffer {
@@ -473,10 +479,12 @@ struct WaylandSurface* wayland_server_find_surface(struct WaylandServer* server,
 void wayland_server_presentation_discard(struct WaylandServer* server,
                                          uint32_t surface_id);
 
-// Answer ALL pending wp_presentation feedbacks with a real scanout
-// timestamp + refresh period (flip-driven path). Event-loop thread only.
+// Answer pending wp_presentation feedbacks paced by the flipping output
+// (surface pace_mask; 0 = primary = bit 0) with a real scanout timestamp +
+// that output's refresh period (flip-driven path). Event-loop thread only.
 void wayland_server_presentation_present_all(struct WaylandServer* server,
                                              uint64_t flip_time_ns,
-                                             uint32_t refresh_ns);
+                                             uint32_t refresh_ns,
+                                             uint32_t flip_output_mask);
 
 #endif

@@ -205,18 +205,24 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var popups: [String: (textureId: Int, parentSurfaceId: UInt32, x: Double, y: Double, width: Double, height: Double, mapped: Bool)] = [:]
 
 
-    // Screen dimensions — the logical size of the PRIMARY output. Backed by the
-    // display layout (virtual desktop); falls back to the implicit view / DPI
-    // on the macOS/GLFW dev paths where no layout is built. At N=1 the primary
-    // output is the whole panel, so this equals the previous computation.
+    // Screen dimensions — the logical size of the HOST output, i.e. the panel
+    // this widget tree is actually rendered onto. Backed by the display layout
+    // (virtual desktop); falls back to the implicit view / DPI on the
+    // macOS/GLFW dev paths where no layout is built. At N=1 the host output is
+    // the whole panel, so this equals the previous computation.
+    //
+    // The host, deliberately, not `dl.primary`: the user can make a different
+    // monitor primary, and this tree still draws on the one the engine gave it.
+    // Reading the primary's size here would lay the whole shell out against a
+    // panel it is not on.
     // (Per-output chrome/window layout migrates individual call sites off these
-    // primary-only scalars in later slices.)
+    // host-only scalars in later slices.)
     var screenWidth: Double {
-        if let dl = displayLayout { return dl.primary.logicalWidth }
+        if let dl = displayLayout { return dl.host.logicalWidth }
         return (PlatformDispatcher.instance.implicitView?.physicalSize.width ?? 3840.0) / currentShellDpi
     }
     var screenHeight: Double {
-        if let dl = displayLayout { return dl.primary.logicalHeight }
+        if let dl = displayLayout { return dl.host.logicalHeight }
         return (PlatformDispatcher.instance.implicitView?.physicalSize.height ?? 2160.0) / currentShellDpi
     }
 
@@ -399,7 +405,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 physicalWidth: Int(screenWidth * currentShellDpi),
                 physicalHeight: Int(screenHeight * currentShellDpi),
                 scale: currentShellDpi, originX: 0, originY: 0,
-                isPrimary: true, refreshMhz: 60000)
+                isHost: true, isPrimary: true, refreshMhz: 60000)
         }
         return dl.outputs.first(where: { $0.id == _workspaceOutputId }) ?? dl.primary
     }
@@ -2226,6 +2232,63 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         setState { _topBarRevealed = on }
     }
 
+    /// Same shape for the dock's own auto-hide sensor, so a secondary output
+    /// hosting the dock can reveal it under a fullscreen window.
+    var dockRevealed: Bool { _dockRevealed }
+
+    func setDockRevealed(_ on: Bool) {
+        guard _dockRevealed != on else { return }
+        setState { _dockRevealed = on }
+    }
+
+    /// Close the dock icon's context menu — the barrier a secondary output
+    /// puts under it when the dock is there.
+    func dismissDockIconMenu() {
+        guard _dockMenuAppId != nil else { return }
+        setState { _dockMenuAppId = nil }
+    }
+
+    /// The open dock-icon context menu, laid out in `output`'s coordinates, or
+    /// nil when nothing is open or the dock is elsewhere. Anchored above its
+    /// icon and clamped to the output it is on — not to `screenWidth`, which is
+    /// a different monitor's width once the primary moves.
+    func dockIconMenuWidget(forOutput output: DisplayOutput) -> Widget? {
+        guard output.isPrimary, let menuAppId = _dockMenuAppId else { return nil }
+        let menuWidth = 200.0
+        let menuLeft = max(8, min(_dockMenuAnchorX - menuWidth / 2,
+                                  output.logicalWidth - menuWidth - 8))
+        return Positioned(
+            left: menuLeft,
+            bottom: DesktopTheme.kDockBottomMargin
+                + DesktopTheme.kDockHeight + 10,
+            child: SizedBox(
+                width: menuWidth,
+                child: _buildDockIconMenu(for: menuAppId)))
+    }
+
+    /// The dock laid out for `output`, or nil when that output should not draw
+    /// it. There is exactly one dock and it belongs to the primary display, so
+    /// this answers nil everywhere else — including in the shell's own tree
+    /// once the user has made another monitor primary.
+    ///
+    /// The hide rules match the primary tree's: no dock in a workspace space
+    /// (every window there belongs to an agent), and none under a fullscreen
+    /// window until the bottom sensor reveals it.
+    func dockWidget(forOutput output: DisplayOutput) -> Widget? {
+        guard output.isPrimary, !windowManager.activeSpace.isSpecial else { return nil }
+        if fullscreenWindow(onOutput: output) != nil && !_dockRevealed { return nil }
+        let metrics = _dockMetrics(outputWidth: output.logicalWidth)
+        let dockTop = output.logicalHeight - DesktopTheme.kDockBottomMargin
+            - DesktopTheme.kDockHeight
+        return Positioned(
+            left: metrics.left,
+            top: output.logicalHeight - DesktopTheme.kDockBottomMargin
+                - DesktopTheme.kDockContainerHeight,
+            width: metrics.width, height: DesktopTheme.kDockContainerHeight,
+            child: _buildDock(appIds: _dockDisplayApps, metrics: metrics,
+                              dockTop: dockTop))
+    }
+
     /// Yellow. Deferred: the scale-effect zoom into the dock plays first;
     /// `_finalizeWindowMinimize` hides the window.
     func requestWindowMinimize(_ winId: String) {
@@ -2775,9 +2838,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // element (and its terminal focus state) alive across slide/steady
         // transitions.
         // Only when this output owns it: a workspace toggled on from a second
-        // monitor draws there instead, and the primary keeps its desktop.
-        let primaryOutput = displayLayout?.primary
-        let workspaceIsHere = _workspaceOutputId == (primaryOutput?.id ?? 0)
+        // monitor draws there instead, and this one keeps its desktop. "This
+        // output" is the host — the panel this tree renders on.
+        let hostOutput = displayLayout?.host
+        let workspaceIsHere = _workspaceOutputId == (hostOutput?.id ?? 0)
         if !_missionControlOpen && workspaceIsHere {
             for layer in slideLayers {
                 guard let space = windowManager.spaces.first(where: { $0.id == layer.spaceId }),
@@ -2824,16 +2888,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // Dock geometry under the current hover magnification. The container
         // is taller than the pill: magnified icons and the app-name label
         // grow upward out of it, macOS style.
-        let dockMetrics = _dockMetrics()
-        let dockWidget: Widget = Positioned(
-            left: dockMetrics.left,
-            bottom: DesktopTheme.kDockBottomMargin,
-            width: dockMetrics.width, height: DesktopTheme.kDockContainerHeight,
-            child: _buildDock(
-                appIds: _dockDisplayApps, metrics: dockMetrics,
-                dockTop: screenHeight - DesktopTheme.kDockBottomMargin
-                    - DesktopTheme.kDockHeight)
-        )
+        //
+        // Only when this tree owns the dock. The user can make another monitor
+        // primary, and then the dock is drawn by that output's
+        // SecondaryOutputScreen instead — there is one dock, and it is on the
+        // primary display (macOS).
+        let dockMetrics = _dockMetrics(outputWidth: screenWidth)
+        func makeDockWidget() -> Widget {
+            Positioned(
+                left: dockMetrics.left,
+                bottom: DesktopTheme.kDockBottomMargin,
+                width: dockMetrics.width, height: DesktopTheme.kDockContainerHeight,
+                child: _buildDock(
+                    appIds: _dockDisplayApps, metrics: dockMetrics,
+                    dockTop: screenHeight - DesktopTheme.kDockBottomMargin
+                        - DesktopTheme.kDockHeight)
+            )
+        }
 
         // Whether the topmost visible window is fullscreen — gates the
         // macOS-style auto-hide of the desktop status bar.
@@ -3154,7 +3225,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if isFullscreenMode && !_dockRevealed {
             dockOpacity = 0
         }
-        if dockOpacity > 0.01 {
+        if dockOpacity > 0.01 && dockIsOnHost {
             children.append(dockOpacity < 0.99
                 ? Positioned(
                     left: dockMetrics.left,
@@ -3167,7 +3238,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             appIds: _dockDisplayApps, metrics: dockMetrics,
                             dockTop: screenHeight - DesktopTheme.kDockBottomMargin
                                 - DesktopTheme.kDockHeight))))
-                : dockWidget)
+                : makeDockWidget())
         }
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
@@ -3259,25 +3330,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         }
 
         // Dock icon context menu (right-click on a dock icon), anchored
-        // above the icon's slot, macOS style.
-        if let menuAppId = _dockMenuAppId {
+        // above the icon's slot, macOS style. It goes wherever the dock is —
+        // on the host only while the host is the primary display.
+        if dockIsOnHost, _dockMenuAppId != nil {
             _appendDismissBarrier(&children) { [self] in
                 self._dockMenuAppId = nil
             }
-            let menuWidth = 200.0
-            let menuLeft = max(8, min(_dockMenuAnchorX - menuWidth / 2,
-                                      screenWidth - menuWidth - 8))
-            children.append(
-                Positioned(
-                    left: menuLeft,
-                    bottom: DesktopTheme.kDockBottomMargin
-                        + DesktopTheme.kDockHeight + 10,
-                    child: SizedBox(
-                        width: menuWidth,
-                        child: _buildDockIconMenu(for: menuAppId)
-                    )
-                )
-            )
+            if let menu = dockIconMenuWidget(forOutput: dockOutput) {
+                children.append(menu)
+            }
         }
 
         // IME panel: preedit + candidates while composing (shell-drawn).
@@ -3353,7 +3414,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // Full-screen app launcher (Launchpad), opened from the dock grid icon.
         // Above windows + dock; tap an app to launch it, tap empty space to
         // dismiss.
-        if _launcherOpen && _launcherOutputId == (primaryOutput?.id ?? 0) {
+        if _launcherOpen && _launcherOutputId == (hostOutput?.id ?? 0) {
             children.append(
                 Positioned(
                     fill: (),
@@ -3483,7 +3544,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         _noteUserActivity()
                     },
                     onPointerHover: { [self] event in
-                        _updateDockHover(x: event.position.dx, y: event.position.dy)
+                        _updateDockHover(x: event.position.dx, y: event.position.dy,
+                                         outputId: displayLayout?.host.id ?? 0)
                         _noteUserActivity()
                     },
                     onPointerSignal: { [self] _ in _noteUserActivity() },
@@ -3505,8 +3567,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // observation only; `.translucent` keeps it out of the way of the
         // wallpaper's own right-click handling.
         return Listener(
-            onPointerDown: { [self] _ in notePointerOutput(displayLayout?.primary.id ?? 0) },
-            onPointerHover: { [self] _ in notePointerOutput(displayLayout?.primary.id ?? 0) },
+            onPointerDown: { [self] _ in notePointerOutput(displayLayout?.host.id ?? 0) },
+            onPointerHover: { [self] _ in notePointerOutput(displayLayout?.host.id ?? 0) },
             behavior: .translucent,
             child: Stack(
                 key: ValueKey("shell-\(shellTheme.name)"),
@@ -3560,7 +3622,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         // Dock on the primary output (macOS: single dock, homes on primary).
         let p = dl.primary
-        let dockMetrics = _dockMetrics()   // centered on screenWidth == primary logical width
+        let dockMetrics = _dockMetrics(outputWidth: p.logicalWidth)
         layers.append(Positioned(
             left: (p.logicalLeft - ox) + dockMetrics.left,
             top: (p.logicalBottom - oy) - DesktopTheme.kDockBottomMargin - DesktopTheme.kDockContainerHeight,
@@ -5273,7 +5335,28 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         return i == 0 ? DesktopTheme.kDockIconPadding * 2 : DesktopTheme.kDockIconPadding
     }
 
-    private func _dockMetrics() -> DockMetrics {
+    /// The output the dock is drawn on: the user's primary display. Falls back
+    /// to a host-shaped stand-in on the dev paths that build no layout.
+    var dockOutput: DisplayOutput {
+        if let dl = displayLayout { return dl.primary }
+        return DisplayOutput(
+            id: 0, name: "primary",
+            physicalWidth: Int(screenWidth * currentShellDpi),
+            physicalHeight: Int(screenHeight * currentShellDpi),
+            scale: currentShellDpi, originX: 0, originY: 0,
+            isHost: true, isPrimary: true, refreshMhz: 60000)
+    }
+
+    /// Whether the shell's own tree is the one that draws the dock. False once
+    /// the user makes another monitor primary — then it belongs to that
+    /// output's `SecondaryOutputScreen`.
+    var dockIsOnHost: Bool { displayLayout.map { $0.primaryIsHost } ?? true }
+
+    /// Dock geometry centred on `outputWidth` — the logical width of the
+    /// output the dock is drawn on, which is not `screenWidth` once the
+    /// primary is a different monitor from the host.
+    private func _dockMetrics(outputWidth: Double? = nil) -> DockMetrics {
+        let outW = outputWidth ?? dockOutput.logicalWidth
         let hPad = DesktopTheme.kDockHorizontalPadding
         // The launcher (slot 0) is a full tile like the app icons, so it uses
         // the same base slot size and magnifies identically.
@@ -5288,7 +5371,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             xOff += s + _dockGapAfter(i, slotCount: n)
         }
         let baseWidth = xOff + hPad
-        let baseLeft = (screenWidth - baseWidth) / 2
+        let baseLeft = (outW - baseWidth) / 2
 
         // macOS-style cosine falloff around the cursor. Suspended while a
         // drag reorder is in progress so the drag math stays in base units.
@@ -5309,14 +5392,33 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         for i in 0..<n { width += _dockGapAfter(i, slotCount: n) }
         return DockMetrics(
             scales: scales, slotWidths: slotWidths,
-            width: width, left: (screenWidth - width) / 2,
+            width: width, left: (outW - width) / 2,
             baseWidth: baseWidth, baseLeft: baseLeft,
             baseCenters: baseCenters)
     }
 
-    /// Global center of the dock icon that owns a window (direct appId match,
-    /// or Chrome/VS Code by window title) — the origin of the open zoom.
+    /// Center of the dock icon that owns a window (direct appId match, or
+    /// Chrome/VS Code by window title), in THIS tree's coordinates — the origin
+    /// of the open zoom and the target of the minimize zoom.
+    ///
+    /// nil when the dock is on another monitor: the animation runs in the host
+    /// tree, so there is no point on this panel to fly to. Callers already treat
+    /// nil as "no zoom", which degrades to a plain open/minimize.
+    /// The x of a dock icon's centre in the DOCK'S OWN output coordinates,
+    /// which is what anchors the icon's context menu. Unlike `_dockIconCenter`
+    /// this is not about the shell tree's panel, so it stays right when the
+    /// dock is on another monitor.
+    private func _dockIconAnchorX(appId: String) -> Double {
+        let output = dockOutput
+        let m = _dockMetrics(outputWidth: output.logicalWidth)
+        guard let idx = _dockDisplayApps.firstIndex(of: appId) else {
+            return output.logicalWidth / 2
+        }
+        return m.baseLeft + m.baseCenters[idx + 1]  // slot 0 is the launcher
+    }
+
     private func _dockIconCenter(appId: String, title: String) -> Offset? {
+        guard dockIsOnHost else { return nil }
         let owner = title.isEmpty ? nil : AppRegistry.shared.app(forTitle: title)?.id
         let idx = _dockDisplayApps.firstIndex { id in
             id == appId || id == owner
@@ -5342,14 +5444,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     ///
     /// Unmagnified geometry (`baseCenters`), which is what a caller needs: the
     /// pointer is not over the dock yet when it asks where to move.
+    /// Reported in VIRTUAL-desktop coordinates — the dock lives on whichever
+    /// output is primary, and a caller that clicks these has to aim at the
+    /// right monitor. At N=1, and whenever the primary is the host, that
+    /// output is at the origin and this is unchanged.
     func dockSlots() -> [(app: String, x: Double, y: Double, size: Double)] {
-        let metrics = _dockMetrics()
+        let output = dockOutput
+        let metrics = _dockMetrics(outputWidth: output.logicalWidth)
         let ids = ["launcher"] + _dockDisplayApps
-        let y = screenHeight - DesktopTheme.kDockBottomMargin
+        let y = output.logicalTop + output.logicalHeight
+            - DesktopTheme.kDockBottomMargin
             - DesktopTheme.kDockIconBottomInset - DesktopTheme.kDockIconSize / 2
         return ids.enumerated().prefix(metrics.baseCenters.count).map { i, id in
             (app: id,
-             x: metrics.baseLeft + metrics.baseCenters[i],
+             x: output.logicalLeft + metrics.baseLeft + metrics.baseCenters[i],
              y: y,
              size: DesktopTheme.kDockIconSize)
         }
@@ -5359,10 +5467,21 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// over the dock strip and relaxes it once the cursor leaves. Horizontal
     /// slack is generous — at the far edges the falloff has already returned
     /// every icon to ~1x, so over-inclusion is invisible.
-    private func _updateDockHover(x: Double, y: Double) {
-        let pillTop = screenHeight - DesktopTheme.kDockBottomMargin
+    ///
+    /// `x`/`y` are local to the output the pointer is on, and `outputId` says
+    /// which — the dock may be drawn by a `SecondaryOutputScreen`, whose
+    /// pointer events never reach the host tree. Motion on an output that is
+    /// not the dock's relaxes the magnification rather than being ignored:
+    /// leaving the dock by walking onto the next monitor is a leave.
+    func _updateDockHover(x: Double, y: Double, outputId: Int) {
+        let output = dockOutput
+        guard outputId == output.id else {
+            if _dockHoverX != nil { setState { _dockHoverX = nil } }
+            return
+        }
+        let pillTop = output.logicalHeight - DesktopTheme.kDockBottomMargin
             - DesktopTheme.kDockHeight
-        let m = _dockMetrics()
+        let m = _dockMetrics(outputWidth: output.logicalWidth)
         let inside = y >= pillTop - 28
             && x >= m.baseLeft - 40 && x <= m.baseLeft + m.baseWidth + 40
         let newValue: Double? = inside ? x : nil
@@ -6033,8 +6152,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         contextMenuPosition = nil
                         activeStatusBarPopup = nil
                         _dockMenuAppId = appId
-                        _dockMenuAnchorX = _dockIconCenter(appId: appId, title: "")?.dx
-                            ?? event.position.dx
+                        _dockMenuAnchorX = _dockIconAnchorX(appId: appId)
                     }
                     return
                 }
@@ -6599,6 +6717,50 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         try? String(raw).write(toFile: path, atomically: true, encoding: .utf8)
     }
 
+    /// Make an output the primary display (Settings › Displays): the dock
+    /// moves there, new windows open there, and Wayland clients are offered it
+    /// first. Persisted by connector name, so it survives a relogin and finds
+    /// the same monitor after a hotplug.
+    ///
+    /// The shell's own widget tree does not move — the engine binds its
+    /// implicit view to the output it picked, and that binding is hardware.
+    /// So the dock changes trees: the host draws it only while it is also the
+    /// primary, and the `SecondaryOutputScreen` of whichever output is primary
+    /// draws it otherwise. `_dockHoverX` is cleared because it is a coordinate
+    /// on the output the dock just left.
+    func _setPrimaryDisplay(outputId: Int) {
+        guard let dl = displayLayout else { return }
+        let changed = dl.primary.id != outputId && dl.setPrimary(outputId: outputId)
+        if changed {
+            setState { _dockHoverX = nil }
+            invalidateSecondaryScreens()
+        }
+        #if os(Linux)
+        // Real multi-output: the primary is where the shell itself should
+        // live — rebind the implicit view (engine) so the whole desktop
+        // moves, not just the dock. The condition is host-vs-primary
+        // disagreement, not `changed`: it also fires when the primary is
+        // already right but the host isn't, which is the retry path after
+        // an engine refusal (a recording was active).
+        if dl.outputs.count > 1, !secondaryViewOutputs.isEmpty,
+           let target = dl.outputs.first(where: { $0.id == outputId }),
+           target.isPrimary, !target.isHost {
+            requestHostOutputSwitch(to: outputId)
+        }
+        // Clients are told the primary first (WaylandIntegration.setOutputs
+        // orders on it), but only where the wl_outputs are real — sim outputs
+        // all live on the one panel and are not advertised.
+        if changed, dl.outputs.count > 1, !secondaryViewOutputs.isEmpty {
+            waylandIntegration?.setOutputs(dl.outputs)
+        }
+        // Published even when nothing changed. The pane moves its checkmark
+        // optimistically and treats the echo as the truth, so a pick this
+        // refused — a stale id for a monitor just unplugged — has to be
+        // answered, or the pane sits there claiming a display that is gone.
+        publishDisplaysToChildren()
+        #endif
+    }
+
     /// Restore the persisted appearance before the first build.
     static func loadPersistedAppearance() {
         if let s = try? String(contentsOfFile: _appearanceFile, encoding: .utf8) {
@@ -6880,8 +7042,17 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let rec = _record(appId)
             let execName = rec?.exec ?? "FlutterDemoApp"
             let winTitle = rec?.name ?? "Flutter App"
+            // A record's `Window=` geometry is relative to the display the app
+            // opens on, not to the virtual desktop — so it lands on the primary
+            // like every other new window. Without the origin the catalog's
+            // x/y are virtual-desktop coordinates, which is the host, and
+            // first-party apps opened on the wrong monitor while the dock sat
+            // on the right one.
+            let winOrigin = displayLayout?.primary
             let winRect = rec?.windowRect.map {
-                Rect.fromLTWH($0.x, $0.y, $0.width, $0.height)
+                Rect.fromLTWH($0.x + (winOrigin?.originX ?? 0),
+                              $0.y + (winOrigin?.originY ?? 0),
+                              $0.width, $0.height)
             }
             let contentW = Int(winRect?.width ?? DesktopTheme.kDefaultWindowWidth)
             let contentH = Int((winRect?.height ?? DesktopTheme.kDefaultWindowHeight) - DesktopTheme.kTitleBarHeight)

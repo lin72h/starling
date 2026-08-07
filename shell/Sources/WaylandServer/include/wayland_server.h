@@ -61,9 +61,15 @@ void wayland_server_set_outputs(WaylandServer* server,
 
 /* Set the outputs a mapped toplevel currently intersects (bit i = output i
  * of the set_outputs array). The server diffs against the previous mask and
- * sends wl_surface.enter/leave. Freshly mapped surfaces default to bit 0. */
+ * sends wl_surface.enter/leave. Freshly mapped surfaces default to bit 0.
+ * `pace_mask` is the ONE output whose flips drive this surface's frame
+ * callbacks and presentation feedback — the output it mostly sits on. A
+ * straddler intersects two panels with different refresh rates; firing its
+ * callbacks on both would over-pace the client. 0 = pace off the primary
+ * (bit 0 — the shell advertises the primary first). */
 void wayland_server_surface_set_outputs(WaylandServer* server,
-                                        uint32_t surface_id, uint32_t mask);
+                                        uint32_t surface_id, uint32_t mask,
+                                        uint32_t pace_mask);
 
 /* Agent seat (Murmuration): broker-injected input delivered on a second
  * wl_seat with its own focus stream — never disturbs the human seat. */
@@ -249,10 +255,14 @@ void wayland_server_presentation_feedback(WaylandServer* server,
  * Fires every pending wl_surface.frame callback and answers all pending
  * wp_presentation feedback with the real timing, then flushes clients.
  * While flips arrive, the per-surface frame-done timer only acts as a
- * stall fallback. Event-loop thread only. */
+ * stall fallback. Event-loop thread only.
+ * `flip_output_mask` is the bit of the output whose flip this is (same bit
+ * numbering as surface_set_outputs); only surfaces paced by that output
+ * fire. Pass 1 (bit 0 = primary) on a single-output desktop. */
 void wayland_server_on_present(WaylandServer* server,
                                uint64_t flip_time_ns,
-                               uint32_t refresh_ns);
+                               uint32_t refresh_ns,
+                               uint32_t flip_output_mask);
 
 /* --------------------------------------------------------------------------
  * Input — Pointer

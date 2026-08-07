@@ -83,7 +83,7 @@ private enum WaylandCommand: @unchecked Sendable {
     case flushClients
     case updateScale(scale: Int32, fractional120: UInt32)
     case setOutputs(outputs: [WaylandOutputDesc])
-    case setSurfaceOutputs(surfaceId: UInt32, mask: UInt32)
+    case setSurfaceOutputs(surfaceId: UInt32, mask: UInt32, paceMask: UInt32)
     case setSurfaceThrottle(surfaceId: UInt32, intervalMs: UInt32)
     case textInputCommit(text: String)
     case textInputPreedit(text: String, cursor: Int32)
@@ -417,13 +417,15 @@ class WaylandIntegration {
         }
     }
 
-    /// Called from the DRM present callback (platform thread — the same
-    /// thread that dispatches the Wayland event loop) when a page flip
-    /// lands. Drives client frame callbacks + presentation feedback off
-    /// real vsync with kernel scanout timestamps.
-    func handlePresent(flipTimeNs: UInt64, refreshNs: UInt32) {
+    /// Called from the DRM per-output present callback (platform thread —
+    /// the same thread that dispatches the Wayland event loop) when a page
+    /// flip lands on `outputId`. Drives the frame callbacks + presentation
+    /// feedback of the clients ON that output off its real vsync — a client
+    /// on the 30Hz panel is paced at 30, one on the 90Hz panel at 90.
+    func handlePresent(flipTimeNs: UInt64, refreshNs: UInt32, outputId: Int) {
         guard let server = server else { return }
-        wayland_server_on_present(server, flipTimeNs, refreshNs)
+        wayland_server_on_present(server, flipTimeNs, refreshNs,
+                                  1 << outputBit(forId: outputId))
     }
 
     /// Called from DRM epoll when the wakeup pipe is readable.
@@ -455,8 +457,9 @@ class WaylandIntegration {
             case .setOutputs(var outputs):
                 wayland_server_set_outputs(server, &outputs,
                                            Int32(outputs.count))
-            case .setSurfaceOutputs(let surfaceId, let mask):
-                wayland_server_surface_set_outputs(server, surfaceId, mask)
+            case .setSurfaceOutputs(let surfaceId, let mask, let paceMask):
+                wayland_server_surface_set_outputs(server, surfaceId, mask,
+                                                   paceMask)
             case .setSurfaceThrottle(let surfaceId, let intervalMs):
                 wayland_server_set_surface_throttle(server, surfaceId, intervalMs)
             case .textInputCommit(let text):
@@ -1007,16 +1010,26 @@ class WaylandIntegration {
 
     /// Output-array bit index per DisplayOutput.id (primary is always bit 0,
     /// matching the server's fresh-map default).
+    /// Output id → wl_output bit. Written on the main thread (setOutputs),
+    /// read on the PLATFORM thread (handlePresent maps the flipping engine
+    /// output to its bit) — hence the lock; a torn Dictionary read is a
+    /// crash, not just a stale answer.
     private var outputBitForId: [Int: Int] = [:]
-    private var surfaceOutputsMaskCache: [UInt32: UInt32] = [:]
+    private let outputBitLock = NSLock()
+    /// mask in the low 32 bits, pace mask in the high — one cache entry
+    /// covers both, so a pace change with an unchanged intersection (a
+    /// window sliding along the seam) still gets sent.
+    private var surfaceOutputsMaskCache: [UInt32: UInt64] = [:]
 
     /// Advertise the virtual-desktop arrangement: one wl_output global per
     /// display, geometry in global logical coordinates.
     func setOutputs(_ outputs: [DisplayOutput]) {
         let ordered = outputs.filter { $0.isPrimary } +
                       outputs.filter { !$0.isPrimary }
+        outputBitLock.lock()
         outputBitForId = Dictionary(
             uniqueKeysWithValues: ordered.enumerated().map { ($1.id, $0) })
+        outputBitLock.unlock()
         let descs = ordered.map { o -> WaylandOutputDesc in
             var desc = WaylandOutputDesc()
             desc.logical_x = Int32(o.originX.rounded())
@@ -1036,21 +1049,42 @@ class WaylandIntegration {
     }
 
     /// Update which outputs a window's surface intersects; the server diffs
-    /// and sends wl_surface.enter/leave. No-op for non-Wayland windows.
-    func updateSurfaceOutputs(windowId: String, intersectingIds: [Int]) {
-        guard !outputBitForId.isEmpty,
+    /// and sends wl_surface.enter/leave. `paceOutputId` is the output the
+    /// window mostly sits on — the one whose flips drive the client's frame
+    /// callbacks. No-op for non-Wayland windows.
+    func updateSurfaceOutputs(windowId: String, intersectingIds: [Int],
+                              paceOutputId: Int? = nil) {
+        outputBitLock.lock()
+        let bits = outputBitForId
+        outputBitLock.unlock()
+        guard !bits.isEmpty,
               let surfaceId = surfaceWindows.first(
                   where: { $0.value == windowId })?.key
         else { return }
         var mask: UInt32 = 0
         for id in intersectingIds {
-            if let bit = outputBitForId[id] {
+            if let bit = bits[id] {
                 mask |= 1 << UInt32(bit)
             }
         }
-        if surfaceOutputsMaskCache[surfaceId] == mask { return }
-        surfaceOutputsMaskCache[surfaceId] = mask
-        enqueueCommand(.setSurfaceOutputs(surfaceId: surfaceId, mask: mask))
+        var paceMask: UInt32 = 0
+        if let paceId = paceOutputId, let bit = bits[paceId] {
+            paceMask = 1 << UInt32(bit)
+        }
+        let combined = UInt64(mask) | (UInt64(paceMask) << 32)
+        if surfaceOutputsMaskCache[surfaceId] == combined { return }
+        surfaceOutputsMaskCache[surfaceId] = combined
+        enqueueCommand(.setSurfaceOutputs(surfaceId: surfaceId, mask: mask,
+                                          paceMask: paceMask))
+    }
+
+    /// The wl_output bit for an engine output id, or bit 0 (the primary)
+    /// when the id is unknown — single-output desktops never call
+    /// setOutputs, and their one panel IS the primary. Platform-thread safe.
+    func outputBit(forId id: Int) -> UInt32 {
+        outputBitLock.lock()
+        defer { outputBitLock.unlock() }
+        return UInt32(outputBitForId[id] ?? 0)
     }
 
     private func enqueueCommand(_ cmd: WaylandCommand) {

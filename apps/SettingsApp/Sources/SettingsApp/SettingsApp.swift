@@ -554,49 +554,145 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
         let s = bloc.state
         let maxDpi = SystemInfo.maxDPI()
         let divisions = Int((maxDpi - 1.0) * 4)  // 0.25 steps
+        var children: [Widget] = []
+        #if os(Linux)
+        // Only worth a section with something to choose between. On one
+        // screen there is no arrangement and no pick to make, and macOS
+        // hides the Arrangement tab for exactly that reason.
+        if s.displays.count > 1 {
+            children.append(_sectionHeader("Arrangement"))
+            children.append(SizedBox(height: 12))
+            children.append(_displayArrangement(s.displays))
+            children.append(SizedBox(height: 12))
+            var rows: [Widget] = []
+            for (i, display) in s.displays.enumerated() {
+                if i > 0 { rows.append(_divider()) }
+                let id = display.id
+                rows.append(GestureDetector(
+                    onTap: { [self] in bloc.add(.selectPrimaryDisplay(id)) },
+                    child: _settingsRowWithTrailingIcon(
+                        CupertinoIcons.desktopcomputer,
+                        display.name,
+                        "\(display.physicalWidth)×\(display.physicalHeight)"
+                            + "  ·  \(String(format: "%.2g", display.scale))× scale"
+                            + (display.isPrimary
+                                ? "  ·  primary" : ""),
+                        display.isPrimary
+                            ? MacosIcon(icon: CupertinoIcons.checkmark_circle_fill,
+                                        color: Color(0xFF4880C8), size: 16)
+                            : SizedBox(width: 16, height: 16)
+                    )
+                ))
+            }
+            children.append(_macosGroupBox(rows))
+            children.append(SizedBox(height: 8))
+            children.append(Text(
+                "The primary display carries the dock, and new windows open "
+                + "there. The menu bar stays on every screen.",
+                style: TextStyle(color: pal.textTertiary, fontSize: 11)
+            ))
+            children.append(SizedBox(height: 20))
+        }
+        #endif
+        children.append(contentsOf: [
+            _sectionHeader("Resolution & Scaling"),
+            SizedBox(height: 12),
+            _macosGroupBox([
+                _settingsRow("Scale (DPI)", "\(String(format: "%.2f", s.dpiValue))x"),
+                SizedBox(height: 8),
+                Padding(
+                    padding: EdgeInsets(horizontal: 16),
+                    child: Row(children: [
+                        Text("1x", style: TextStyle(color: pal.textSecondary, fontSize: 11)),
+                        SizedBox(
+                            width: 300,
+                            child: MacosSlider(
+                                value: min(s.dpiValue, maxDpi),
+                                onChanged: { [self] (val: Double) in
+                                    bloc.add(.changeDpi(val))
+                                },
+                                min: 1.0, max: maxDpi,
+                                divisions: max(divisions, 1)
+                            )
+                        ),
+                        Text("\(String(format: "%.0f", maxDpi))x", style: TextStyle(color: pal.textSecondary, fontSize: 11)),
+                    ])
+                ),
+                SizedBox(height: 4),
+                Padding(
+                    padding: EdgeInsets(horizontal: 16, vertical: 4),
+                    child: Text(
+                        _dpiDescription(s.dpiValue),
+                        style: TextStyle(color: pal.textTertiary, fontSize: 11)
+                    )
+                ),
+            ]),
+        ])
         return Padding(
             padding: EdgeInsets(all: 24),
             child: SingleChildScrollView(
-                child: Column(
-                    crossAxisAlignment: .start,
-                    children: [
-                        _sectionHeader("Resolution & Scaling"),
-                        SizedBox(height: 12),
-                        _macosGroupBox([
-                            _settingsRow("Scale (DPI)", "\(String(format: "%.2f", s.dpiValue))x"),
-                            SizedBox(height: 8),
-                            Padding(
-                                padding: EdgeInsets(horizontal: 16),
-                                child: Row(children: [
-                                    Text("1x", style: TextStyle(color: pal.textSecondary, fontSize: 11)),
-                                    SizedBox(
-                                        width: 300,
-                                        child: MacosSlider(
-                                            value: min(s.dpiValue, maxDpi),
-                                            onChanged: { [self] (val: Double) in
-                                                bloc.add(.changeDpi(val))
-                                            },
-                                            min: 1.0, max: maxDpi,
-                                            divisions: max(divisions, 1)
-                                        )
-                                    ),
-                                    Text("\(String(format: "%.0f", maxDpi))x", style: TextStyle(color: pal.textSecondary, fontSize: 11)),
-                                ])
-                            ),
-                            SizedBox(height: 4),
-                            Padding(
-                                padding: EdgeInsets(horizontal: 16, vertical: 4),
-                                child: Text(
-                                    _dpiDescription(s.dpiValue),
-                                    style: TextStyle(color: pal.textTertiary, fontSize: 11)
-                                )
-                            ),
-                        ]),
-                    ]
-                )
+                child: Column(crossAxisAlignment: .start, children: children)
             )
         )
     }
+
+    #if os(Linux)
+    /// The screens drawn to scale beside each other, macOS Arrangement style:
+    /// the primary wears the menu-bar stripe, and tapping a screen makes it the
+    /// primary. The shell lays real outputs out left to right in enumeration
+    /// order, so this row matches what is on the desk.
+    private func _displayArrangement(
+        _ displays: [GpuDmaBufRenderer.DisplayInfo]
+    ) -> Widget {
+        // Scale the whole row to fit the pane, keeping the screens' relative
+        // sizes — the point of the picture is that the big one looks big.
+        let totalLogical = displays.reduce(0.0) { $0 + Double($1.logicalWidth) }
+        let tallest = displays.reduce(1.0) { max($0, Double($1.logicalHeight)) }
+        let scale = min(340.0 / max(totalLogical, 1), 96.0 / tallest)
+        var tiles: [Widget] = []
+        for display in displays {
+            let id = display.id
+            let w = max(Double(display.logicalWidth) * scale, 40)
+            let h = max(Double(display.logicalHeight) * scale, 28)
+            tiles.append(GestureDetector(
+                onTap: { [self] in bloc.add(.selectPrimaryDisplay(id)) },
+                child: Padding(
+                    padding: EdgeInsets(right: 10),
+                    child: Column(crossAxisAlignment: .center, children: [
+                        SizedBox(
+                            width: w, height: h,
+                            child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                    color: Color(rgbo: 255, 255, 255, 0.06),
+                                    border: Border.all(
+                                        color: display.isPrimary
+                                            ? Color(0xFF4880C8)
+                                            : Color(rgbo: 255, 255, 255, 0.22),
+                                        width: display.isPrimary ? 2 : 1),
+                                    borderRadius: BorderRadius.all(Radius(circular: 4))),
+                                // The menu-bar stripe is macOS's cue for which
+                                // screen is primary, and the thing you drag
+                                // there. Ours is a badge, not a handle — every
+                                // screen really does have a menu bar.
+                                child: Column(children: [
+                                    SizedBox(
+                                        height: 5,
+                                        child: DecoratedBox(
+                                            decoration: BoxDecoration(
+                                                color: display.isPrimary
+                                                    ? Color(0xFF4880C8)
+                                                    : Color(rgbo: 255, 255, 255, 0.12)))),
+                                    Expanded(child: SizedBox(shrink: ())),
+                                ]))),
+                        SizedBox(height: 6),
+                        Text(display.name, style: TextStyle(
+                            color: display.isPrimary ? pal.textPrimary : pal.textSecondary,
+                            fontSize: 11)),
+                    ]))))
+        }
+        return Row(crossAxisAlignment: .end, children: tiles)
+    }
+    #endif
 
     private func _dpiDescription(_ dpi: Double) -> String {
         let screenW = Int(Double(ProcessInfo.processInfo.environment["FLUTTER_SCREEN_WIDTH"] ?? "") ?? 3840)

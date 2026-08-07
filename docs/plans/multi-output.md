@@ -34,6 +34,8 @@ now compares the two trees so this cannot drift again.
 
 **Deliberately primary-only.** The dock. macOS has one dock and so do we; this
 is not a gap. (The menu bar is per-display in macOS, and ours already is.)
+**Which** display is primary is now the user's, in Settings › Displays, and the
+dock follows it — see "The primary display is a choice" below.
 
 **Workspace mode and the launcher follow the pointer** as of staging step 1
 below: both open on the monitor they were invoked from.
@@ -46,6 +48,131 @@ wallpaper in a `Listener` that opens the context menu, and
 listener at all. And an animated wallpaper preset plays on the primary while
 the secondary falls back to `.slate`, because the secondary reads only
 `sharedWallpaperTextureId`, which is the still-image path.
+
+## The primary display is a choice
+
+Settings › Displays lists the connected screens and lets the user pick the
+primary. Two things share the name "primary" and separating them is the whole
+of the design:
+
+- **The host** (`DisplayOutput.isHost`) is the output the engine renders
+  Flutter's implicit view to. `FlDrmDisplay` picks it — the largest panel by
+  pixel count — and the binding is hardware: the implicit view owns that
+  output's swap chain and EGL surface. The shell's own widget tree is drawn
+  into it, so the host's logical rect *is* that tree's coordinate space, which
+  is why the host is always at (0,0) and why `screenWidth`/`screenHeight` read
+  the host and not the primary. Reading the primary there laid the whole shell
+  out against a panel it was not on.
+- **The primary** (`DisplayOutput.isPrimary`) is the user's pick: the dock, new
+  window placement, the `wl_output` the compositor advertises first, and the
+  fallback output for the workspace and launcher.
+
+They coincide until the user says otherwise, so N=1 is unchanged.
+
+Because the host cannot move, the *dock* moves instead. `dockWidget(forOutput:)`
+and `dockIconMenuWidget(forOutput:)` on `_DesktopShellState` lay the dock out
+for a given output; the shell's tree draws it only while `dockIsOnHost`, and
+`SecondaryOutputScreen` draws it when its own output is primary. Exactly one
+tree draws it, and the pieces that were implicitly host-relative had to be
+parameterised: `_dockMetrics(outputWidth:)`, `_dockIconAnchorX`, and
+`_updateDockHover(x:y:outputId:)`, which the secondary's root `Listener` feeds
+because the host tree never sees a pointer event on another panel.
+`dockSlots()` (the broker, hence `shell-drive.py`) now reports virtual-desktop
+coordinates rather than host-local ones, unchanged whenever the primary is the
+host.
+
+Two traps found while building it. The secondary's rebuild gate exists to drop
+"dock animations and other primary-only churn" — but once the dock is *there*
+that churn is its own, so `_poke` bypasses the gate while the output is
+primary, and `isPrimary` is in the signature as well, because the bypass is
+edge-blind on the way out (the same shape as the `ovl:` term). And
+`_SecondaryScreenHostState` held its `DisplayOutput` by value from view-creation
+time; only its `id` is dependable, so it re-resolves against the live layout —
+otherwise `isPrimary` was frozen at whatever it was when the monitor was
+plugged in.
+
+The choice is persisted to `~/.config/starling/primary-display` **by connector
+name**, not by index: indexes are the engine's enumeration order and a hotplug
+reshuffles them, so an index would promote a different monitor after replugging.
+`DisplayLayout` applies it on construction, so startup and hotplug agree, and a
+primary that is currently unplugged falls back to the host and reclaims the role
+when it returns.
+
+The list reaches the Settings app over the same DMA-BUF control socket as the
+theme and wallpaper: `DMABUF_DISPLAY_NAME` chunks then `DMABUF_DISPLAY_INFO` per
+output, as a self-delimiting run (`phase` packs index and count), with
+`DMABUF_CONTROL_SET_PRIMARY_DISPLAY` coming back. Same latch/replay contract as
+the other pushes, so the pane seeds correctly from a push that arrived before
+its widget tree existed.
+
+**The engine switch exists now — the whole shell moves.**
+`fl_drm_view_set_primary_output(view, index, ratio)` rebinds the implicit view
+at runtime: EGL primary surface, swap-chain alias, present-callback pacing,
+refresh period, `view_to_output[0]`, view-0 metrics, capture-hook target, and
+the pointer region — each mirroring what `fl_drm_view_create` does for the
+startup primary. The explicit view on the target output is displaced through
+`FlutterEngineRemoveView` with a **detach-only** completion — deliberately not
+the hotplug teardown baton, which would disable the CRTC and destroy the very
+surfaces the implicit view is moving onto. Refused while a recording session
+is active (the recorder freezes capture geometry against the session-start
+primary) and on the legacy non-compositor path. It is platform-thread-only
+(AddView/RemoveView affinity); `fl_drm_view_post_task()` is the runtime door
+onto that thread. The shell orchestrates the rest through existing exports:
+after the rebind it gives the old host an explicit view (`add_output_view`,
+which now accepts it) and re-runs the `set_output_layout` pass.
+
+On the shell side, `_setPrimaryDisplay` fires `requestHostOutputSwitch` when
+host and primary disagree (also the retry path after an engine refusal —
+the dock-only move is the graceful degradation), windows are translated by
+their owning output's origin delta so they stay on their physical monitors
+while the virtual desktop renumbers around them, and the persisted choice is
+applied at startup *before any secondary views exist* — main is still the
+platform thread then, and there is nothing to displace.
+
+Two scale facts fell out. `fl_drm_view_get_output_derived_scale()` exposes the
+engine's EDID-based per-panel scale, and `computeRealLayoutFromEngine` seeds
+NEW outputs from it instead of hardcoding secondaries to 1× — this machine's
+14" 2560×1600 laptop panel is a 227-DPI 2× display that the width-only Swift
+heuristic would have called 1×. And outputs already in the layout keep their
+scale across switches and hotplugs, so a slider adjustment survives.
+
+## Mixed refresh rates: who paces whom
+
+Each output has always been modeset and page-flipped at its own rate (this
+machine runs 90Hz eDP beside 30Hz HDMI). What was wrong was above the kernel,
+and two changes fixed the two real defects:
+
+- **Secondary chains are frame-dropping mailboxes** (`set_skip_when_busy` in
+  `FlDrmSwapChain`). The engine's single raster thread presents every view
+  sequentially, and `Present()` used to block on that output's previous flip —
+  so one 30Hz panel's 33ms flip-wait throttled everything, including the
+  90Hz primary. Now a busy secondary drops the frame (no swap, no lock — the
+  buffer accounting is untouched, which is what makes it safe) and the flip
+  bridge reports `dropped`, on which the shell force-rebuilds that output's
+  screen host (`secondaryScreenForceRedraws` — the *gated* invalidator would
+  do nothing, since a drop changes no signature) so the final frame of an
+  animation always lands. The PRIMARY still blocks: its back-pressure is the
+  pipeline's pacing, and skipping there would busy-spin the renderer.
+- **Clients are paced by their own panel.** `fl_drm_view_set_output_present_callback`
+  fires on EVERY output's flips (one bridge on all chains, demuxed by CRTC)
+  with that output's own refresh period; the legacy primary-only callback is
+  gone. `wayland_server_on_present` takes the flipping output's bit and
+  completes frame callbacks + presentation feedback only for surfaces paced
+  by it; a surface's pacing output is the one it MOSTLY sits on
+  (`pace_mask`, set alongside the enter/leave mask — a straddler must not be
+  paced by both panels). Measured live with `WAYLAND_DEBUG` gap analysis:
+  a client on eDP sits on the 11.1ms grid, one on HDMI on the 33.6ms grid,
+  simultaneously — and the eDP client's rate holds while the HDMI client
+  streams and the dock animates, which is the throttling defect gone.
+
+What this deliberately does NOT give: per-view frame *scheduling*. Flutter's
+embedder API schedules frames globally (one vsync stream, one ScheduleFrame),
+so frame production is paced by the primary and a client's full round trip
+(commit → texture → engine frame → flip → frame callback) spans 2–3 refresh
+periods rather than 1. Closing that means wiring a real vsync waiter off the
+primary's flips (plus a vblank-estimating timer for the idle case) — known
+deadlock-prone (a dropped baton hangs the UI thread), worth doing as its own
+carefully-tested change if the latency matters.
 
 ## The one that blocks the rest: a space is global
 

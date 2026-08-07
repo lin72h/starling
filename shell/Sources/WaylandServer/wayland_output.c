@@ -244,13 +244,18 @@ void wayland_output_send_leave(struct WaylandServer* server,
 }
 
 void wayland_server_surface_set_outputs(struct WaylandServer* server,
-                                        uint32_t surface_id, uint32_t mask) {
+                                        uint32_t surface_id, uint32_t mask,
+                                        uint32_t pace_mask) {
     if (!server) return;
     struct WaylandSurface* surface =
         wayland_server_find_surface(server, surface_id);
     if (!surface || !surface->resource) return;
     /* Only mapped surfaces track outputs (mask 0 = unmapped/hidden). */
     if (surface->outputs_mask == 0 && mask != 0 && !surface->had_role) return;
+    /* Pacing output first: even when the intersection mask is unchanged
+     * (a window sliding along the seam), the side it MOSTLY sits on can
+     * flip, and that is what frame pacing keys off. */
+    surface->pace_mask = pace_mask;
     surface_apply_outputs_mask(server, surface, mask);
 }
 

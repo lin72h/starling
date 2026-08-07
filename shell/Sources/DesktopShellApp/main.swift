@@ -305,10 +305,15 @@ nonisolated(unsafe) var drmTextureRegistry: LinuxTextureRegistry? = nil
 nonisolated(unsafe) var drmViewHandle: OpaquePointer? = nil
 
 /// The real-output virtual desktop, derived deterministically from the
-/// engine's enumeration: primary at (0,0) at the shell DPI, secondaries to
-/// its right in enumeration order at 1x (per-output scale settings come
-/// later). Startup, hotplug, and the content builder's fallback all use
-/// this, so they always agree on the arrangement.
+/// engine's enumeration: the HOST output at (0,0) at the shell DPI, the others
+/// to its right in enumeration order at 1x (per-output scale settings come
+/// later). Startup, hotplug, and the content builder's fallback all use this,
+/// so they always agree on the arrangement.
+///
+/// The host is the engine's own primary — the output its implicit view renders
+/// to — and stays at the origin because the shell tree's coordinates are that
+/// output's. Which output is the *user's* primary is a separate, persisted
+/// choice that `DisplayLayout` applies on construction.
 func computeRealLayoutFromEngine(_ view: OpaquePointer?) -> DisplayLayout? {
     guard let view else { return nil }
     let count = Int(fl_drm_view_get_output_count(view))
@@ -317,25 +322,34 @@ func computeRealLayoutFromEngine(_ view: OpaquePointer?) -> DisplayLayout? {
     var nameBuf = [CChar](repeating: 0, count: 32)
     for i in 0..<count {
         var w: UInt32 = 0, h: UInt32 = 0, refresh: UInt32 = 0
-        var isPrimary: Int32 = 0
+        var isEnginePrimary: Int32 = 0
         guard fl_drm_view_get_output_info(
-            view, UInt32(i), &w, &h, &refresh, &isPrimary,
+            view, UInt32(i), &w, &h, &refresh, &isEnginePrimary,
             &nameBuf, UInt32(nameBuf.count)) == 1 else { continue }
-        let primary = isPrimary == 1
+        let host = isEnginePrimary == 1
+        let name = String(cString: nameBuf)
+        // An output that was already in the layout keeps its scale — a
+        // runtime host switch and a hotplug must not reset a 2x monitor to
+        // 1x. A NEW output gets its honest panel scale: the host's is
+        // currentShellDpi (already derived or overridden), the others ask
+        // the engine, which has the EDID this side never sees. Per-output
+        // scale *settings* come later; per-output scale *defaults* are here.
+        let known = displayLayout?.outputs.first(where: { $0.name == name })?.scale
         outputs.append(DisplayOutput(
-            id: i, name: String(cString: nameBuf),
+            id: i, name: name,
             physicalWidth: Int(w), physicalHeight: Int(h),
-            scale: primary ? currentShellDpi : 1.0,
-            originX: 0, originY: 0, isPrimary: primary,
+            scale: known ?? (host ? currentShellDpi
+                                  : fl_drm_view_get_output_derived_scale(view, UInt32(i))),
+            originX: 0, originY: 0, isHost: host, isPrimary: host,
             refreshMhz: Int(refresh)))
     }
     guard !outputs.isEmpty else { return nil }
     var cursorX = 0.0
-    if let p = outputs.firstIndex(where: { $0.isPrimary }) {
+    if let p = outputs.firstIndex(where: { $0.isHost }) {
         outputs[p].originX = 0
         cursorX = outputs[p].logicalWidth
     }
-    for i in outputs.indices where !outputs[i].isPrimary {
+    for i in outputs.indices where !outputs[i].isHost {
         outputs[i].originX = cursorX
         cursorX += outputs[i].logicalWidth
     }
@@ -349,7 +363,7 @@ func computeRealLayoutFromEngine(_ view: OpaquePointer?) -> DisplayLayout? {
 func syncEngineViewsAndLayout(_ view: OpaquePointer?, _ dl: DisplayLayout) {
     guard let view else { return }
     let mapped = Set(secondaryViewOutputs.outputIds)
-    for output in dl.outputs where !output.isPrimary && !mapped.contains(output.id) {
+    for output in dl.outputs where !output.isHost && !mapped.contains(output.id) {
         let viewId = secondaryViewOutputs.allocateViewId()
         // Mapped BEFORE AddView: the content builder reads it on the view's
         // first frame.
@@ -363,6 +377,121 @@ func syncEngineViewsAndLayout(_ view: OpaquePointer?, _ dl: DisplayLayout) {
     for output in dl.outputs {
         fl_drm_view_set_output_layout(
             view, UInt32(output.id), output.originX, output.originY, output.scale)
+    }
+}
+
+/// Tell every child app which displays exist and which one is primary — the
+/// Settings app's Displays pane is drawn from exactly this. Called whenever the
+/// arrangement changes (startup, hotplug, a new primary), and by the process
+/// manager for each child as it connects.
+func publishDisplaysToChildren() {
+    guard let dl = displayLayout else { return }
+    linuxProcessAppManager?.broadcastDisplays(dl.outputs.map {
+        LinuxProcessAppManager.ChildDisplay(
+            id: $0.id, name: $0.name,
+            physicalWidth: $0.physicalWidth, physicalHeight: $0.physicalHeight,
+            scale: $0.scale, isPrimary: $0.isPrimary)
+    })
+}
+
+/// The heap box a host-switch request travels in through the C trampoline
+/// (fl_drm_view_post_task takes a bare function pointer + user_data).
+private final class HostSwitchRequest {
+    let outputId: Int
+    init(_ outputId: Int) { self.outputId = outputId }
+}
+
+/// Ask for the full "primary display" switch: the shell's own view moves to
+/// `outputId`. Called on the main thread; the engine work is marshalled to
+/// the ENGINE PLATFORM thread, the only one AddView/RemoveView accept.
+func requestHostOutputSwitch(to outputId: Int) {
+    guard let view = drmViewHandle else { return }
+    let raw = Unmanaged.passRetained(HostSwitchRequest(outputId)).toOpaque()
+    if fl_drm_view_post_task(view, { raw in
+        let req = Unmanaged<HostSwitchRequest>.fromOpaque(raw!).takeRetainedValue()
+        performHostOutputSwitch(to: req.outputId)
+    }, raw) == 0 {
+        Unmanaged<HostSwitchRequest>.fromOpaque(raw).release()
+        FileHandle.standardError.write(Data(
+            "[DisplayLayout] host switch: post_task unavailable\n".utf8))
+    }
+}
+
+/// ENGINE PLATFORM thread: rebind the implicit view to `outputId`, give the
+/// old host an explicit view, re-derive the layout, and publish it to main.
+/// On engine refusal (recording active, output vanished) the desktop keeps
+/// the dock-only behavior it already switched to — a degradation, not a
+/// broken state.
+func performHostOutputSwitch(to outputId: Int) {
+    guard let view = drmViewHandle, let dl = displayLayout,
+          let target = dl.outputs.first(where: { $0.id == outputId }),
+          !target.isHost
+    else { return }
+    let oldHost = dl.host
+    let oldWindowLayout = dl.outputs
+
+    // The engine removes the explicit view on the target; forget our mapping
+    // first so the content builder answers black for any straggler frame.
+    secondaryViewOutputs.removeMapping(forOutput: target.id)
+
+    guard fl_drm_view_set_primary_output(
+        view, UInt32(target.id), target.scale) == 1 else {
+        FileHandle.standardError.write(Data(
+            "[DisplayLayout] host switch to \(target.name) refused by engine; dock-only move stands\n".utf8))
+        return
+    }
+
+    // The old host becomes an ordinary secondary: its own Flutter view at
+    // the scale it was running at. Mapped BEFORE AddView, like startup.
+    let newViewId = secondaryViewOutputs.allocateViewId()
+    secondaryViewOutputs[newViewId] = oldHost.id
+    if fl_drm_view_add_output_view(
+        view, UInt32(oldHost.id), Int64(newViewId), oldHost.scale) != 1 {
+        secondaryViewOutputs[newViewId] = nil
+        FileHandle.standardError.write(Data(
+            "[DisplayLayout] host switch: add_output_view failed for \(oldHost.name) — it will show its last frame\n".utf8))
+    }
+
+    // The shell view's scale is the new host's now. Set before the layout
+    // recompute (its host-scale fallback reads it) and exported for spawned
+    // children, exactly like the runtime DPI path.
+    currentShellDpi = target.scale
+    setenv("FLUTTER_DRM_DPI", "\(currentShellDpi)", 1)
+    setenv("FLUTTER_SCREEN_WIDTH", "\(target.physicalWidth)", 1)
+    setenv("FLUTTER_SCREEN_HEIGHT", "\(target.physicalHeight)", 1)
+
+    guard let newLayout = computeRealLayoutFromEngine(view) else { return }
+    syncEngineViewsAndLayout(view, newLayout)
+
+    DispatchQueue.main.async {
+        displayLayout = newLayout
+        FileHandle.standardError.write(Data(
+            "[DisplayLayout] host switch: \(newLayout.describe())\n".utf8))
+        // Windows stay on their physical monitors. The switch renumbers the
+        // virtual desktop (the host moves to the origin), so every window's
+        // rect is translated by its owning output's origin delta — without
+        // this, windows visually JUMP monitors while keeping their numbers.
+        if let shell = _shellState {
+            for win in shell.windowManager.windows {
+                guard let oldOwner = oldWindowLayout.first(where: {
+                    $0.containsLogical(win.rect.left + win.rect.width / 2,
+                                       win.rect.top + win.rect.height / 2) })
+                    ?? oldWindowLayout.first(where: { $0.isHost }),
+                    let newOwner = newLayout.outputs.first(where: { $0.id == oldOwner.id })
+                else { continue }
+                win.rect = Rect.fromLTWH(
+                    win.rect.left - oldOwner.originX + newOwner.originX,
+                    win.rect.top - oldOwner.originY + newOwner.originY,
+                    win.rect.width, win.rect.height)
+            }
+        }
+        waylandIntegration?.setOutputs(newLayout.outputs)
+        publishDisplaysToChildren()
+        // Children re-render at the new host density (the DPI-slider path's
+        // exact contract: Wayland scale factors deliberately untouched).
+        linuxProcessAppManager?.broadcastDpiChange(currentShellDpi)
+        _shellState?.setState {}
+        invalidateSecondaryScreens()
     }
 }
 
@@ -385,6 +514,11 @@ func drmOutputsChanged() {
         // Always re-advertise on hotplug — shrinking back to one output
         // must reach clients too.
         waylandIntegration?.setOutputs(dl.outputs)
+        // A monitor arriving or leaving changes the Displays pane, and may
+        // change which output is primary: the remembered one comes back as
+        // primary when it is replugged, and hands the role to the host while
+        // it is away (DisplayLayout applies that on construction).
+        publishDisplaysToChildren()
         // Windows stranded on an unplugged output come home (macOS behavior),
         // keeping their size. "Stranded" is a matter of degree, not of bare
         // intersection: a window that straddled the boundary still overlaps the
@@ -482,6 +616,40 @@ func runDRM() -> Never {
 
     let simSpec = ProcessInfo.processInfo.environment["STARLING_SIM_OUTPUTS"] ?? ""
     let realOutputCount = Int(fl_drm_view_get_output_count(view))
+
+    // The persisted primary display, applied BEFORE any secondary views
+    // exist: rebinding the implicit view now displaces nothing, so this is
+    // the clean version of the runtime switch. Main is still the engine
+    // platform thread here (fl_drm_view_run hasn't spawned the real one).
+    // A pixel_ratio of 0 lets the engine derive the panel's own scale, and
+    // currentShellDpi is re-adopted after — the first read was the engine
+    // pick's panel, not this one.
+    if simSpec.isEmpty && realOutputCount > 1,
+       let wanted = DisplayLayout.preferredPrimaryName {
+        var nameBuf = [CChar](repeating: 0, count: 32)
+        for i in 0..<realOutputCount {
+            var isEnginePrimary: Int32 = 0
+            guard fl_drm_view_get_output_info(
+                view, UInt32(i), nil, nil, nil, &isEnginePrimary,
+                &nameBuf, UInt32(nameBuf.count)) == 1 else { continue }
+            if String(cString: nameBuf) == wanted {
+                // FLUTTER_DRM_DPI is the user's override and follows the
+                // shell wherever it hosts; without it the engine derives the
+                // new panel's own scale (0 = derive).
+                let dpiEnv = ProcessInfo.processInfo.environment["FLUTTER_DRM_DPI"]
+                let ratio = (dpiEnv?.isEmpty == false) ? currentShellDpi : 0
+                if isEnginePrimary != 1,
+                   fl_drm_view_set_primary_output(view, UInt32(i), ratio) == 1 {
+                    currentShellDpi = fl_drm_view_get_scale(view)
+                    setenv("FLUTTER_DRM_DPI", "\(currentShellDpi)", 1)
+                    FileHandle.standardError.write(Data(
+                        "[DisplayLayout] persisted primary \(wanted) hosts the shell (scale \(currentShellDpi))\n".utf8))
+                }
+                break
+            }
+        }
+    }
+
     if simSpec.isEmpty && realOutputCount > 1,
        let dl = computeRealLayoutFromEngine(view) {
         displayLayout = dl
@@ -512,8 +680,10 @@ func runDRM() -> Never {
         fl_drm_view_set_cursor_shape(view, shape.rawValue)
     }
     // Export screen resolution so child apps (SettingsApp) can compute max DPI.
-    setenv("FLUTTER_SCREEN_WIDTH", "\(screenW)", 1)
-    setenv("FLUTTER_SCREEN_HEIGHT", "\(screenH)", 1)
+    // Fresh reads, not the values captured at create: the persisted-primary
+    // rebind above may have moved the implicit view to a different panel.
+    setenv("FLUTTER_SCREEN_WIDTH", "\(fl_drm_view_get_width(view))", 1)
+    setenv("FLUTTER_SCREEN_HEIGHT", "\(fl_drm_view_get_height(view))", 1)
 
     // Set up texture registry with DRM proc address resolver (eglGetProcAddress).
     let textureRegistry = LinuxTextureRegistry()
@@ -560,6 +730,14 @@ func runDRM() -> Never {
         _shellState?._setScreensaverIdle(seconds: Double(seconds))
     }
 
+    // Primary-display picks (SettingsApp's Displays pane).
+    processManager.onPrimaryDisplayChangeRequested = { outputId in
+        _shellState?._setPrimaryDisplay(outputId: outputId)
+    }
+
+    // Seed the list every child is told at connect. Sent again on any change.
+    publishDisplaysToChildren()
+
     // Caret reports from child apps drive the IME candidate panel placement.
     processManager.onCaretChanged = { texId, x, y, w, h, visible in
         _shellState?._imeCaretChanged(textureId: texId, x: x, y: y,
@@ -571,8 +749,9 @@ func runDRM() -> Never {
         let oldDpi = currentShellDpi
         // Update the global DPI used for coordinate conversion
         currentShellDpi = newDpi
-        // Keep the primary output's scale in step with the runtime DPI change.
-        displayLayout?.updatePrimaryScale(newDpi)
+        // Keep the host output's scale in step with the runtime DPI change —
+        // the slider resizes the view the shell tree renders into.
+        displayLayout?.updateHostScale(newDpi)
         // Persist so child processes (SettingsApp) inherit the current value
         setenv("FLUTTER_DRM_DPI", "\(newDpi)", 1)
         // Update parent engine metrics
@@ -634,10 +813,25 @@ func runDRM() -> Never {
 
     // Real-vsync frame pacing: page-flip completions (platform thread, same
     // thread as the Wayland event loop) drive client frame callbacks and
-    // presentation feedback with kernel scanout timestamps.
-    fl_drm_view_set_present_callback(view, { userData, flipTimeNs, refreshNs in
-        guard let wl = waylandIntegration else { return }
-        wl.handlePresent(flipTimeNs: flipTimeNs, refreshNs: refreshNs)
+    // presentation feedback with kernel scanout timestamps — per output, so
+    // clients are paced by the panel they actually sit on.
+    //
+    // `dropped` recovery: secondary chains are frame-dropping mailboxes (a
+    // slow panel must not stall the raster thread), and a drop can be the
+    // FINAL frame of an animation — nothing else in flight would ever fix
+    // the staleness. Poking the output's screen host rebuilds its tree,
+    // which re-renders the view and presents the newest content.
+    fl_drm_view_set_output_present_callback(view, { _, outputIndex, flipTimeNs, refreshNs, dropped in
+        if let wl = waylandIntegration {
+            wl.handlePresent(flipTimeNs: flipTimeNs, refreshNs: refreshNs,
+                             outputId: Int(outputIndex))
+        }
+        if dropped != 0 {
+            let idx = Int(outputIndex)
+            DispatchQueue.main.async {
+                secondaryScreenForceRedraws[idx]?()
+            }
+        }
     }, nil)
 
     // Screen recording: register the frame sink before the event loop runs

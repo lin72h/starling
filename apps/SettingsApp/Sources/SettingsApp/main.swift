@@ -43,6 +43,12 @@ class _ThemedSettingsRootState: State<StatefulWidget> {
         GpuDmaBufRenderer.onScreensaverChanged = { seconds in
             settingsBlocShared?.add(.screensaverApplied(seconds))
         }
+        // The connected displays and which one is primary. Pushed at connect
+        // and again on any change, so the Displays pane follows a monitor
+        // being plugged in without the user reopening it.
+        GpuDmaBufRenderer.onDisplaysChanged = { displays in
+            settingsBlocShared?.add(.displaysApplied(displays))
+        }
         #endif
     }
 

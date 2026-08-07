@@ -213,7 +213,8 @@ void wayland_server_flush_clients(WaylandServer* server) {
 
 void wayland_server_on_present(WaylandServer* server,
                                uint64_t flip_time_ns,
-                               uint32_t refresh_ns) {
+                               uint32_t refresh_ns,
+                               uint32_t flip_output_mask) {
     WARN_IF_OFF_LOOP_THREAD(server, "on_present");
 
     if (!server->saw_flip) {
@@ -223,11 +224,19 @@ void wayland_server_on_present(WaylandServer* server,
                 refresh_ns ? 1e9 / (double)refresh_ns : 0.0);
     }
 
-    /* Fire every pending frame callback with the real scanout time. The
-     * commit that armed the callback is on screen as of this flip. */
+    /* Fire the pending frame callbacks PACED BY THIS OUTPUT with the real
+     * scanout time — the commit that armed the callback is on screen as of
+     * this flip. Surfaces on other outputs wait for their own panel's flip:
+     * completing a 30Hz monitor's clients on a 90Hz panel's flips makes
+     * them render frames nobody scans out (and vice versa starves).
+     * pace_mask 0 = primary, which is always bit 0. */
     uint32_t ms = (uint32_t)(flip_time_ns / 1000000ull);
     struct WaylandSurface* surface;
     wl_list_for_each(surface, &server->surfaces, link) {
+        uint32_t pace = surface->pace_mask ? surface->pace_mask : 1u;
+        if (!(pace & flip_output_mask)) {
+            continue;  /* paced by another output's flips */
+        }
         if (surface->frame_callback) {
             if (surface->frame_throttle_ms &&
                 ms - surface->last_frame_done_ms < surface->frame_throttle_ms) {
@@ -240,8 +249,10 @@ void wayland_server_on_present(WaylandServer* server,
         }
     }
 
-    /* Answer presentation feedback with the same flip timing. */
-    wayland_server_presentation_present_all(server, flip_time_ns, refresh_ns);
+    /* Answer presentation feedback with the same flip timing — same
+     * per-output partition. */
+    wayland_server_presentation_present_all(server, flip_time_ns, refresh_ns,
+                                            flip_output_mask);
 
     wl_display_flush_clients(server->display);
 }

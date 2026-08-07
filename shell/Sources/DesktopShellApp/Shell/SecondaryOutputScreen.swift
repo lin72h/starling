@@ -50,6 +50,17 @@ final class SecondaryViewOutputsMap: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         map = map.filter { aliveOutputIds.contains($0.value) }
     }
+
+    /// Forget the view on `outputId` (the output is becoming the host — the
+    /// engine removes its explicit view). Returns the Flutter view id that
+    /// was mapped, or nil if the output had none.
+    @discardableResult
+    func removeMapping(forOutput outputId: Int) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = map.first(where: { $0.value == outputId }) else { return nil }
+        map.removeValue(forKey: entry.key)
+        return entry.key
+    }
 }
 
 let secondaryViewOutputs = SecondaryViewOutputsMap()
@@ -90,6 +101,13 @@ func fullscreenWindow(onOutput output: DisplayOutput) -> WindowInfo? {
 /// whenever its state changes (window moves, opens, closes, focus).
 nonisolated(unsafe) var secondaryScreenInvalidators: [Int: () -> Void] = [:]
 
+/// Unconditional-rebuild hooks, keyed by output id — the mailbox drop
+/// recovery. A dropped frame means the panel is showing STALE content while
+/// the signature (rects, focus, theme) is unchanged, so the gated
+/// invalidator above would do nothing; this one bypasses the gate and
+/// re-renders the view outright.
+nonisolated(unsafe) var secondaryScreenForceRedraws: [Int: () -> Void] = [:]
+
 /// Ask every secondary screen to re-check its content. Each host skips the
 /// rebuild unless the windows visible on ITS output actually changed.
 func invalidateSecondaryScreens() {
@@ -109,7 +127,10 @@ func updateWaylandSurfaceOutputs() {
     for win in shell.windowManager.visibleWindows {
         wl.updateSurfaceOutputs(
             windowId: win.id,
-            intersectingIds: dl.outputs(intersectingRect: win.rect).map { $0.id })
+            intersectingIds: dl.outputs(intersectingRect: win.rect).map { $0.id },
+            // Frame pacing keys off the output the window MOSTLY sits on —
+            // a straddler must not be paced by both panels' flips.
+            paceOutputId: dl.owningOutput(ofRect: win.rect).id)
     }
 }
 
@@ -132,23 +153,37 @@ class SecondaryScreenHost: StatefulWidget {
 }
 
 class _SecondaryScreenHostState: State<StatefulWidget> {
-    let output: DisplayOutput
+    /// The record this view was created with. Only its `id` is dependable —
+    /// everything else (size on a mode change, `isPrimary` when the user picks
+    /// a different primary display) is a snapshot from view-creation time.
+    /// Read `output` instead, which re-resolves against the live layout.
+    private let initialOutput: DisplayOutput
     private var _lastSignature = ""
 
+    /// This output as it is right now.
+    var output: DisplayOutput {
+        displayLayout?.outputs.first(where: { $0.id == initialOutput.id })
+            ?? initialOutput
+    }
+
     init(output: DisplayOutput) {
-        self.output = output
+        self.initialOutput = output
         super.init()
     }
 
     override func initState() {
         super.initState()
-        secondaryScreenInvalidators[output.id] = { [weak self] in
+        secondaryScreenInvalidators[initialOutput.id] = { [weak self] in
             self?._poke()
+        }
+        secondaryScreenForceRedraws[initialOutput.id] = { [weak self] in
+            self?.setState {}
         }
     }
 
     override func dispose() {
-        secondaryScreenInvalidators.removeValue(forKey: output.id)
+        secondaryScreenInvalidators.removeValue(forKey: initialOutput.id)
+        secondaryScreenForceRedraws.removeValue(forKey: initialOutput.id)
         super.dispose()
     }
 
@@ -175,8 +210,13 @@ class _SecondaryScreenHostState: State<StatefulWidget> {
         // the overlay closes the bypass stops applying, and without this the
         // signature would be unchanged and the closed launcher would stay
         // painted. Caught exactly that way.
+        // Same reasoning for the dock: `_poke` bypasses the gate while this
+        // output is primary, so the *last* poke before it stops being primary
+        // is the one that has to erase the dock — and by then the bypass no
+        // longer applies.
         sig += "|ovl:\(workspaceIsOn(output: output) ? 1 : 0)"
             + ":\(launcherIsOn(output: output) ? 1 : 0)"
+            + ":\(output.isPrimary ? 1 : 0)"
         return sig
     }
 
@@ -191,7 +231,14 @@ class _SecondaryScreenHostState: State<StatefulWidget> {
         // a signature could summarise — rail rows, window counts, tab strip,
         // active tab, divider — and an under-described signature here is a
         // stale pane, which is the same failure the traffic lights had.
-        if workspaceIsOn(output: output) || launcherIsOn(output: output) {
+        //
+        // Same for the dock, once this output is the primary display. The gate
+        // exists to keep "dock animations and other primary-only churn" from
+        // re-presenting a static output — but when the dock is HERE that churn
+        // is this output's own, and dropping it freezes magnification, the
+        // running-app dots, and drag reordering mid-gesture.
+        if workspaceIsOn(output: output) || launcherIsOn(output: output)
+            || output.isPrimary {
             setState {}
             return
         }
@@ -209,11 +256,15 @@ class _SecondaryScreenHostState: State<StatefulWidget> {
 
 // MARK: - SecondaryOutputScreen
 
-/// The desktop on a non-primary output: per-output wallpaper and menu bar
-/// (macOS policy — a menu bar on every display; the single dock stays on the
-/// primary), plus every window whose virtual-desktop rect intersects this
-/// output, positioned in output-local coordinates. A window straddling the
-/// seam renders on both outputs, each showing its own portion.
+/// The desktop on an output other than the shell's host: per-output wallpaper
+/// and menu bar (macOS policy — a menu bar on every display), plus every window
+/// whose virtual-desktop rect intersects this output, positioned in
+/// output-local coordinates. A window straddling the seam renders on both
+/// outputs, each showing its own portion.
+///
+/// It draws the dock too when the user has made THIS output the primary
+/// display. There is still exactly one dock: the shell's own tree stops drawing
+/// it as soon as the host is not the primary (`dockIsOnHost`).
 ///
 /// This widget lives in its own widget tree (one per Flutter view); shared
 /// shell state is reached through the _shellState global and rebuilds arrive
@@ -326,6 +377,30 @@ struct SecondaryOutputScreen {
             height: DesktopTheme.kStatusBarHeight,
             child: _statusBar()))
 
+        // The dock, when this output is the primary display. There is one dock
+        // and it lives on the primary (macOS); the shell's own tree drops it
+        // the moment that is not the host output, so exactly one tree draws it.
+        if let dock = _shellState?.dockWidget(forOutput: output) {
+            layers.append(dock)
+        }
+
+        // A dock icon's context menu belongs on the same screen as the icon,
+        // with the usual click-anywhere-else barrier under it.
+        if let menu = _shellState?.dockIconMenuWidget(forOutput: output) {
+            layers.append(Positioned(
+                fill: (),
+                child: Listener(
+                    onPointerDown: { _ in _shellState?.dismissDockIconMenu() },
+                    behavior: .opaque,
+                    // A ColoredBox hit-tests opaque even at alpha 0, which is
+                    // exactly what a barrier wants; the bare SizedBox rule is
+                    // for overlays that must let events through.
+                    child: ColoredBox(
+                        color: Color(0x00000000),
+                        child: SizedBox(expand: ())))))
+            layers.append(menu)
+        }
+
         // Fullscreen chrome reveal, mirroring the primary's zones: a 4px
         // sliver at the top catches the approach, and once revealed the zone
         // grows to cover the status bar plus the title-bar overlay so moving
@@ -343,12 +418,33 @@ struct SecondaryOutputScreen {
                     onPointerHover: { _ in _shellState?.setTopBarRevealed(true) },
                     behavior: .translucent,
                     child: SizedBox(expand: ()))))
+            // The dock's own sensor, and only where the dock actually is: a
+            // sliver at the bottom reveals it, the band between the two zones
+            // hides both. Without this, sending a window fullscreen on the
+            // primary display would hide the dock with no way to get it back —
+            // the primary tree's sensors are on a different monitor.
+            let hasDock = output.isPrimary
+            let dockZoneH = !hasDock ? 0.0
+                : (_shellState?.dockRevealed == true
+                    ? DesktopTheme.kDockBottomMargin + DesktopTheme.kDockContainerHeight
+                    : 4.0)
             layers.append(Positioned(
-                left: 0, top: zoneH, right: 0, bottom: 0,
+                left: 0, top: zoneH, right: 0, bottom: dockZoneH,
                 child: Listener(
-                    onPointerHover: { _ in _shellState?.setTopBarRevealed(false) },
+                    onPointerHover: { _ in
+                        _shellState?.setTopBarRevealed(false)
+                        if hasDock { _shellState?.setDockRevealed(false) }
+                    },
                     behavior: .translucent,
                     child: SizedBox(expand: ()))))
+            if hasDock {
+                layers.append(Positioned(
+                    left: 0, right: 0, bottom: 0, height: dockZoneH,
+                    child: Listener(
+                        onPointerHover: { _ in _shellState?.setDockRevealed(true) },
+                        behavior: .translucent,
+                        child: SizedBox(expand: ()))))
+            }
         }
 
         // The workspace UI, when this is the output it was invoked from. Drawn
@@ -386,12 +482,18 @@ struct SecondaryOutputScreen {
         // ourselves — Stack/Row alignment resolution traps without it.
         // The outer Listener reports which monitor the pointer is on, so a
         // workspace toggled from here opens here (observation only; it
-        // consumes nothing).
+        // consumes nothing). It also drives dock magnification, which the
+        // primary tree's hook cannot: its pointer events are on another panel.
         return Directionality(
             textDirection: .ltr,
             child: Listener(
                 onPointerDown: { _ in _shellState?.notePointerOutput(output.id) },
-                onPointerHover: { _ in _shellState?.notePointerOutput(output.id) },
+                onPointerHover: { event in
+                    _shellState?.notePointerOutput(output.id)
+                    _shellState?._updateDockHover(
+                        x: event.position.dx, y: event.position.dy,
+                        outputId: output.id)
+                },
                 behavior: .translucent,
                 child: Stack(fit: .expand, children: layers)))
     }

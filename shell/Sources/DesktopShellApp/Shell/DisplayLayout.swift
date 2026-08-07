@@ -14,6 +14,15 @@ import Foundation
 /// logical ("virtual desktop") coordinate space. Its logical size is the
 /// physical size divided by its own scale, so mixed-DPI outputs occupy
 /// correctly-sized logical rects side by side.
+///
+/// **`isHost` and `isPrimary` are different things and the distinction is
+/// load-bearing.** The host is the output the engine renders Flutter's
+/// implicit view (id 0) to — a hardware binding we do not get to choose
+/// (`FlDrmDisplay` picks the largest panel), and the one output whose logical
+/// rect *is* the shell tree's own coordinate space, hence always at (0,0).
+/// The primary is the user's pick in Settings › Displays: where the dock
+/// lives and where new windows open. They coincide until the user says
+/// otherwise.
 struct DisplayOutput: Equatable {
     let id: Int
     var name: String
@@ -22,6 +31,9 @@ struct DisplayOutput: Equatable {
     var scale: Double
     var originX: Double
     var originY: Double
+    /// The engine's implicit view renders here. Exactly one output has it.
+    var isHost: Bool
+    /// The user's primary display. Exactly one output has it.
     var isPrimary: Bool
     var refreshMhz: Int
 
@@ -55,12 +67,26 @@ final class DisplayLayout {
     init(outputs: [DisplayOutput]) {
         precondition(!outputs.isEmpty, "DisplayLayout needs at least one output")
         self.outputs = outputs
+        applyPreferredPrimary()
     }
 
-    /// The primary output — where the dock homes and new windows open.
-    var primary: DisplayOutput {
-        outputs.first(where: { $0.isPrimary }) ?? outputs[0]
+    /// The output the shell's own widget tree renders to (Flutter's implicit
+    /// view). Its logical rect is the shell tree's coordinate space, so
+    /// `screenWidth`/`screenHeight` and anything positioned in that tree are
+    /// measured against THIS output, never against `primary`.
+    var host: DisplayOutput {
+        outputs.first(where: { $0.isHost }) ?? outputs[0]
     }
+
+    /// The primary output — where the dock homes and new windows open. The
+    /// user's choice, which may not be the host.
+    var primary: DisplayOutput {
+        outputs.first(where: { $0.isPrimary }) ?? host
+    }
+
+    /// Whether the shell's own tree is the one that draws the dock. When it is
+    /// false the dock belongs to a `SecondaryOutputScreen` instead.
+    var primaryIsHost: Bool { primary.id == host.id }
 
     /// Union of every output's logical rect — the bounds of the virtual desktop.
     var virtualBounds: Rect {
@@ -133,11 +159,82 @@ final class DisplayLayout {
         return min(1.0, covered / area)
     }
 
-    /// Keep the primary output's scale in step with a runtime DPI change
-    /// (Settings app). Per-output scale for real multi-monitor comes later.
-    func updatePrimaryScale(_ scale: Double) {
-        guard let idx = outputs.firstIndex(where: { $0.isPrimary }) ?? (outputs.isEmpty ? nil : 0) else { return }
+    /// Keep the host output's scale in step with a runtime DPI change
+    /// (Settings app). The host, not the primary: the DPI slider resizes the
+    /// view the shell tree renders into, which is the host's. Per-output scale
+    /// for real multi-monitor comes later.
+    func updateHostScale(_ scale: Double) {
+        guard let idx = outputs.firstIndex(where: { $0.isHost }) ?? (outputs.isEmpty ? nil : 0) else { return }
         outputs[idx].scale = scale
+    }
+
+    // MARK: Primary display (user choice)
+
+    /// Move the primary to the output named `name`, remembering the choice.
+    /// Returns false — and changes nothing — when no output carries that name.
+    @discardableResult
+    func setPrimary(name: String) -> Bool {
+        guard outputs.contains(where: { $0.name == name }) else { return false }
+        for i in outputs.indices { outputs[i].isPrimary = outputs[i].name == name }
+        DisplayLayout.preferredPrimaryName = name
+        return true
+    }
+
+    /// Same, by engine output id — what a child app has to send, since ids are
+    /// what it is shown.
+    @discardableResult
+    func setPrimary(outputId: Int) -> Bool {
+        guard let o = outputs.first(where: { $0.id == outputId }) else { return false }
+        return setPrimary(name: o.name)
+    }
+
+    /// Point the primary at the remembered output, or at the host when the
+    /// user never chose one (or chose a monitor that is not plugged in now).
+    /// Every construction path ends here, so startup and hotplug agree.
+    private func applyPreferredPrimary() {
+        let wanted = DisplayLayout.preferredPrimaryName
+        let target = outputs.first(where: { $0.name == wanted })?.name ?? host.name
+        for i in outputs.indices { outputs[i].isPrimary = outputs[i].name == target }
+    }
+
+    /// Where the choice is remembered. One line, the connector name.
+    private static var _preferredPrimaryFile: String {
+        LoginUser.configDir + "/primary-display"
+    }
+
+    private nonisolated(unsafe) static var _preferredPrimary: String? = nil
+    private nonisolated(unsafe) static var _preferredPrimaryLoaded = false
+
+    /// The connector name the user picked, or nil for "wherever the engine
+    /// hosts". Stored by NAME, not by index: indexes are the engine's
+    /// enumeration order and a hotplug reshuffles them, so an index would
+    /// silently promote a different monitor after replugging. `eDP-1` does not
+    /// move.
+    nonisolated(unsafe) static var preferredPrimaryName: String? {
+        get {
+            if !_preferredPrimaryLoaded {
+                _preferredPrimaryLoaded = true
+                let raw = (try? String(contentsOfFile: _preferredPrimaryFile,
+                                       encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                _preferredPrimary = (raw?.isEmpty ?? true) ? nil : raw
+            }
+            return _preferredPrimary
+        }
+        set {
+            _preferredPrimaryLoaded = true
+            guard newValue != _preferredPrimary else { return }
+            _preferredPrimary = newValue
+            let path = _preferredPrimaryFile
+            try? FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true)
+            if let name = newValue {
+                try? name.write(toFile: path, atomically: true, encoding: .utf8)
+            } else {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
     }
 
     // MARK: Construction
@@ -161,7 +258,8 @@ final class DisplayLayout {
         let o = DisplayOutput(
             id: 0, name: name,
             physicalWidth: physicalWidth, physicalHeight: physicalHeight,
-            scale: scale, originX: 0, originY: 0, isPrimary: true, refreshMhz: refreshMhz)
+            scale: scale, originX: 0, originY: 0,
+            isHost: true, isPrimary: true, refreshMhz: refreshMhz)
         return DisplayLayout(outputs: [o])
     }
 
@@ -183,7 +281,8 @@ final class DisplayLayout {
             outs.append(DisplayOutput(
                 id: i, name: "sim-\(i)",
                 physicalWidth: w, physicalHeight: h, scale: scale,
-                originX: cursorX, originY: 0, isPrimary: i == 0, refreshMhz: 60000))
+                originX: cursorX, originY: 0,
+                isHost: i == 0, isPrimary: i == 0, refreshMhz: 60000))
             cursorX += Double(w) / scale   // next output sits to the right in logical space
         }
         return outs.isEmpty ? nil : DisplayLayout(outputs: outs)
@@ -193,7 +292,8 @@ final class DisplayLayout {
         outputs.map {
             "\($0.name)[\($0.physicalWidth)x\($0.physicalHeight)@\($0.scale)x " +
             "logical \(Int($0.logicalWidth))x\(Int($0.logicalHeight)) " +
-            "at (\(Int($0.originX)),\(Int($0.originY)))\($0.isPrimary ? " *primary" : "")]"
+            "at (\(Int($0.originX)),\(Int($0.originY)))" +
+            ($0.isHost ? " *host" : "") + ($0.isPrimary ? " *primary" : "") + "]"
         }.joined(separator: " | ")
     }
 }

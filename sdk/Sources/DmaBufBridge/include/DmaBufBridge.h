@@ -118,6 +118,24 @@ struct DmaBufMeta {
  * height (high Float32); phase = 1 caret visible / 0 hidden. Drives the
  * shell's IME candidate panel placement. */
 #define DMABUF_CARET            0x08
+/* Primary-display pick (child→parent): x = the display's output id, as the
+ * shell reported it in DMABUF_DISPLAY_INFO. */
+#define DMABUF_CONTROL_SET_PRIMARY_DISPLAY 0x0c
+/* One connected display (parent→child), sent as a run: the whole list is
+ * re-sent whenever it changes, and at connect. `phase` packs the output's
+ * position in the run as (index << 16) | count — index 0 starts a fresh list
+ * and index count-1 completes it, so a child never shows a half-built one.
+ *   x       = physical width in device pixels
+ *   y       = physical height in device pixels
+ *   buttons = output id in bits 0..15, primary flag in bit 16,
+ *             Float32 scale bit pattern in bits 32..63
+ * The name arrives ahead of it in DMABUF_DISPLAY_NAME chunks. */
+#define DMABUF_DISPLAY_INFO     0x0d
+/* Eight bytes of the connector name for the display DMABUF_DISPLAY_INFO is
+ * about to describe (parent→child): x = chunk index, buttons = the bytes,
+ * low byte first, NUL-padded. Connector names run to 32 bytes ("Virtual-1",
+ * "HDMI-A-1"), which does not fit one payload. */
+#define DMABUF_DISPLAY_NAME     0x0e
 
 /// Configure message sent from parent to child before the child creates its
 /// buffer. Tells the child the content area dimensions (logical pixels).

@@ -127,12 +127,16 @@ void wayland_server_presentation_feedback(struct WaylandServer* server,
     }
 }
 
-/* Flip-driven path: every pending feedback corresponds to a commit that is
- * on screen as of this flip (or will be within one refresh) — answer them
- * all with the kernel's scanout timestamp and the real refresh period. */
+/* Flip-driven path: every pending feedback whose surface is paced by the
+ * flipping output corresponds to a commit that is on screen as of this flip
+ * (or will be within one refresh) — answer those with the kernel's scanout
+ * timestamp and that output's real refresh period. Feedback for surfaces on
+ * other outputs waits for their own panel's flip, so the timing a client
+ * schedules against is the panel it is actually on. */
 void wayland_server_presentation_present_all(struct WaylandServer* server,
                                              uint64_t flip_time_ns,
-                                             uint32_t refresh_ns) {
+                                             uint32_t refresh_ns,
+                                             uint32_t flip_output_mask) {
     uint64_t secs = flip_time_ns / 1000000000ull;
     uint32_t tv_sec_hi = (uint32_t)(secs >> 32);
     uint32_t tv_sec_lo = (uint32_t)(secs & 0xFFFFFFFF);
@@ -146,6 +150,13 @@ void wayland_server_presentation_present_all(struct WaylandServer* server,
     struct WaylandPresentationFeedback* fb;
     struct WaylandPresentationFeedback* tmp;
     wl_list_for_each_safe(fb, tmp, &server->presentation_feedbacks, link) {
+        struct WaylandSurface* surface =
+            wayland_server_find_surface(server, fb->surface_id);
+        uint32_t pace = (surface && surface->pace_mask) ? surface->pace_mask
+                                                        : 1u;
+        if (!(pace & flip_output_mask)) {
+            continue;  /* paced by another output's flips */
+        }
         wp_presentation_feedback_send_presented(fb->resource,
             tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns,
             0, server->presentation_seq, flags);
