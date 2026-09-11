@@ -26,6 +26,11 @@ class DesktopWindow: StatelessWidget {
                 child: content
             )
         }
+        // wp_alpha_modifier: the client's whole-surface opacity, applied
+        // to the content only — the frame around it stays the shell's.
+        if windowInfo.contentOpacity < 1.0 {
+            content = Opacity(opacity: max(0.0, windowInfo.contentOpacity), child: content)
+        }
         let texture = content
         guard let forward = windowInfo.onPointerEvent else {
             // No pointer forwarding (native Flutter content) — still listen

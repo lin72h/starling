@@ -130,6 +130,23 @@ WaylandServer* wayland_server_create(const WaylandServerConfig* config) {
     wayland_xdg_output_init(server);
     wayland_xdg_activation_init(server);
     wayland_presentation_init(server);
+    wayland_layer_shell_init(server);
+    wayland_alpha_modifier_init(server);
+    wayland_foreign_toplevel_init(server);
+    wayland_screencopy_init(server);
+    wayland_zones_init(server);
+    wayland_single_pixel_buffer_init(server);
+    wayland_misc_protocols_init(server);
+    wayland_shortcuts_inhibit_init(server);
+    wayland_pointer_gestures_init(server);
+    wayland_tablet_init(server);
+    wayland_ext_data_control_init(server);
+    wayland_idle_notify_init(server);
+    wayland_image_copy_capture_init(server);
+    wayland_xdg_foreign_init(server);
+    wayland_color_representation_init(server);
+    wayland_security_context_init(server);
+    wayland_output_management_init(server);
 
     /* Initialize deferred pointer event pipe + event source. Both ends are
      * non-blocking: the write side runs on the Flutter UI thread and must
@@ -295,24 +312,8 @@ void wayland_server_configure_toplevel(WaylandServer* server,
                                        int width, int height) {
     WARN_IF_OFF_LOOP_THREAD(server, "configure_toplevel");
     struct WaylandSurface* surface = wayland_server_find_surface(server, surface_id);
-    if (!surface || !surface->xdg_toplevel || !surface->xdg_surface)
-        return;
-
-    struct wl_array states;
-    wl_array_init(&states);
-    uint32_t* s;
-    s = wl_array_add(&states, sizeof(uint32_t));
-    *s = XDG_TOPLEVEL_STATE_ACTIVATED;
-    /* MAXIMIZED tells Chrome to skip CSD shadow padding, so the buffer
-     * matches the configured size exactly.  This is the same approach
-     * Hyprland uses — avoids the need for geometry-based shadow cropping. */
-    s = wl_array_add(&states, sizeof(uint32_t));
-    *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
-    xdg_toplevel_send_configure(surface->xdg_toplevel, width, height, &states);
-    wl_array_release(&states);
-
-    xdg_surface_send_configure(surface->xdg_surface,
-                               wayland_server_next_serial(server));
+    if (!surface) return;
+    wayland_xdg_shell_configure(server, surface, width, height);
 }
 
 void wayland_server_configure_fullscreen(WaylandServer* server,
@@ -320,21 +321,19 @@ void wayland_server_configure_fullscreen(WaylandServer* server,
                                          int width, int height) {
     WARN_IF_OFF_LOOP_THREAD(server, "configure_fullscreen");
     struct WaylandSurface* surface = wayland_server_find_surface(server, surface_id);
-    if (!surface || !surface->xdg_toplevel || !surface->xdg_surface)
-        return;
+    if (!surface) return;
+    /* The old entry point: fullscreen implied, the rest of the bits kept.
+     * The shell now pushes states explicitly and this is a convenience. */
+    surface->toplevel_states |= WAYLAND_TOPLEVEL_FULLSCREEN;
+    wayland_xdg_shell_configure(server, surface, width, height);
+}
 
-    struct wl_array states;
-    wl_array_init(&states);
-    uint32_t* s;
-    s = wl_array_add(&states, sizeof(uint32_t));
-    *s = XDG_TOPLEVEL_STATE_ACTIVATED;
-    s = wl_array_add(&states, sizeof(uint32_t));
-    *s = XDG_TOPLEVEL_STATE_FULLSCREEN;
-    xdg_toplevel_send_configure(surface->xdg_toplevel, width, height, &states);
-    wl_array_release(&states);
-
-    xdg_surface_send_configure(surface->xdg_surface,
-                               wayland_server_next_serial(server));
+void wayland_server_set_toplevel_state(WaylandServer* server,
+                                       uint32_t surface_id, uint32_t states) {
+    WARN_IF_OFF_LOOP_THREAD(server, "set_toplevel_state");
+    struct WaylandSurface* surface = wayland_server_find_surface(server, surface_id);
+    if (!surface) return;
+    wayland_xdg_shell_set_states(server, surface, states);
 }
 
 /* --------------------------------------------------------------------------
@@ -406,6 +405,13 @@ static void deferred_input_send_one(WaylandServer* server,
 
     struct WaylandSurface* surface = wayland_server_find_surface(server, ev->surface_id);
     if (!surface) return;
+
+    /* A person moved, clicked, scrolled or typed: ext-idle-notify's clocks
+     * restart. The agent seat's synthetic input is not a person. */
+    if (ev->seat == 0 && (ev->type == WL_PTR_MOTION || ev->type == WL_PTR_BUTTON ||
+                          ev->type == WL_PTR_AXIS || ev->type == WL_KB_KEY)) {
+        wayland_idle_notify_activity(server);
+    }
 
     struct wl_client* target = wl_resource_get_client(surface->resource);
     struct WaylandInputResource* ir;
@@ -760,6 +766,15 @@ DEF_CB_SETTER(window_geometry)
 DEF_CB_SETTER(cursor_shape)
 DEF_CB_SETTER(fullscreen_request)
 DEF_CB_SETTER(unfullscreen_request)
+DEF_CB_SETTER(toplevel_request)
+DEF_CB_SETTER(new_layer_surface)
+DEF_CB_SETTER(layer_surface_changed)
+DEF_CB_SETTER(layer_surface_destroy)
+DEF_CB_SETTER(surface_alpha)
+DEF_CB_SETTER(screencopy_request)
+DEF_CB_SETTER(toplevel_position_request)
+DEF_CB_SETTER(system_bell)
+DEF_CB_SETTER(shortcuts_inhibit)
 
 #undef DEF_CB_SETTER
 

@@ -254,7 +254,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    private var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool)] = [:]
 
     /// macOS-style fullscreen auto-hide: when a fullscreen window is on top,
     /// the desktop status bar and the window's title bar are hidden until the
@@ -268,6 +268,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // Popup tracking: popupId → (textureId, parentSurfaceId, x, y, width, height, mapped)
     // mapped=false until first buffer commit (Hyprland-style: don't render until content ready)
     var popups: [String: (textureId: Int, parentSurfaceId: UInt32, x: Double, y: Double, width: Double, height: Double, mapped: Bool)] = [:]
+    /// wp_alpha_modifier on a popup's surface (popupId → opacity).
+    var popupAlpha: [String: Double] = [:]
+    /// zwlr_layer_shell_v1 surfaces on the host output — see LayerSurfaces.swift.
+    var layerSurfaces: [UInt32: LayerSurfaceEntry] = [:]
+    /// The layer surface holding the keyboard: exclusive interactivity, or
+    /// on-demand after a click on it. nil = the focused window has it.
+    var _layerKeyboardSurface: UInt32? = nil
 
 
     // Screen dimensions — the logical size of the HOST output, i.e. the panel
@@ -397,7 +404,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     // Windows currently playing the scale-effect minimize (flying into
     // their dock icon). The actual minimize is deferred until it lands.
-    private var _minimizingWindows: Set<String> = []
+    var _minimizingWindows: Set<String> = []
 
     // Frame tick for tooling (tools/shell-drive.py): SIGRTMIN+2 requests a
     // *presented* frame. Screenshots and the recording toggle are consumed
@@ -1310,6 +1317,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 tick = true
                 rebuild = true
             }
+            if waylandIntegration?.needsFramePump == true {
+                tick = true
+                rebuild = true
+            }
             // Recording rides the same pump: presents carry the engine's
             // start/stop requests AND feed the frame mailbox, so it runs
             // from the start tap until the engine confirms the stop. An
@@ -1385,6 +1396,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         recordingService?.onFramePumpNeedChanged = pokePump
         screenCastService?.onFramePumpNeedChanged = pokePump
         rdpService?.onFramePumpNeedChanged = pokePump
+        // wlr-screencopy: a frame in flight needs presents like a recording.
+        waylandIntegration?.onFramePumpNeedChanged = pokePump
         _reevaluateFramePump()
 
         // WiFi state: monitor-driven while idle, plus a 5s re-read while the
@@ -2097,15 +2110,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             guard let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
             guard !win.isFullscreen else { return }  // already fullscreen
             guard let surfId = wayland.surfaceId(forWindowId: windowId) else { return }
+            var finalRect: Rect? = nil
             self.setState {
-                self._fullscreenWithZoom(windowId)
+                finalRect = self._fullscreenWithZoom(windowId)
             }
-            // Fullscreen: window sits below the system status bar (reserved
-            // top strip). The title bar overlays the content on demand so
-            // the wayland client renders into the full window height.
-            let contentW = Int(self.screenWidth)
-            let contentH = Int(self.screenHeight - DesktopTheme.kStatusBarHeight)
-            wayland.sendFullscreenResize(surfaceId: surfId, width: contentW, height: contentH)
+            // Fullscreen: the whole output. The title bar overlays the
+            // content on demand, so the client renders into the full height.
+            guard let full = finalRect else { return }
+            wayland.sendFullscreenResize(surfaceId: surfId,
+                                         width: Int(full.width), height: Int(full.height))
         }
 
         wayland.onUnfullscreenRequest = { [weak self] (windowId: String) in
@@ -2124,6 +2137,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let contentH = Int(restored.height - DesktopTheme.kTitleBarHeight)
             wayland.sendExitFullscreen(surfaceId: surfId, width: contentW, height: contentH)
         }
+
+        // Window state, layer shell, alpha, zones, screencopy's frame pump.
+        _wireWaylandProtocols(wayland)
 
         }  // end Wayland-specific callbacks
 
@@ -2149,6 +2165,32 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if self._screensaverActive {
                 if keyData.type == .down || keyData.type == .repeat {
                     self._screensaverInputWake()
+                }
+                return true
+            }
+
+            // A layer surface holding the keyboard (a launcher, a lock
+            // screen — exclusive interactivity, or on-demand after a click)
+            // gets every key; the desktop's own chords wait.
+            if let wl = waylandIntegration, let target = self._layerKeyboardSurface,
+               wl.isLayerSurface(target) {
+                if keyData.type == .down || keyData.type == .up {
+                    wl.sendKeyEvent(physical: keyData.physical, logical: keyData.logical,
+                                    isDown: keyData.type == .down, targetSurface: target)
+                }
+                return true
+            }
+            // A client holding a keyboard-shortcuts inhibitor for the focused
+            // window (a VM viewer, a remote desktop) gets the chords too.
+            if let wl = waylandIntegration,
+               let fid = self.windowManager.focusedWindowId,
+               let win = self.windowManager.windows.first(where: { $0.id == fid }),
+               win.appId.hasPrefix("wayland-"),
+               let sid = wl.surfaceId(forWindowId: fid),
+               wl.shortcutsInhibited(surfaceId: sid) {
+                if keyData.type == .down || keyData.type == .up {
+                    wl.sendKeyEvent(physical: keyData.physical, logical: keyData.logical,
+                                    isDown: keyData.type == .down, targetSurface: sid)
                 }
                 return true
             }
@@ -3869,6 +3911,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             _dockRevealed = false
         }
 
+        // [0.75] Layer surfaces below the windows: background and bottom.
+        // Placed from the buffers committed so far; popups rooted at the
+        // top/overlay layers are collected during the popup pass and drawn
+        // with their layer.
+        _layoutLayerSurfaces()
+        var stashedLayerPopups: [UInt32: [Widget]] = [:]
+        if !(_missionControlOpen && mcIsOnHost) {
+            children += _layerSurfaceWidgets(layers: [0, 1], stashedLayerPopups: [:])
+        }
+
         // [1..N] Visible windows — both spaces' windows during a slide,
         // each offset by its layer's dx. None while Mission Control is up:
         // every window renders exactly once, inside the exposé.
@@ -3919,6 +3971,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     onBringToFront: { [self] in
                         setState {
                             windowManager.bringToFront(winId)
+                            _layerKeyboardSurface = nil
                         }
                     },
                     onMove: { [self] (delta: Offset) in
@@ -4011,6 +4064,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             var immediateParentWidth = 0.0
             var isFirstParent = true
             var popupSpaceId: Int? = nil
+            var popupLayerRoot: UInt32? = nil
             while true {
                 // Check if parent is another popup (a submenu's menu)
                 if let parentPopup = popups["popup-\(parentSurfaceId)"]
@@ -4025,6 +4079,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     absY += parentPopup.y
                     parentSurfaceId = parentPopup.parentSurfaceId
                     continue
+                }
+                // Parent is a layer surface (a menu on a panel): its place
+                // came from the layer layout above.
+                if let layer = layerSurfaces[parentSurfaceId] {
+                    absX += layer.absX
+                    absY += layer.absY
+                    popupLayerRoot = parentSurfaceId
+                    if isFirstParent {
+                        immediateParentAbsX = layer.absX
+                        immediateParentWidth = layer.width
+                    }
+                    break
                 }
                 // Parent is a toplevel window — add window position. The id is a
                 // Wayland surface id or, for an X11 menu, an X11 window id.
@@ -4072,7 +4138,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if absY < 0 { absY = 0 }
 
             let isX11Popup = popupId.hasPrefix("x11popup-")
-            let texture: Widget = TextureWidget(textureId: popup.textureId, filterQuality: .none)
+            var texture: Widget = TextureWidget(textureId: popup.textureId, filterQuality: .none)
+            if let a = popupAlpha[popupId], a < 1.0 {
+                texture = Opacity(opacity: max(0.0, a), child: texture)
+            }
             // Both need the flip: Wayland surfaces arrive bottom-up, and an X11
             // menu is a DMA-BUF from Vulkan/GL exactly like its toplevels, which
             // pass flipTextureY: true. A solid-colour test popup looks identical
@@ -4175,18 +4244,24 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 popupChild = flipped
             }
 
-            children.append(
-                Positioned(
-                    key: ValueKey(popupId),
-                    left: absX,
-                    top: absY,
-                    width: popup.width,
-                    height: popup.height,
-                    child: popupChild
-                )
+            let positioned = Positioned(
+                key: ValueKey(popupId),
+                left: absX,
+                top: absY,
+                width: popup.width,
+                height: popup.height,
+                child: popupChild
             )
+            // A menu on a top/overlay layer surface must sit above it, and
+            // that layer is drawn after this pass.
+            if let root = popupLayerRoot, (layerSurfaces[root]?.info.layer ?? 0) >= 2 {
+                stashedLayerPopups[root, default: []].append(positioned)
+            } else {
+                children.append(positioned)
+            }
         }
         #endif
+
 
         // Status bar renders ON TOP of windows. In fullscreen, the reserved
         // top strip is filled with solid black (matching the status-bar
@@ -4202,18 +4277,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 Positioned(fill: (), child: _buildMissionControl(context))
             )
         } else if isFullscreenMode {
-            if DesktopTheme.kStatusBarHeight > 0 {
-                children.append(
-                    Positioned(
-                        left: 0, top: 0, right: 0,
-                        height: DesktopTheme.kStatusBarHeight,
-                        child: ColoredBox(
-                            color: Color(0xFF000000),
-                            child: SizedBox(expand: ())
-                        )
-                    )
-                )
-            }
+            // The window covers the strip; the bar comes back over it while
+            // the top edge holds the pointer.
             if _topBarRevealed, let bar = topBarWidget {
                 children.append(bar)
             }
@@ -4250,6 +4315,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if dockOpacity > 0.99, let over = chrome.hoverOverlay() {
                 children.append(over)
             }
+        }
+
+        // [N+2] The top and overlay layers, above the bars and the dock. A
+        // wlroots desktop's own bar IS a top-layer surface, made first, so a
+        // notification or a launcher in that layer lands above it; the
+        // shell's chrome takes the same place. Overlay above all, for lock
+        // screens. (wmbench photographs its windows here and compares
+        // pixels; a dock over the corner of one reads as a stale frame.)
+        if !(_missionControlOpen && mcIsOnHost) {
+            children += _layerSurfaceWidgets(layers: [2, 3], stashedLayerPopups: stashedLayerPopups)
         }
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
@@ -4543,6 +4618,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // events that hit anything inside it and consumes nothing, so this is
         // observation only; `.translucent` keeps it out of the way of the
         // wallpaper's own right-click handling.
+        // Everything above has settled focus, minimize and maximize for
+        // this frame: the compositor's window state (configures, taskbars)
+        // and frame positions (zones) follow, diff-guarded.
+        _syncWaylandWindowState()
+
         return Listener(
             onPointerDown: { [self] _ in notePointerOutput(displayLayout?.host.id ?? 0) },
             onPointerHover: { [self] _ in notePointerOutput(displayLayout?.host.id ?? 0) },
@@ -7794,7 +7874,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         let rCast = screenCastService?.needsFramePump == true
         let rRdp = rdpService?.needsFramePump == true
         let rCap = fl_drm_view_capture_active() != 0
-        let riding = rRec || rCast || rRdp || rCap
+        // A wlr-screencopy frame in flight: the engine's capture mirror
+        // refills only from presents, so an idle desktop must be ticked.
+        let rShot = waylandIntegration?.needsFramePump == true
+        let riding = rRec || rCast || rRdp || rCap || rShot
         if Self._pumpLog, riding != _pumpRunning {
             FileHandle.standardError.write(Data(
                 ("[pump] \(riding ? "arm" : "stop") rec=\(rRec) cast=\(rCast)"

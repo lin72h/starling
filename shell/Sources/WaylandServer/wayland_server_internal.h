@@ -44,6 +44,7 @@ struct WaylandSurface {
     // Popup state
     uint32_t parent_surface_id;           // parent surface id (for popups)
     int32_t popup_x, popup_y;            // position relative to parent
+    int32_t popup_w, popup_h;            // size from the positioner
 
     // Subsurface state (wl_subsurface). is_subsurface is set when this surface
     // is turned into a subsurface; subsurface_parent points at the parent
@@ -124,6 +125,43 @@ struct WaylandSurface {
     // Outputs this mapped toplevel currently intersects (bit i = server
     // outputs[i]); wl_surface.enter/leave are sent on changes. 0 = unmapped.
     uint32_t outputs_mask;
+
+    /* Window state the SHELL owns (WAYLAND_TOPLEVEL_* bits, pushed through
+     * wayland_server_set_toplevel_state). It is what every configure
+     * carries, what foreign-toplevel handles report, and what a client's
+     * own set_maximized/set_minimized requests are answered against. Fresh
+     * toplevels start ACTIVATED|MAXIMIZED, the shell's default placement,
+     * so the first configure needs no push. */
+    uint32_t toplevel_states;
+    /* The size of the last toplevel configure, so a state-only change
+     * (maximize with no size change, focus) can re-send it. 0 = none yet. */
+    int32_t last_conf_w, last_conf_h;
+    /* Non-zero once the toplevel has committed its first buffer — the point
+     * at which the foreign-toplevel lists announce it. */
+    int mapped;
+
+    /* zwlr_layer_surface_v1 role, NULL for everything else. */
+    struct WaylandLayerSurface* layer;
+
+    /* wp_alpha_modifier_surface_v1: the whole-surface opacity multiplier,
+     * double-buffered like everything else on the surface. 1.0 = opaque. */
+    double alpha, pending_alpha;
+    int pending_alpha_set;
+    struct wl_resource* alpha_resource;
+
+    /* xx_zone_item_v1 wrapping this toplevel, NULL when none. */
+    struct WaylandZoneItem* zone_item;
+
+    /* Every zwlr_foreign_toplevel_handle_v1 / ext_foreign_toplevel_handle_v1
+     * minted for this toplevel (WaylandForeignHandle.surface_link), and the
+     * identifier ext_foreign_toplevel_list hands out for it. */
+    struct wl_list foreign_handles;
+    char foreign_identifier[40];
+
+    /* A popup made with a NULL parent (xdg_surface.get_popup) whose parent
+     * will arrive through zwlr_layer_surface_v1.get_popup: the shell is told
+     * about it only once the parent is known, or at its first commit. */
+    int popup_parent_pending;
 
     // The single output this surface's frame callbacks pace off (a straddler
     // intersects two panels with different refresh rates, and firing on both
@@ -213,6 +251,66 @@ struct WaylandServer {
     struct wl_global* xdg_output_manager_global;
     struct wl_global* xdg_activation_global;
     struct wl_global* presentation_global;
+
+    /* --- The protocols wmbench and the wlroots ecosystem probe for ------- */
+    struct wl_global* layer_shell_global;
+    struct wl_list layer_surfaces;           // WaylandLayerSurface.link
+    struct wl_global* alpha_modifier_global;
+    struct wl_global* foreign_toplevel_manager_global;   // zwlr
+    struct wl_global* ext_foreign_toplevel_list_global;  // ext
+    struct wl_list foreign_managers;         // WaylandForeignManager.link
+    struct wl_global* screencopy_manager_global;
+    struct wl_list screencopy_frames;        // WaylandScreencopyFrame.link
+    uint32_t next_screencopy_id;
+    struct wl_global* zone_manager_global;
+    struct wl_list zones;                    // WaylandZone.link
+    struct wl_list zone_items;               // WaylandZoneItem.link
+    uint32_t next_zone_handle;
+    /* The frame the shell draws around a toplevel (its title bar), in
+     * logical pixels; what xx_zone_item_v1.frame_extents reports. */
+    int32_t frame_top, frame_bottom, frame_left, frame_right;
+    /* Per-output work area (the output less any reserved strips), in global
+     * logical coordinates. Zones are cut from it. Zero size = the whole
+     * output. Pushed by the shell through wayland_server_set_work_area. */
+    struct { int32_t x, y, w, h; } work_area[8 /* WAYLAND_MAX_OUTPUTS */];
+    /* Activation tokens this compositor issued and has not yet seen used:
+     * xdg_activation_v1.activate is honoured for these only. */
+    char issued_tokens[32][48];
+    int issued_token_next;
+    /* --- Small ones ------------------------------------------------------ */
+    struct wl_global* single_pixel_buffer_global;
+    struct wl_global* content_type_global;
+    struct wl_global* tearing_control_global;
+    struct wl_global* toplevel_tag_global;
+    struct wl_global* xdg_dialog_global;
+    struct wl_global* system_bell_global;
+    struct wl_global* toplevel_icon_global;
+    struct wl_global* shortcuts_inhibit_global;
+    struct wl_list shortcuts_inhibitors;     // WaylandShortcutsInhibitor.link
+    struct wl_global* pointer_gestures_global;
+    struct wl_global* tablet_manager_global;
+    struct wl_global* ext_data_control_manager_global;
+    struct wl_list ext_data_control_devices; // same discipline as data_control_devices
+    struct wl_global* idle_notifier_global;
+    struct wl_list idle_notifications;       // WaylandIdleNotification.link
+    /* ext-image-copy-capture: sources name an output, sessions capture it. */
+    struct wl_global* image_capture_source_manager_global;
+    struct wl_global* image_copy_capture_manager_global;
+    struct wl_list image_copy_sessions;      // WaylandImageCopySession.link
+    struct wl_global* xdg_exporter_global;
+    struct wl_global* xdg_importer_global;
+    struct wl_list foreign_exports;          // WaylandForeignExport.link
+    uint32_t next_foreign_export;
+    struct wl_global* color_representation_global;
+    struct wl_global* security_context_global;
+    struct wl_list security_contexts;        // WaylandSecurityContext.link
+    struct wl_list sandboxed_clients;        // WaylandSandboxedClient.link
+    struct wl_global* output_manager_global;
+    struct wl_list output_managers;          // WaylandOutputManager.link
+    uint32_t output_config_serial;
+    /* CLOCK_MONOTONIC ms of the last input event the compositor delivered,
+     * which is what ext-idle-notify measures idleness from. */
+    uint32_t last_input_ms;
 
     // Presentation feedback objects (WaylandPresentationFeedback.link)
     struct wl_list presentation_feedbacks;
@@ -327,10 +425,202 @@ struct WaylandServer {
         void (*on_text_input_state)(void* ctx, uint32_t surface_id,
                                     int enabled, int32_t x, int32_t y,
                                     int32_t w, int32_t h);
+        /* A client asked for a window-state change the shell owns: its own
+         * xdg_toplevel.set_maximized/set_minimized, a taskbar's
+         * foreign-toplevel request, an xdg_activation.activate. */
+        void (*on_toplevel_request)(void* ctx, uint32_t surface_id,
+                                    int request);
+        /* Layer shell: a surface took the role and committed for the first
+         * time (the shell creates its texture here), its arrangement
+         * changed, or it went away. */
+        void (*on_new_layer_surface)(void* ctx, uint32_t surface_id,
+                                     const WaylandLayerSurfaceInfo* info);
+        void (*on_layer_surface_changed)(void* ctx, uint32_t surface_id,
+                                         const WaylandLayerSurfaceInfo* info);
+        void (*on_layer_surface_destroy)(void* ctx, uint32_t surface_id);
+        /* wp_alpha_modifier: the surface's opacity multiplier changed. */
+        void (*on_surface_alpha)(void* ctx, uint32_t surface_id, double alpha);
+        /* wlr-screencopy: a client wants the presented pixels of output
+         * `output_index`, region (x,y,w,h) in device pixels; the shell
+         * answers with wayland_server_screencopy_deliver/fail. */
+        void (*on_screencopy_request)(void* ctx, uint32_t frame_id,
+                                      int output_index, int32_t x, int32_t y,
+                                      int32_t w, int32_t h);
+        /* xx-zones: a client asked for its toplevel to sit at (x,y) of the
+         * work area of output `output_index`; the shell moves the window and
+         * reports back through wayland_server_toplevel_position. */
+        void (*on_toplevel_position_request)(void* ctx, uint32_t surface_id,
+                                             int output_index,
+                                             int32_t x, int32_t y);
+        /* xdg_system_bell: ring for `surface_id` (0 = no surface). */
+        void (*on_system_bell)(void* ctx, uint32_t surface_id);
+        /* A keyboard-shortcuts inhibitor for the surface was granted (1) or
+         * went away (0). */
+        void (*on_shortcuts_inhibit)(void* ctx, uint32_t surface_id, int inhibited);
     } cb;
 
     // Socket
     char socket_name[64];
+};
+
+/* Double-buffered zwlr_layer_surface_v1 state. */
+struct WaylandLayerState {
+    uint32_t layer;              // zwlr_layer_shell_v1_layer
+    uint32_t anchor;             // zwlr_layer_surface_v1_anchor bitfield
+    int32_t exclusive_zone;      // >0 reserve, 0 none, <0 ignore others'
+    int32_t margin_top, margin_right, margin_bottom, margin_left;
+    uint32_t keyboard_interactivity;
+    uint32_t desired_w, desired_h;   // 0 = stretch along the anchored axis
+    uint32_t exclusive_edge;     // 0 = derived from the anchor
+};
+
+struct WaylandLayerSurface {
+    struct wl_resource* resource;
+    struct WaylandSurface* surface;      // NULL once the wl_surface died
+    struct WaylandServer* server;
+    int output_index;                    // resolved at creation (0 = ours to pick)
+    char namespace_[64];
+    struct WaylandLayerState pending, current;
+    int configured;                      // the initial configure went out
+    int announced;                       // the shell has been told (on_new)
+    WaylandLayerSurfaceInfo last_info;   // what the shell last heard
+    struct wl_list link;                 // server->layer_surfaces
+};
+
+/* One taskbar's view of the toplevels (zwlr_foreign_toplevel_manager_v1 or
+ * ext_foreign_toplevel_list_v1 — `ext` tells which). */
+struct WaylandForeignManager {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    int ext;                             // 0 = zwlr, 1 = ext list
+    int stopped;                         // stop requested: no new handles
+    struct wl_list handles;              // WaylandForeignHandle.link
+    struct wl_list link;                 // server->foreign_managers
+};
+
+struct WaylandForeignHandle {
+    struct wl_resource* resource;
+    struct WaylandForeignManager* manager;
+    struct WaylandSurface* surface;      // NULL once closed
+    struct wl_list link;                 // manager->handles
+    struct wl_list surface_link;         // surface->foreign_handles
+};
+
+/* A pending capture frame — a zwlr_screencopy_frame_v1, or (ext = 1) an
+ * ext_image_copy_capture_frame_v1; both end in the same shell readback. */
+struct WaylandScreencopyFrame {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    uint32_t id;                         // what the shell answers with
+    int output_index;
+    int32_t x, y, w, h;                  // device pixels on that output
+    int overlay_cursor;
+    int with_damage;
+    struct wl_resource* buffer;          // the client's wl_buffer, once copy()
+    struct wl_listener buffer_destroy;
+    int requested;                       // handed to the shell
+    int ext;                             // which protocol's frame this is
+    struct WaylandImageCopySession* session;   // ext: the session it belongs to
+    struct wl_list link;                 // server->screencopy_frames
+};
+
+/* ext_image_copy_capture_session_v1 over an output source. */
+struct WaylandImageCopySession {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    int output_index;
+    int32_t sent_w, sent_h;              // the buffer_size last announced
+    struct WaylandScreencopyFrame* frame;   // the one frame in flight, or NULL
+    int stopped;
+    struct wl_list link;                 // server->image_copy_sessions
+};
+
+/* zxdg_exported_v2: a toplevel another client may name as a parent. */
+struct WaylandForeignExport {
+    struct wl_resource* resource;
+    struct WaylandSurface* surface;      // NULL once the toplevel went
+    char handle[48];
+    struct wl_list imports;              // WaylandForeignImport.link
+    struct wl_list link;                 // server->foreign_exports
+};
+
+struct WaylandForeignImport {
+    struct wl_resource* resource;
+    struct WaylandForeignExport* export_; // NULL once destroyed/invalid
+    struct wl_list link;                 // export_->imports
+};
+
+/* wp_security_context_v1: a sandbox's listening socket, adopted. */
+struct WaylandSecurityContext {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    int listen_fd, close_fd;
+    char sandbox_engine[64], app_id[128], instance_id[64];
+    int committed;
+    struct wl_event_source* listen_source;
+    struct wl_event_source* close_source;
+    struct wl_list link;                 // server->security_contexts
+};
+
+/* A client that came in through a security context: its identity, and the
+ * reason wl_global_set_filter hides the privileged globals from it. */
+struct WaylandSandboxedClient {
+    struct wl_client* client;
+    struct wl_listener destroy;
+    char sandbox_engine[64], app_id[128], instance_id[64];
+    struct wl_list link;                 // server->sandboxed_clients
+};
+
+/* zwlr_output_manager_v1: one bind, with a head resource per output. */
+struct WaylandOutputManager {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    int stopped;
+    struct wl_resource* heads[8 /* WAYLAND_MAX_OUTPUTS */];
+    struct wl_resource* modes[8];
+    struct wl_list link;                 // server->output_managers
+};
+
+/* xx_zone_v1: a client's view of one output's work area. */
+struct WaylandZone {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    int output_index;
+    char handle[32];
+    struct wl_list link;                 // server->zones
+};
+
+/* xx_zone_item_v1 wrapping a toplevel. */
+struct WaylandZoneItem {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    struct WaylandSurface* surface;      // NULL once the toplevel died (inert)
+    struct WaylandZone* zone;            // current membership
+    struct WaylandZone* pending_zone;    // add_item, applied on commit
+    int pending_zone_set;
+    int pending_remove;                  // remove_item, applied on commit
+    int32_t pending_x, pending_y;
+    int pending_pos_set;
+    int32_t last_x, last_y;              // last position event sent
+    int have_last;
+    int awaiting_position;               // a set_position awaits the shell
+    struct wl_list link;                 // server->zone_items
+};
+
+struct WaylandShortcutsInhibitor {
+    struct wl_resource* resource;
+    struct WaylandSurface* surface;
+    struct wl_list link;
+};
+
+struct WaylandIdleNotification {
+    struct wl_resource* resource;
+    struct WaylandServer* server;
+    uint32_t timeout_ms;
+    int ignore_inhibitors;               // get_input_idle_notification (v2)
+    int idle;                            // `idle` sent, `resumed` owed
+    struct wl_event_source* timer;
+    struct wl_list link;
 };
 
 // Presentation feedback (one per wp_presentation.feedback request)
@@ -450,6 +740,100 @@ void wayland_idle_inhibit_init(struct WaylandServer* server);
 void wayland_xdg_output_init(struct WaylandServer* server);
 void wayland_xdg_activation_init(struct WaylandServer* server);
 void wayland_presentation_init(struct WaylandServer* server);
+/* An activation token minted by xdg_activation_v1; the foreign-toplevel
+ * and activation paths both end in the shell's on_toplevel_request. */
+void wayland_xdg_activation_issue_token(struct WaylandServer* server,
+                                        char* out, size_t out_len);
+int wayland_xdg_activation_consume_token(struct WaylandServer* server,
+                                         const char* token);
+
+/* Send a toplevel configure carrying the surface's current state bits
+ * (ACTIVATED always — see wayland_xdg_shell.c). w/h = 0 repeats the last
+ * configured size. */
+void wayland_xdg_shell_configure(struct WaylandServer* server,
+                                 struct WaylandSurface* surface,
+                                 int32_t w, int32_t h);
+/* The shell answered a client's request (or changed a window itself):
+ * record the bits, re-configure if a configure-visible bit changed, and
+ * tell every foreign-toplevel handle. */
+void wayland_xdg_shell_set_states(struct WaylandServer* server,
+                                  struct WaylandSurface* surface,
+                                  uint32_t states);
+
+void wayland_layer_shell_init(struct WaylandServer* server);
+/* Called from surface_commit before the buffer is handed to the shell:
+ * applies the double-buffered layer state and sends the configure the
+ * client is waiting for. */
+void wayland_layer_shell_commit(struct WaylandServer* server,
+                                struct WaylandSurface* surface);
+void wayland_layer_shell_surface_destroyed(struct WaylandServer* server,
+                                           struct WaylandSurface* surface);
+/* An output left the desktop: layer surfaces on it are closed. */
+void wayland_layer_shell_output_removed(struct WaylandServer* server,
+                                        int output_index);
+
+void wayland_alpha_modifier_init(struct WaylandServer* server);
+void wayland_alpha_modifier_commit(struct WaylandServer* server,
+                                   struct WaylandSurface* surface);
+
+void wayland_foreign_toplevel_init(struct WaylandServer* server);
+/* The toplevel committed its first buffer / lost its role. */
+void wayland_foreign_toplevel_map(struct WaylandServer* server,
+                                  struct WaylandSurface* surface);
+void wayland_foreign_toplevel_unmap(struct WaylandServer* server,
+                                    struct WaylandSurface* surface);
+void wayland_foreign_toplevel_title(struct WaylandSurface* surface);
+void wayland_foreign_toplevel_app_id(struct WaylandSurface* surface);
+void wayland_foreign_toplevel_state(struct WaylandSurface* surface);
+void wayland_foreign_toplevel_output(struct WaylandSurface* surface,
+                                     struct WaylandOutput* output, int enter);
+
+void wayland_screencopy_init(struct WaylandServer* server);
+
+void wayland_zones_init(struct WaylandServer* server);
+/* Applies pending zone membership + position on commit. */
+void wayland_zones_commit(struct WaylandServer* server,
+                          struct WaylandSurface* surface);
+void wayland_zones_surface_destroyed(struct WaylandServer* server,
+                                     struct WaylandSurface* surface);
+/* The work area of an output changed: every zone on it re-sends size. */
+void wayland_zones_work_area_changed(struct WaylandServer* server,
+                                     int output_index);
+
+void wayland_single_pixel_buffer_init(struct WaylandServer* server);
+void wayland_misc_protocols_init(struct WaylandServer* server);
+void wayland_shortcuts_inhibit_init(struct WaylandServer* server);
+void wayland_shortcuts_inhibit_surface_destroyed(struct WaylandServer* server,
+                                                 struct WaylandSurface* surface);
+void wayland_pointer_gestures_init(struct WaylandServer* server);
+void wayland_tablet_init(struct WaylandServer* server);
+void wayland_ext_data_control_init(struct WaylandServer* server);
+void wayland_ext_data_control_broadcast_selection(struct WaylandServer* server);
+void wayland_idle_notify_init(struct WaylandServer* server);
+/* Input reached a client: idle timers restart. Loop thread. */
+void wayland_idle_notify_activity(struct WaylandServer* server);
+/* ext-image-copy-capture lives beside wlr-screencopy (same readback). */
+void wayland_image_copy_capture_init(struct WaylandServer* server);
+void wayland_xdg_foreign_init(struct WaylandServer* server);
+void wayland_xdg_foreign_surface_destroyed(struct WaylandServer* server,
+                                           struct WaylandSurface* surface);
+void wayland_color_representation_init(struct WaylandServer* server);
+void wayland_security_context_init(struct WaylandServer* server);
+/* Non-NULL when the client came in through a security context. */
+struct WaylandSandboxedClient* wayland_client_sandbox(struct WaylandServer* server,
+                                                      struct wl_client* client);
+void wayland_output_management_init(struct WaylandServer* server);
+/* The output set changed: every manager hears the new heads + done. */
+void wayland_output_management_outputs_changed(struct WaylandServer* server);
+
+/* Output resource -> its index in server->outputs, -1 if not one of ours. */
+int wayland_output_index_of(struct WaylandServer* server,
+                            struct wl_resource* output_resource);
+/* The seat index a wl_seat resource was bound from (0 human, 1 agent),
+ * -1 if not one of ours. */
+int wayland_seat_index_of(struct wl_resource* seat_resource);
+/* A wl_buffer's dimensions + the ShmBuffer behind it (NULL if not shm). */
+struct ShmBuffer* wayland_shm_buffer_from_resource(struct wl_resource* buffer);
 
 // Warn (once per call site) when a loop-thread-only function runs on another
 // thread. libwayland-server send/marshal paths are not thread-safe; calling

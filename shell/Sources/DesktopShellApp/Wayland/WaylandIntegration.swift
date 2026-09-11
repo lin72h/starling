@@ -7,10 +7,49 @@ import WaylandServerBridge
 import Foundation
 #if os(Linux)
 import DmaBufBridge
+import FlutterDRMBridge   // fl_drm_view_arm_capture / read_capture (screencopy)
 import FlutterEmbedderBridge
 import Glibc
 import Dispatch
 #endif
+
+/// A layer surface's arrangement (zwlr_layer_shell_v1), as the compositor
+/// reports it: which output and layer, how it is anchored, the size it was
+/// configured to. The shell places it from this plus the buffer the client
+/// actually committed.
+struct LayerSurfaceInfo {
+    var outputIndex: Int
+    /// 0 background, 1 bottom, 2 top, 3 overlay
+    var layer: Int
+    /// Bitfield: 1 top, 2 bottom, 4 left, 8 right
+    var anchor: UInt32
+    var marginTop: Int, marginRight: Int, marginBottom: Int, marginLeft: Int
+    var width: Int, height: Int
+    var exclusiveZone: Int
+    /// One anchor bit, or 0 = reserves nothing
+    var exclusiveEdge: UInt32
+    /// 0 none, 1 exclusive, 2 on demand
+    var keyboardInteractivity: Int
+    var namespace: String
+
+    init(_ c: WaylandLayerSurfaceInfo) {
+        outputIndex = Int(c.output_index)
+        layer = Int(c.layer)
+        anchor = c.anchor
+        marginTop = Int(c.margin_top)
+        marginRight = Int(c.margin_right)
+        marginBottom = Int(c.margin_bottom)
+        marginLeft = Int(c.margin_left)
+        width = Int(c.width)
+        height = Int(c.height)
+        exclusiveZone = Int(c.exclusive_zone)
+        exclusiveEdge = c.exclusive_edge
+        keyboardInteractivity = Int(c.keyboard_interactivity)
+        namespace = withUnsafeBytes(of: c.namespace_) { buf in
+            String(cString: buf.bindMemory(to: CChar.self).baseAddress!)
+        }
+    }
+}
 
 // MARK: - Thread-Safe Queue
 
@@ -74,6 +113,17 @@ private enum WaylandEvent: @unchecked Sendable {
     /// surface-local logical coords).
     case textInputState(surfaceId: UInt32, enabled: Bool,
                         x: Int32, y: Int32, w: Int32, h: Int32)
+    /// A client asked for a window-state change the shell owns
+    /// (WAYLAND_TOPLEVEL_REQUEST_*): its own xdg_toplevel.set_maximized, a
+    /// taskbar's unminimize, an xdg_activation activate.
+    case toplevelRequest(surfaceId: UInt32, request: Int32)
+    case newLayerSurface(surfaceId: UInt32, info: LayerSurfaceInfo)
+    case layerSurfaceChanged(surfaceId: UInt32, info: LayerSurfaceInfo)
+    case layerSurfaceDestroy(surfaceId: UInt32)
+    case surfaceAlpha(surfaceId: UInt32, alpha: Double)
+    case toplevelPositionRequest(surfaceId: UInt32, outputIndex: Int32, x: Int32, y: Int32)
+    case systemBell(surfaceId: UInt32)
+    case shortcutsInhibit(surfaceId: UInt32, inhibited: Bool)
 }
 
 /// Commands produced on the UI thread, executed on the platform thread.
@@ -87,6 +137,14 @@ private enum WaylandCommand: @unchecked Sendable {
     case setSurfaceThrottle(surfaceId: UInt32, intervalMs: UInt32)
     case textInputCommit(text: String)
     case textInputPreedit(text: String, cursor: Int32)
+    case setToplevelState(surfaceId: UInt32, states: UInt32)
+    /// `pixels` is BGRX top-down, owned by the command — freed once copied.
+    case screencopyDeliver(frameId: UInt32, pixels: UnsafeMutableRawPointer, stride: Int32)
+    case screencopyFail(frameId: UInt32)
+    case toplevelPosition(surfaceId: UInt32, x: Int32, y: Int32)
+    case toplevelPositionFailed(surfaceId: UInt32)
+    case setWorkArea(outputIndex: Int32, x: Int32, y: Int32, w: Int32, h: Int32)
+    case setFrameExtents(top: Int32, bottom: Int32, left: Int32, right: Int32)
 }
 
 // MARK: - WaylandIntegration
@@ -122,6 +180,17 @@ class WaylandIntegration {
     private var surfaceGeometry: [UInt32: (x: Int, y: Int, width: Int, height: Int)] = [:]
     private var lastEmittedGeometry: [UInt32: (x: Int, y: Int, w: Int, h: Int, bufW: Int, bufH: Int)] = [:]
     private var popupSurfaceIds: Set<UInt32> = []
+    /// Surfaces with the zwlr_layer_surface_v1 role: placed by the shell at a
+    /// screen coordinate, drawn in their layer, never decorated or managed.
+    private var layerSurfaceIds: Set<UInt32> = []
+    /// The WAYLAND_TOPLEVEL_* bits last pushed per surface (diff guard).
+    private var surfaceStateCache: [UInt32: UInt32] = [:]
+    /// The zone-relative frame position last reported per surface.
+    private var surfacePositionCache: [UInt32: (Int32, Int32)] = [:]
+    private var workAreaCache: [Int32: (Int32, Int32, Int32, Int32)] = [:]
+    /// Surfaces whose client holds a keyboard-shortcuts inhibitor: every key
+    /// goes to them, the desktop's chords included.
+    private var shortcutsInhibitedSurfaces: Set<UInt32> = []
     private var outputScale: Int = 1
     private var shellDpi: Double = 1.0
     private var fractionalScale: Double = 1.0
@@ -193,6 +262,36 @@ class WaylandIntegration {
         enqueueCommand(.flushClients)
     }
     var onInteractiveResizeRequest: ((_ windowId: String, _ edges: UInt32) -> Void)?
+
+    // ─── Window state, layer shell, alpha, zones (UI thread) ─────────────
+
+    /// The shell's window state for a Wayland window, as WAYLAND_TOPLEVEL_*
+    /// bits (maximized, fullscreen, activated, minimized). Read right before
+    /// every configure and by syncAllToplevelStates, so the bits a client
+    /// sees are always the shell's current ones.
+    var stateProvider: ((_ windowId: String) -> UInt32)?
+    /// A client asked for a state change (WAYLAND_TOPLEVEL_REQUEST_*).
+    var onToplevelRequest: ((_ windowId: String, _ request: Int32) -> Void)?
+    /// A layer surface appeared (its texture is registered; buffers follow
+    /// through the ordinary commit path), changed its arrangement, got a new
+    /// buffer size, or went away.
+    var onNewLayerSurface: ((_ surfaceId: UInt32, _ textureId: Int, _ info: LayerSurfaceInfo) -> Void)?
+    var onLayerSurfaceChanged: ((_ surfaceId: UInt32, _ info: LayerSurfaceInfo) -> Void)?
+    var onLayerSurfaceBufferResized: ((_ surfaceId: UInt32, _ logicalWidth: Int, _ logicalHeight: Int) -> Void)?
+    var onLayerSurfaceDestroyed: ((_ surfaceId: UInt32) -> Void)?
+    /// wp_alpha_modifier: the surface (a window's, a popup's or a layer
+    /// surface's) wants its content drawn at this opacity.
+    var onSurfaceAlpha: ((_ surfaceId: UInt32, _ alpha: Double) -> Void)?
+    /// xx-zones: a client wants its window's frame at (x, y) of the work
+    /// area of output `outputIndex`. Answer with reportToplevelPosition.
+    var onToplevelPositionRequest: ((_ windowId: String, _ outputIndex: Int, _ x: Int, _ y: Int) -> Void)?
+    /// xdg_system_bell: ring for a window (nil = no surface named).
+    var onSystemBell: ((_ windowId: String?) -> Void)?
+    /// Screencopy is in flight: the desktop must present so the engine's
+    /// capture mirror refreshes. Same rider contract as the recorders.
+    nonisolated(unsafe) var onFramePumpNeedChanged: (() -> Void)?
+    private let screencopyInFlight = AtomicBox<Int>(0)
+    var needsFramePump: Bool { screencopyInFlight.value > 0 }
 
     // ─── Init / Lifecycle ───────────────────────────────────────────────
 
@@ -365,6 +464,57 @@ class WaylandIntegration {
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             this.queueEvent(.interactiveResizeRequest(surfaceId: surfaceId, edges: edges))
         }, ctx)
+
+        wayland_server_on_toplevel_request(server, { (ctx, surfaceId, request) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.toplevelRequest(surfaceId: surfaceId, request: request))
+        }, ctx)
+
+        wayland_server_on_new_layer_surface(server, { (ctx, surfaceId, info) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            guard let info = info else { return }
+            this.queueEvent(.newLayerSurface(surfaceId: surfaceId, info: LayerSurfaceInfo(info.pointee)))
+        }, ctx)
+
+        wayland_server_on_layer_surface_changed(server, { (ctx, surfaceId, info) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            guard let info = info else { return }
+            this.queueEvent(.layerSurfaceChanged(surfaceId: surfaceId, info: LayerSurfaceInfo(info.pointee)))
+        }, ctx)
+
+        wayland_server_on_layer_surface_destroy(server, { (ctx, surfaceId) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.layerSurfaceDestroy(surfaceId: surfaceId))
+        }, ctx)
+
+        wayland_server_on_surface_alpha(server, { (ctx, surfaceId, alpha) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.surfaceAlpha(surfaceId: surfaceId, alpha: alpha))
+        }, ctx)
+
+        wayland_server_on_toplevel_position_request(server, { (ctx, surfaceId, outputIndex, x, y) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.toplevelPositionRequest(surfaceId: surfaceId, outputIndex: outputIndex,
+                                                     x: x, y: y))
+        }, ctx)
+
+        wayland_server_on_system_bell(server, { (ctx, surfaceId) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.systemBell(surfaceId: surfaceId))
+        }, ctx)
+
+        wayland_server_on_shortcuts_inhibit(server, { (ctx, surfaceId, inhibited) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.shortcutsInhibit(surfaceId: surfaceId, inhibited: inhibited != 0))
+        }, ctx)
+
+        // Screencopy stays on the platform thread: the capture is read out
+        // of the engine on a worker and answered through the command queue.
+        wayland_server_on_screencopy_request(server, { (ctx, frameId, outputIndex, x, y, w, h) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.handleScreencopyRequest(frameId: frameId, outputIndex: outputIndex,
+                                         x: x, y: y, w: w, h: h)
+        }, ctx)
     }
 
     /// Queue an event from a platform-thread C callback for UI-thread tick().
@@ -466,6 +616,21 @@ class WaylandIntegration {
                 _ = wayland_server_text_input_commit_string(server, text)
             case .textInputPreedit(let text, let cursor):
                 _ = wayland_server_text_input_preedit(server, text, cursor)
+            case .setToplevelState(let surfaceId, let states):
+                wayland_server_set_toplevel_state(server, surfaceId, states)
+            case .screencopyDeliver(let frameId, let pixels, let stride):
+                wayland_server_screencopy_deliver(server, frameId, pixels, stride, 0)
+                pixels.deallocate()
+            case .screencopyFail(let frameId):
+                wayland_server_screencopy_fail(server, frameId)
+            case .toplevelPosition(let surfaceId, let x, let y):
+                wayland_server_toplevel_position(server, surfaceId, x, y)
+            case .toplevelPositionFailed(let surfaceId):
+                wayland_server_toplevel_position_failed(server, surfaceId)
+            case .setWorkArea(let outputIndex, let x, let y, let w, let h):
+                wayland_server_set_work_area(server, outputIndex, x, y, w, h)
+            case .setFrameExtents(let top, let bottom, let left, let right):
+                wayland_server_set_frame_extents(server, top, bottom, left, right)
             }
         }
     }
@@ -541,9 +706,221 @@ class WaylandIntegration {
                                       Double(x), Double(y),
                                       Double(w), Double(h))
                 }
+            case .toplevelRequest(let surfaceId, let request):
+                if let windowId = surfaceWindows[surfaceId],
+                   !popupSurfaceIds.contains(surfaceId),
+                   !layerSurfaceIds.contains(surfaceId) {
+                    onToplevelRequest?(windowId, request)
+                }
+            case .newLayerSurface(let surfaceId, let info):
+                processNewLayerSurface(surfaceId, info: info)
+            case .layerSurfaceChanged(let surfaceId, let info):
+                if layerSurfaceIds.contains(surfaceId) {
+                    onLayerSurfaceChanged?(surfaceId, info)
+                }
+            case .layerSurfaceDestroy(let surfaceId):
+                processLayerSurfaceDestroy(surfaceId)
+            case .surfaceAlpha(let surfaceId, let alpha):
+                onSurfaceAlpha?(surfaceId, alpha)
+            case .toplevelPositionRequest(let surfaceId, let outputIndex, let x, let y):
+                if let windowId = surfaceWindows[surfaceId],
+                   !popupSurfaceIds.contains(surfaceId),
+                   !layerSurfaceIds.contains(surfaceId) {
+                    onToplevelPositionRequest?(windowId, Int(outputIndex), Int(x), Int(y))
+                } else {
+                    enqueueCommand(.toplevelPositionFailed(surfaceId: surfaceId))
+                }
+            case .systemBell(let surfaceId):
+                onSystemBell?(surfaceId == 0 ? nil : surfaceWindows[surfaceId])
+            case .shortcutsInhibit(let surfaceId, let inhibited):
+                if inhibited {
+                    shortcutsInhibitedSurfaces.insert(surfaceId)
+                } else {
+                    shortcutsInhibitedSurfaces.remove(surfaceId)
+                }
             }
         }
     }
+
+    // ─── Layer surfaces (UI thread) ──────────────────────────────────────
+
+    private func processNewLayerSurface(_ surfaceId: UInt32, info: LayerSurfaceInfo) {
+        if let old = surfaceTextures[surfaceId] {
+            textureRegistry.unregisterTexture(engine: engine, id: old)
+        }
+        surfaceSizes.removeValue(forKey: surfaceId)
+        surfaceBufferScales.removeValue(forKey: surfaceId)
+        let textureId = textureRegistry.registerTexture(engine: engine)
+        textureRegistry.markAsWaylandSurface(id: textureId)
+        // Like a popup: its own surface, alpha kept (a bar is often
+        // translucent), no window geometry cropping.
+        textureRegistry.markAsPopupSurface(id: textureId)
+        surfaceTextures[surfaceId] = textureId
+        layerSurfaceIds.insert(surfaceId)
+        surfaceWindows[surfaceId] = "layer-\(surfaceId)"
+        onNewLayerSurface?(surfaceId, Int(textureId), info)
+    }
+
+    private func processLayerSurfaceDestroy(_ surfaceId: UInt32) {
+        guard layerSurfaceIds.remove(surfaceId) != nil else { return }
+        surfaceWindows.removeValue(forKey: surfaceId)
+        if let textureId = surfaceTextures.removeValue(forKey: surfaceId) {
+            textureRegistry.unregisterTexture(engine: engine, id: textureId)
+        }
+        surfaceSizes.removeValue(forKey: surfaceId)
+        surfaceBufferScales.removeValue(forKey: surfaceId)
+        onLayerSurfaceDestroyed?(surfaceId)
+    }
+
+    /// True for a surface with the layer-shell role.
+    func isLayerSurface(_ surfaceId: UInt32) -> Bool {
+        return layerSurfaceIds.contains(surfaceId)
+    }
+
+    /// True while the surface's client holds a keyboard-shortcuts inhibitor.
+    func shortcutsInhibited(surfaceId: UInt32) -> Bool {
+        return shortcutsInhibitedSurfaces.contains(surfaceId)
+    }
+
+    // ─── Window state (UI thread) ────────────────────────────────────────
+
+    /// Push the shell's state bits for this surface's window, if they
+    /// changed since the last push. Returns true when a command went out.
+    @discardableResult
+    func syncToplevelState(surfaceId: UInt32) -> Bool {
+        guard server != nil, let windowId = surfaceWindows[surfaceId],
+              !popupSurfaceIds.contains(surfaceId),
+              !layerSurfaceIds.contains(surfaceId),
+              let provider = stateProvider else { return false }
+        let states = provider(windowId)
+        if surfaceStateCache[surfaceId] == states { return false }
+        surfaceStateCache[surfaceId] = states
+        enqueueCommand(.setToplevelState(surfaceId: surfaceId, states: states))
+        return true
+    }
+
+    func syncToplevelState(windowId: String) {
+        guard let sid = surfaceId(forWindowId: windowId) else { return }
+        if syncToplevelState(surfaceId: sid) { enqueueCommand(.flushClients) }
+    }
+
+    /// Every Wayland window at once — called after a build, which is where
+    /// focus, minimize and maximize changes have all settled.
+    func syncAllToplevelStates() {
+        var any = false
+        for sid in surfaceWindows.keys {
+            if syncToplevelState(surfaceId: sid) { any = true }
+        }
+        if any { enqueueCommand(.flushClients) }
+    }
+
+    // ─── Zones (UI thread) ──────────────────────────────────────────────
+
+    /// Where a window's frame sits relative to its output's work area, for
+    /// xx-zones. Diff-guarded; cheap to call for every window every build.
+    func reportToplevelPosition(windowId: String, x: Int, y: Int) {
+        guard let sid = surfaceId(forWindowId: windowId) else { return }
+        let p = (Int32(x), Int32(y))
+        if let c = surfacePositionCache[sid], c.0 == p.0, c.1 == p.1 { return }
+        surfacePositionCache[sid] = p
+        enqueueCommand(.toplevelPosition(surfaceId: sid, x: p.0, y: p.1))
+        enqueueCommand(.flushClients)
+    }
+
+    func reportToplevelPositionFailed(windowId: String) {
+        guard let sid = surfaceId(forWindowId: windowId) else { return }
+        enqueueCommand(.toplevelPositionFailed(surfaceId: sid))
+        enqueueCommand(.flushClients)
+    }
+
+    /// An output's work area (its rect less reserved strips), global logical.
+    func setWorkArea(outputIndex: Int, x: Int, y: Int, width: Int, height: Int) {
+        let v = (Int32(x), Int32(y), Int32(width), Int32(height))
+        let key = Int32(outputIndex)
+        if let c = workAreaCache[key], c == v { return }
+        workAreaCache[key] = v
+        enqueueCommand(.setWorkArea(outputIndex: key, x: v.0, y: v.1, w: v.2, h: v.3))
+    }
+
+    func setFrameExtents(top: Int, bottom: Int, left: Int, right: Int) {
+        enqueueCommand(.setFrameExtents(top: Int32(top), bottom: Int32(bottom),
+                                        left: Int32(left), right: Int32(right)))
+    }
+
+    // ─── Screencopy (platform thread → worker → command queue) ──────────
+
+    /// grim & co. asked for the presented pixels of an output region. The
+    /// engine keeps a CPU mirror of the presented desktop for the X server's
+    /// GetImage; arming it makes the next few presents refill the mirror
+    /// (the shell's frame pump forces those presents on an idle desktop),
+    /// and the read after that is a fresh frame. Only the host view has a
+    /// mirror, so a secondary output's request fails honestly.
+    private func handleScreencopyRequest(frameId: UInt32, outputIndex: Int32,
+                                         x: Int32, y: Int32, w: Int32, h: Int32) {
+        #if os(Linux)
+        guard outputIndex == 0, let view = drmViewHandle, w > 0, h > 0 else {
+            enqueueCommand(.screencopyFail(frameId: frameId))
+            enqueueCommand(.flushClients)
+            return
+        }
+        screencopyInFlight.withLock { $0 += 1 }
+        onFramePumpNeedChanged?()
+        fl_drm_view_arm_capture(view)
+        let job = ScreencopyJob(frameId: frameId, view: view, x: x, y: y, w: w, h: h)
+        scheduleScreencopyStep(job)
+        #else
+        enqueueCommand(.screencopyFail(frameId: frameId))
+        #endif
+    }
+
+    #if os(Linux)
+    /// One screencopy in flight: the arm sets a four-present countdown, and
+    /// once it has run out the mirror holds a frame made after the request.
+    private final class ScreencopyJob {
+        let frameId: UInt32
+        let view: OpaquePointer
+        let x: Int32, y: Int32, w: Int32, h: Int32
+        let deadline = DispatchTime.now() + .milliseconds(2000)
+        var armedPresents = false
+        init(frameId: UInt32, view: OpaquePointer, x: Int32, y: Int32, w: Int32, h: Int32) {
+            self.frameId = frameId; self.view = view
+            self.x = x; self.y = y; self.w = w; self.h = h
+        }
+    }
+
+    private func scheduleScreencopyStep(_ job: ScreencopyJob) {
+        // Same laundering the shell uses for its own background work: the
+        // closure touches nothing but the job and the command queue's lock.
+        let work: () -> Void = { [self] in self.screencopyStep(job) }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + .milliseconds(16),
+            execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+    }
+
+    private func screencopyStep(_ job: ScreencopyJob) {
+        if !job.armedPresents, fl_drm_view_capture_active() == 0 {
+            job.armedPresents = true
+        }
+        guard job.armedPresents || DispatchTime.now() >= job.deadline else {
+            scheduleScreencopyStep(job)
+            return
+        }
+        let byteCount = Int(job.w) * Int(job.h) * 4
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: 16)
+        let ok = fl_drm_view_read_capture(job.x, job.y, job.w, job.h,
+                                          buf.assumingMemoryBound(to: UInt8.self),
+                                          Int32(byteCount))
+        screencopyInFlight.withLock { $0 -= 1 }
+        onFramePumpNeedChanged?()
+        if ok != 0 {
+            enqueueCommand(.screencopyDeliver(frameId: job.frameId, pixels: buf, stride: job.w * 4))
+        } else {
+            buf.deallocate()
+            enqueueCommand(.screencopyFail(frameId: job.frameId))
+        }
+        enqueueCommand(.flushClients)
+    }
+    #endif
 
     /// Map wp_cursor_shape_device_v1 shapes onto the DRM hardware cursor's
     /// available bitmaps. Anything without a matching bitmap falls back to
@@ -614,10 +991,15 @@ class WaylandIntegration {
         // Notify shell of size changes
         let sizeChanged = prevSize.map { $0.0 != width || $0.1 != height } ?? true
         let scaleChanged = prevScale.map { $0 != bufferScale } ?? true
+        let isLayer = layerSurfaceIds.contains(surfaceId)
         if sizeChanged || scaleChanged {
             if let windowId = surfaceWindows[surfaceId] {
                 let isPopup = popupSurfaceIds.contains(surfaceId)
-                if isPopup {
+                if isLayer {
+                    onLayerSurfaceBufferResized?(surfaceId,
+                                                 Int(Double(width) / effectiveScale),
+                                                 Int(Double(height) / effectiveScale))
+                } else if isPopup {
                     let logicalW = Int(Double(width) / effectiveScale)
                     let logicalH = Int(Double(height) / effectiveScale)
                     let geo = surfaceGeometry[surfaceId]
@@ -639,7 +1021,7 @@ class WaylandIntegration {
         }
 
         // Emit geometry callback for toplevels
-        if !popupSurfaceIds.contains(surfaceId),
+        if !popupSurfaceIds.contains(surfaceId), !isLayer,
            let windowId = surfaceWindows[surfaceId] {
             let bufLogW: Int
             let bufLogH: Int
@@ -685,6 +1067,7 @@ class WaylandIntegration {
             if now - last >= resizeIntervalNs {
                 pendingResize.removeValue(forKey: surfaceId)
                 lastResizeTime[surfaceId] = now
+                syncToplevelState(surfaceId: surfaceId)
                 enqueueCommand(.configureToplevel(surfaceId: surfaceId,
                                                    width: Int32(pending.width),
                                                    height: Int32(pending.height)))
@@ -751,7 +1134,7 @@ class WaylandIntegration {
         // the same trap the dma-buf path sidesteps by importing with an opaque
         // fourcc, and that the X server's shadow blit handles the same way.
         // Popups keep their alpha: they need it for shadows and rounded corners.
-        let isPopup = popupSurfaceIds.contains(surfaceId)
+        let isPopup = popupSurfaceIds.contains(surfaceId) || layerSurfaceIds.contains(surfaceId)
         let hasAlpha = format == kShmFormatARGB8888
         let keepAlpha = isPopup && hasAlpha
         let px = pixels.assumingMemoryBound(to: UInt8.self)
@@ -790,6 +1173,9 @@ class WaylandIntegration {
         surfaceGeometry.removeValue(forKey: surfaceId)
         lastEmittedGeometry.removeValue(forKey: surfaceId)
         surfaceOutputsMaskCache.removeValue(forKey: surfaceId)
+        surfaceStateCache.removeValue(forKey: surfaceId)
+        surfacePositionCache.removeValue(forKey: surfaceId)
+        shortcutsInhibitedSurfaces.remove(surfaceId)
     }
 
     private func processTitleChanged(_ surfaceId: UInt32, title: String) {
@@ -1393,6 +1779,7 @@ class WaylandIntegration {
         lastResizeTime[surfaceId] = now
         let sw = Int32(Double(width) * shellDpi / fractionalScale)
         let sh = Int32(Double(height) * shellDpi / fractionalScale)
+        syncToplevelState(surfaceId: surfaceId)
         enqueueCommand(.configureToplevel(surfaceId: surfaceId, width: sw, height: sh))
         enqueueCommand(.flushClients)
     }
@@ -1403,6 +1790,7 @@ class WaylandIntegration {
         lastResizeTime[surfaceId] = DispatchTime.now().uptimeNanoseconds
         let sw = Int32(Double(width) * shellDpi / fractionalScale)
         let sh = Int32(Double(height) * shellDpi / fractionalScale)
+        syncToplevelState(surfaceId: surfaceId)
         enqueueCommand(.configureToplevel(surfaceId: surfaceId, width: sw, height: sh))
         enqueueCommand(.flushClients)
     }
@@ -1413,6 +1801,7 @@ class WaylandIntegration {
         lastResizeTime[surfaceId] = DispatchTime.now().uptimeNanoseconds
         let sw = Int32(Double(width) * shellDpi / fractionalScale)
         let sh = Int32(Double(height) * shellDpi / fractionalScale)
+        syncToplevelState(surfaceId: surfaceId)
         enqueueCommand(.configureToplevel(surfaceId: surfaceId, width: sw, height: sh))
         enqueueCommand(.flushClients)
     }
@@ -1423,6 +1812,7 @@ class WaylandIntegration {
         lastResizeTime[surfaceId] = DispatchTime.now().uptimeNanoseconds
         let sw = Int32(Double(width) * shellDpi / fractionalScale)
         let sh = Int32(Double(height) * shellDpi / fractionalScale)
+        syncToplevelState(surfaceId: surfaceId)
         enqueueCommand(.configureToplevel(surfaceId: surfaceId, width: sw, height: sh))
         enqueueCommand(.flushClients)
     }

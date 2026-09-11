@@ -172,6 +172,7 @@ void wayland_clipboard_set(struct WaylandServer* server, void* owner,
     /* Broadcast to BOTH protocols so the copy is visible everywhere. */
     wayland_data_device_broadcast_selection(server);
     wayland_data_control_broadcast_selection(server);
+    wayland_ext_data_control_broadcast_selection(server);
 }
 
 /* Clear the selection when its owning source is being destroyed. Does NOT
@@ -186,6 +187,7 @@ static void clipboard_clear_if_owner(struct WaylandServer* server, void* owner) 
     server->clipboard.serial++;
     wayland_data_device_broadcast_selection(server);
     wayland_data_control_broadcast_selection(server);
+    wayland_ext_data_control_broadcast_selection(server);
 }
 
 /* ========================================================================== */

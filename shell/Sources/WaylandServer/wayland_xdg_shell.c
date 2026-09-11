@@ -145,13 +145,19 @@ static void xdg_toplevel_destroy_handler(struct wl_client* client,
      * leave it dangling past the surface's own free. */
     if (surface && surface->xdg_toplevel == resource) {
         struct WaylandServer* server = surface->server;
-        /* Unmapping: the surface leaves the output. */
+        /* Unmapping: the surface leaves the output, the taskbars close
+         * their handles, the zone item goes inert. */
+        wayland_foreign_toplevel_unmap(server, surface);
+        wayland_zones_surface_destroyed(server, surface);
+        wayland_xdg_foreign_surface_destroyed(server, surface);
         wayland_output_send_leave(server, surface);
         if (server->cb.on_toplevel_destroy) {
             server->cb.on_toplevel_destroy(server->cb_ctx,
                                                surface->id);
         }
         surface->xdg_toplevel = NULL;
+        surface->last_conf_w = 0;
+        surface->last_conf_h = 0;
     }
     wl_resource_destroy(resource);
 }
@@ -161,6 +167,9 @@ static void xdg_toplevel_destroy_handler(struct wl_client* client,
 static void xdg_toplevel_resource_destroy(struct wl_resource* resource) {
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
     if (surface && surface->xdg_toplevel == resource) {
+        wayland_foreign_toplevel_unmap(surface->server, surface);
+        wayland_zones_surface_destroyed(surface->server, surface);
+        wayland_xdg_foreign_surface_destroyed(surface->server, surface);
         surface->xdg_toplevel = NULL;
     }
 }
@@ -185,6 +194,7 @@ static void xdg_toplevel_set_title_handler(struct wl_client* client,
         server->cb.on_title_changed(server->cb_ctx,
                                         surface->id, title);
     }
+    wayland_foreign_toplevel_title(surface);
 }
 
 static void xdg_toplevel_set_app_id_handler(struct wl_client* client,
@@ -201,6 +211,7 @@ static void xdg_toplevel_set_app_id_handler(struct wl_client* client,
         server->cb.on_app_id_changed(server->cb_ctx,
                                          surface->id, app_id);
     }
+    wayland_foreign_toplevel_app_id(surface);
 }
 
 static void xdg_toplevel_show_window_menu_handler(struct wl_client* client,
@@ -274,14 +285,29 @@ static void xdg_toplevel_set_min_size_handler(struct wl_client* client,
     }
 }
 
+/* The client's own window-state requests. The shell owns the state: it
+ * applies its policy and pushes the outcome back (set_toplevel_state), and
+ * the configure that follows is what tells the client whether it got its
+ * wish — a client that reads the state from the configure, as xdg-shell
+ * says to, sees exactly what the shell did. */
+static void toplevel_request(struct wl_resource* resource, int request) {
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (!surface) return;
+    struct WaylandServer* server = surface->server;
+    if (server->cb.on_toplevel_request)
+        server->cb.on_toplevel_request(server->cb_ctx, surface->id, request);
+}
+
 static void xdg_toplevel_set_maximized_handler(struct wl_client* client,
                                                struct wl_resource* resource) {
-    /* stub */
+    (void)client;
+    toplevel_request(resource, WAYLAND_TOPLEVEL_REQUEST_MAXIMIZE);
 }
 
 static void xdg_toplevel_unset_maximized_handler(struct wl_client* client,
                                                  struct wl_resource* resource) {
-    /* stub */
+    (void)client;
+    toplevel_request(resource, WAYLAND_TOPLEVEL_REQUEST_UNMAXIMIZE);
 }
 
 static void xdg_toplevel_set_fullscreen_handler(struct wl_client* client,
@@ -307,7 +333,8 @@ static void xdg_toplevel_unset_fullscreen_handler(struct wl_client* client,
 
 static void xdg_toplevel_set_minimized_handler(struct wl_client* client,
                                                struct wl_resource* resource) {
-    /* stub */
+    (void)client;
+    toplevel_request(resource, WAYLAND_TOPLEVEL_REQUEST_MINIMIZE);
 }
 
 static const struct xdg_toplevel_interface xdg_toplevel_impl = {
@@ -422,6 +449,24 @@ static void xdg_surface_get_toplevel(struct wl_client* client,
                                    xdg_toplevel_resource_destroy);
     surface->xdg_toplevel = toplevel;
     surface->had_role = 1;
+    /* The shell opens every window maximized (its Hyprland-like default),
+     * so the first configure says so before the shell has pushed anything. */
+    surface->toplevel_states = WAYLAND_TOPLEVEL_ACTIVATED | WAYLAND_TOPLEVEL_MAXIMIZED;
+    surface->last_conf_w = 0;
+    surface->last_conf_h = 0;
+
+    /* What the window buttons can do (xdg-shell v5). No window menu: the
+     * shell has no server-side one to show. */
+    if (wl_resource_get_version(toplevel) >= XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION) {
+        struct wl_array caps;
+        wl_array_init(&caps);
+        uint32_t* c;
+        c = wl_array_add(&caps, sizeof(*c)); *c = XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE;
+        c = wl_array_add(&caps, sizeof(*c)); *c = XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN;
+        c = wl_array_add(&caps, sizeof(*c)); *c = XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE;
+        xdg_toplevel_send_wm_capabilities(toplevel, &caps);
+        wl_array_release(&caps);
+    }
 
     /* The surface is (about to be) shown on our output. */
     wayland_output_send_enter(server, surface);
@@ -533,6 +578,9 @@ static void xdg_surface_get_popup_handler(struct wl_client* client,
     surface->parent_surface_id = parent_id;
     surface->popup_x = popup_x;
     surface->popup_y = popup_y;
+    surface->popup_w = popup_w;
+    surface->popup_h = popup_h;
+    surface->popup_parent_pending = (parent == NULL);
 
     /* Create the xdg_popup resource. */
     struct wl_resource* popup = wl_resource_create(client,
@@ -556,8 +604,10 @@ static void xdg_surface_get_popup_handler(struct wl_client* client,
     xdg_surface_send_configure(resource,
                                 wayland_server_next_serial(server));
 
-    /* Notify compositor of new popup. */
-    if (server->cb.on_new_popup) {
+    /* Notify compositor of new popup — unless the parent is still to come
+     * through the layer shell, in which case that request (or the initial
+     * commit, if it never does) tells the shell. */
+    if (!surface->popup_parent_pending && server->cb.on_new_popup) {
         server->cb.on_new_popup(server->cb_ctx, surface->id,
                                      parent_id, popup_x, popup_y,
                                      popup_w, popup_h);
@@ -676,5 +726,69 @@ static void xdg_wm_base_bind(struct wl_client* client, void* data,
 
 void wayland_xdg_shell_init(struct WaylandServer* server) {
     server->xdg_wm_base_global = wl_global_create(server->display,
-        &xdg_wm_base_interface, 5, server, xdg_wm_base_bind);
+        &xdg_wm_base_interface, 7, server, xdg_wm_base_bind);
+}
+
+/* ==========================================================================
+ * Configure + state
+ * ========================================================================== */
+
+void wayland_xdg_shell_configure(struct WaylandServer* server,
+                                 struct WaylandSurface* surface,
+                                 int32_t w, int32_t h) {
+    if (!surface->xdg_toplevel || !surface->xdg_surface) return;
+    if (w <= 0 || h <= 0) {
+        w = surface->last_conf_w;
+        h = surface->last_conf_h;
+        if (w <= 0 || h <= 0) return;   /* nothing to repeat yet */
+    }
+    surface->last_conf_w = w;
+    surface->last_conf_h = h;
+
+    struct wl_array states;
+    wl_array_init(&states);
+    uint32_t* s;
+    /* ACTIVATED unconditionally, on purpose. Keyboard focus here is lazy
+     * (wl_keyboard.enter rides the first keystroke) and agent-owned windows
+     * take injected input while a human's window has the focus; Chromium
+     * drops keys for a window it believes inactive, so the honest bit would
+     * break exactly those. Foreign-toplevel handles report the real one. */
+    s = wl_array_add(&states, sizeof(uint32_t));
+    *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+    if (surface->toplevel_states & WAYLAND_TOPLEVEL_MAXIMIZED) {
+        /* Also what makes Chrome skip its CSD shadow padding, so the
+         * buffer matches the configured size exactly (Hyprland's trick). */
+        s = wl_array_add(&states, sizeof(uint32_t));
+        *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
+    }
+    if (surface->toplevel_states & WAYLAND_TOPLEVEL_FULLSCREEN) {
+        s = wl_array_add(&states, sizeof(uint32_t));
+        *s = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    }
+    if (surface->toplevel_states & WAYLAND_TOPLEVEL_RESIZING) {
+        s = wl_array_add(&states, sizeof(uint32_t));
+        *s = XDG_TOPLEVEL_STATE_RESIZING;
+    }
+    xdg_toplevel_send_configure(surface->xdg_toplevel, w, h, &states);
+    wl_array_release(&states);
+
+    xdg_surface_send_configure(surface->xdg_surface,
+                               wayland_server_next_serial(server));
+}
+
+void wayland_xdg_shell_set_states(struct WaylandServer* server,
+                                  struct WaylandSurface* surface,
+                                  uint32_t states) {
+    uint32_t old = surface->toplevel_states;
+    if (old == states) return;
+    surface->toplevel_states = states;
+    const uint32_t configure_bits = WAYLAND_TOPLEVEL_MAXIMIZED |
+                                    WAYLAND_TOPLEVEL_FULLSCREEN |
+                                    WAYLAND_TOPLEVEL_RESIZING;
+    if ((old ^ states) & configure_bits) {
+        /* A configure-visible bit flipped without a resize (a maximize that
+         * changed nothing, a snap): the client still has to be told. */
+        wayland_xdg_shell_configure(server, surface, 0, 0);
+    }
+    wayland_foreign_toplevel_state(surface);
 }

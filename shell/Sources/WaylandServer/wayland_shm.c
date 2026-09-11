@@ -57,6 +57,13 @@ static void shm_buffer_destroy(struct wl_resource* resource) {
     }
 }
 
+struct ShmBuffer* wayland_shm_buffer_from_resource(struct wl_resource* buffer) {
+    if (!buffer) return NULL;
+    if (!wl_resource_instance_of(buffer, &wl_buffer_interface, &shm_buffer_impl))
+        return NULL;
+    return wl_resource_get_user_data(buffer);
+}
+
 /* ------------------------------------------------------------------ */
 /* wl_shm_pool implementation                                           */
 /* ------------------------------------------------------------------ */
@@ -197,7 +204,12 @@ static void shm_create_pool(struct wl_client* client,
     pool->size = (size_t)size;
     pool->refcount = 1;  /* The pool resource itself holds a ref */
 
-    pool->data = mmap(NULL, pool->size, PROT_READ, MAP_SHARED, fd, 0);
+    /* Read-write, not read-only: wlr-screencopy fills a client's buffer
+     * with the screen, and that is the one write into a pool we make. A
+     * client that passed a read-only fd gets a read-only mapping anyway. */
+    pool->data = mmap(NULL, pool->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (pool->data == MAP_FAILED)
+        pool->data = mmap(NULL, pool->size, PROT_READ, MAP_SHARED, fd, 0);
     if (pool->data == MAP_FAILED) {
         fprintf(stderr, "[wayland_shm] mmap failed for pool fd=%d size=%d\n", fd, size);
         close(fd);
@@ -259,8 +271,7 @@ static void shm_bind(struct wl_client* client, void* data,
 /* ------------------------------------------------------------------ */
 
 void wayland_shm_init(struct WaylandServer* server) {
-    /* wl_shm version 1 is sufficient — version 2 adds release() which
-     * we implement as a no-op. Advertise version 1 for max compatibility. */
+    /* Version 2 adds release(), implemented above. */
     server->shm_global = wl_global_create(server->display,
-        &wl_shm_interface, 1, server, shm_bind);
+        &wl_shm_interface, 2, server, shm_bind);
 }

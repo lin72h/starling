@@ -16,13 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Stub for zwp_tablet_tool_v2_interface — referenced by the generated
- * cursor-shape protocol code (get_tablet_tool_v2 argument type).
- * We don't implement the tablet-v2 protocol, but need the symbol to link. */
-struct wl_interface zwp_tablet_tool_v2_interface = {
-    "zwp_tablet_tool_v2", 1, 0, NULL, 0, NULL,
-};
-
 /* ========================================================================== */
 /* wp_cursor_shape_device_v1 (per-pointer shape setter)                       */
 /* ========================================================================== */

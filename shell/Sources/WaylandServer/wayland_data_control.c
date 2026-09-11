@@ -182,6 +182,7 @@ static void dc_source_resource_destroy(struct wl_resource* resource) {
         s->server->clipboard.serial++;
         wayland_data_device_broadcast_selection(s->server);
         wayland_data_control_broadcast_selection(s->server);
+        wayland_ext_data_control_broadcast_selection(s->server);
     }
     for (int i = 0; i < s->mime_count; i++) free(s->mime_types[i]);
     free(s);
