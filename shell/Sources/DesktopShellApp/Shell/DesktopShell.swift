@@ -1814,6 +1814,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     ownerId = wsId
                     isWorkspaceWindow = true
                 }
+                // A new window from the client whose fullscreen window was on
+                // screen joins that window's space (macOS: an app's new window
+                // opens in its own fullscreen space). addWindow hopped to a
+                // user desktop, which yanked the fullscreen window off the
+                // screen the moment its app opened a dialog — and left a
+                // client's fullscreen surface uncovered for good once the
+                // dialog went, because nothing ever hopped back.
+                if ownerId == nil,
+                   case .fullscreen(let fsId) = self.windowManager.spaces[spaceBefore].kind,
+                   let fsClient = wayland.clientId(forWindowId: fsId), fsClient == clientId,
+                   let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                    win.spaceId = self.windowManager.spaces[spaceBefore].id
+                    if self.windowManager.activeSpaceIndex != spaceBefore {
+                        self.windowManager.switchToSpace(spaceBefore)
+                    }
+                    self.windowManager.bringToFront(windowId)
+                }
                 if let ownerId,
                    let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
                     win.ownerAgentId = ownerId

@@ -175,6 +175,7 @@ class WaylandIntegration {
     private var surfaceWindows: [UInt32: String] = [:]    // surfaceId → windowId
     private var surfaceAppIds: [UInt32: String] = [:]     // surfaceId → xdg app_id
     private var surfacePids: [UInt32: pid_t] = [:]        // surfaceId → client pid
+    private var surfaceClients: [UInt32: UInt64] = [:]    // surfaceId → wl_client id
     private var surfaceSizes: [UInt32: (Int, Int)] = [:]  // surfaceId → (width, height) in buffer pixels
     private var surfaceBufferScales: [UInt32: Int] = [:]  // surfaceId → buffer_scale from client
     private var surfaceGeometry: [UInt32: (x: Int, y: Int, width: Int, height: Int)] = [:]
@@ -962,6 +963,7 @@ class WaylandIntegration {
             let pid = wayland_server_surface_pid(server, surfaceId)
             if pid > 0 { surfacePids[surfaceId] = pid }
         }
+        surfaceClients[surfaceId] = clientId
         if let windowId = onNewWindow?(surfaceId, Int(textureId), "Wayland App", clientId) {
             surfaceWindows[surfaceId] = windowId
             // An app_id that arrived before the window existed.
@@ -1169,6 +1171,7 @@ class WaylandIntegration {
 
         surfaceSizes.removeValue(forKey: surfaceId)
         surfaceAppIds.removeValue(forKey: surfaceId)
+        surfaceClients.removeValue(forKey: surfaceId)
         surfaceBufferScales.removeValue(forKey: surfaceId)
         surfaceGeometry.removeValue(forKey: surfaceId)
         lastEmittedGeometry.removeValue(forKey: surfaceId)
@@ -1908,6 +1911,13 @@ class WaylandIntegration {
 
     func windowId(forSurfaceId surfaceId: UInt32) -> String? {
         return surfaceWindows[surfaceId]
+    }
+
+    /// The connection a window's surface belongs to (the same opaque id
+    /// onNewWindow reported), nil for a window that is not a Wayland toplevel.
+    func clientId(forWindowId windowId: String) -> UInt64? {
+        guard let sid = surfaceId(forWindowId: windowId) else { return nil }
+        return surfaceClients[sid]
     }
 
 }
