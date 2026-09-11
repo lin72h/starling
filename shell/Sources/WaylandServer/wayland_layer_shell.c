@@ -359,15 +359,16 @@ void wayland_layer_shell_commit(struct WaylandServer* server,
     layer_compute_info(server, ls, &info);
 
     /* The initial commit — no buffer yet — is answered with a configure;
-     * later commits get one only when the size we ask for changed. */
+     * later commits get one only when the size we ask for changed. A
+     * surface lent here by another role was configured by that role. */
     int size_changed = info.width != ls->last_info.width ||
                        info.height != ls->last_info.height;
-    if (!ls->configured || size_changed) {
+    if (ls->resource && (!ls->configured || size_changed)) {
         zwlr_layer_surface_v1_send_configure(ls->resource,
             wayland_server_next_serial(server),
             (uint32_t)info.width, (uint32_t)info.height);
-        ls->configured = 1;
     }
+    ls->configured = 1;
 
     if (!ls->announced) {
         ls->announced = 1;
@@ -400,7 +401,37 @@ void wayland_layer_shell_output_removed(struct WaylandServer* server,
     struct WaylandLayerSurface* ls, *tmp;
     wl_list_for_each_safe(ls, tmp, &server->layer_surfaces, link) {
         if (ls->output_index != output_index || !ls->surface) continue;
-        zwlr_layer_surface_v1_send_closed(ls->resource);
+        if (ls->resource) zwlr_layer_surface_v1_send_closed(ls->resource);
         layer_surface_teardown(ls);
     }
+}
+
+struct WaylandLayerSurface* wayland_layer_shell_adopt(struct WaylandServer* server,
+                                                      struct WaylandSurface* surface,
+                                                      int output_index, uint32_t layer,
+                                                      uint32_t anchor,
+                                                      uint32_t keyboard_interactivity,
+                                                      const char* namespace_) {
+    struct WaylandLayerSurface* ls = calloc(1, sizeof(*ls));
+    if (!ls) return NULL;
+    ls->server = server;
+    ls->surface = surface;
+    ls->output_index = (output_index >= 0 && output_index < server->output_count)
+                           ? output_index : 0;
+    ls->pending.layer = layer;
+    ls->pending.anchor = anchor;
+    ls->pending.keyboard_interactivity = keyboard_interactivity;
+    ls->pending.exclusive_zone = -1;
+    snprintf(ls->namespace_, sizeof(ls->namespace_), "%s", namespace_ ? namespace_ : "");
+    wl_list_insert(&server->layer_surfaces, &ls->link);
+    surface->layer = ls;
+    surface->had_role = 1;
+    return ls;
+}
+
+void wayland_layer_shell_release(struct WaylandLayerSurface* ls) {
+    if (!ls) return;
+    layer_surface_teardown(ls);
+    wl_list_remove(&ls->link);
+    free(ls);
 }

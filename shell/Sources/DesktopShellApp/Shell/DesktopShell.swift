@@ -275,6 +275,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The layer surface holding the keyboard: exclusive interactivity, or
     /// on-demand after a click on it. nil = the focused window has it.
     var _layerKeyboardSurface: UInt32? = nil
+    /// ext_session_lock: a locker holds the session. The desktop draws its
+    /// lock surfaces over black and nothing else, and no key or click
+    /// reaches anything but them — until the locker unlocks.
+    var _sessionLocked = false
 
 
     // Screen dimensions — the logical size of the HOST output, i.e. the panel
@@ -2197,6 +2201,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
                 return true
             }
+            // Locked: only a lock surface may hear keys, and it was handled
+            // above (exclusive interactivity). Everything else is swallowed.
+            if self._sessionLocked { return true }
             // A client holding a keyboard-shortcuts inhibitor for the focused
             // window (a VM viewer, a remote desktop) gets the chords too.
             if let wl = waylandIntegration,
@@ -3823,6 +3830,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if let dl = displayLayout, dl.outputs.count > 1,
            secondaryViewOutputs.isEmpty {
             return _buildVirtualDesktopOverview(dl)
+        }
+
+        // A locked session shows the locker's surfaces and black — never
+        // the desktop, not even for a frame while the locker is still
+        // drawing. The pointer stops at the black; keys stop in routeKey.
+        if _sessionLocked {
+            _layoutLayerSurfaces()
+            var locked: [Widget] = [
+                Positioned(fill: (), child: Listener(
+                    onPointerHover: { _ in DesktopCursor.setShape(.default) },
+                    behavior: .opaque,
+                    child: ColoredBox(color: Color(0xFF000000), child: SizedBox(expand: ()))))
+            ]
+            locked += _layerSurfaceWidgets(layers: [3], stashedLayerPopups: [:],
+                                           namespace: "session-lock")
+            _syncWaylandWindowState()
+            return Stack(key: ValueKey("session-lock"), fit: .expand, children: locked)
         }
 
         // Build window widgets sorted by z-index

@@ -124,6 +124,7 @@ private enum WaylandEvent: @unchecked Sendable {
     case toplevelPositionRequest(surfaceId: UInt32, outputIndex: Int32, x: Int32, y: Int32)
     case systemBell(surfaceId: UInt32)
     case shortcutsInhibit(surfaceId: UInt32, inhibited: Bool)
+    case sessionLock(locked: Bool)
 }
 
 /// Commands produced on the UI thread, executed on the platform thread.
@@ -288,6 +289,10 @@ class WaylandIntegration {
     var onToplevelPositionRequest: ((_ windowId: String, _ outputIndex: Int, _ x: Int, _ y: Int) -> Void)?
     /// xdg_system_bell: ring for a window (nil = no surface named).
     var onSystemBell: ((_ windowId: String?) -> Void)?
+    /// ext_session_lock: locked (true) or unlocked. Lock surfaces arrive as
+    /// overlay layer surfaces named "session-lock"; while locked the shell
+    /// draws nothing but those, and black.
+    var onSessionLock: ((_ locked: Bool) -> Void)?
     /// Screencopy is in flight: the desktop must present so the engine's
     /// capture mirror refreshes. Same rider contract as the recorders.
     nonisolated(unsafe) var onFramePumpNeedChanged: (() -> Void)?
@@ -507,6 +512,11 @@ class WaylandIntegration {
         wayland_server_on_shortcuts_inhibit(server, { (ctx, surfaceId, inhibited) in
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             this.queueEvent(.shortcutsInhibit(surfaceId: surfaceId, inhibited: inhibited != 0))
+        }, ctx)
+
+        wayland_server_on_session_lock(server, { (ctx, locked) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.sessionLock(locked: locked != 0))
         }, ctx)
 
         // Screencopy stays on the platform thread: the capture is read out
@@ -739,6 +749,8 @@ class WaylandIntegration {
                 } else {
                     shortcutsInhibitedSurfaces.remove(surfaceId)
                 }
+            case .sessionLock(let locked):
+                onSessionLock?(locked)
             }
         }
     }

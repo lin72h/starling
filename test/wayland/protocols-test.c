@@ -53,6 +53,7 @@
 #include "ext-image-copy-capture-v1-client-protocol.h"
 #include "security-context-v1-client-protocol.h"
 #include "wlr-output-management-unstable-v1-client-protocol.h"
+#include "ext-session-lock-v1-client-protocol.h"
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -146,6 +147,8 @@ static struct {
     uint32_t inhibit_surface;
     int inhibited;
     int inhibit_count;
+    int locked;
+    int lock_count;
     char title[64];
 } seen;
 
@@ -204,6 +207,10 @@ static void cb_inhibit(void* ctx, uint32_t sid, int inhibited) {
     (void)ctx;
     LOCKED(seen.inhibit_surface = sid; seen.inhibited = inhibited; seen.inhibit_count++);
 }
+static void cb_lock(void* ctx, int locked) {
+    (void)ctx;
+    LOCKED(seen.locked = locked; seen.lock_count++);
+}
 
 /* ------------------------------------------------------------------------ */
 /* The client                                                               */
@@ -232,6 +239,7 @@ static struct ext_output_image_capture_source_manager_v1* capsrc_mgr;
 static struct ext_image_copy_capture_manager_v1* copycap_mgr;
 static struct wp_security_context_manager_v1* secctx_mgr;
 static struct zwlr_output_manager_v1* outmgr;
+static struct ext_session_lock_manager_v1* lock_mgr;
 static struct wl_registry* registry;
 static uint32_t outmgr_name, outmgr_version;
 
@@ -270,6 +278,7 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     BIND(capsrc_mgr, ext_output_image_capture_source_manager_v1, 1);
     BIND(copycap_mgr, ext_image_copy_capture_manager_v1, 1);
     BIND(secctx_mgr, wp_security_context_manager_v1, 1);
+    BIND(lock_mgr, ext_session_lock_manager_v1, 1);
     /* Bound later, listener first: its heads arrive the moment it binds. */
     if (strcmp(iface, zwlr_output_manager_v1_interface.name) == 0) {
         outmgr_name = id;
@@ -352,7 +361,7 @@ static void test_globals(void) {
         { "ext_image_copy_capture_manager_v1", 1 },
         { "wp_color_representation_manager_v1", 1 },
         { "wp_security_context_manager_v1", 1 },
-        { "zwlr_output_manager_v1", 4 },
+        { "zwlr_output_manager_v1", 4 }, { "ext_session_lock_manager_v1", 1 },
     };
     for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
         uint32_t v = global_version(want[i].name);
@@ -1089,6 +1098,59 @@ static void test_security_context(void) {
     unlink(path);
 }
 
+/* session lock: locked, a lock surface as an overlay layer surface, a
+ * second locker refused, unlock. */
+static volatile int lk_locked, lk_finished, lk_configured;
+static uint32_t lk_w, lk_h;
+static void lk_locked_cb(void* d, struct ext_session_lock_v1* l) { (void)d; (void)l; lk_locked = 1; }
+static void lk_finished_cb(void* d, struct ext_session_lock_v1* l) { (void)d; (void)l; lk_finished = 1; }
+static const struct ext_session_lock_v1_listener lk_listener = { lk_locked_cb, lk_finished_cb };
+static void lks_configure(void* d, struct ext_session_lock_surface_v1* s, uint32_t serial, uint32_t w, uint32_t h) {
+    (void)d; ext_session_lock_surface_v1_ack_configure(s, serial); lk_w = w; lk_h = h; lk_configured = 1;
+}
+static const struct ext_session_lock_surface_v1_listener lks_listener = { lks_configure };
+
+static void test_session_lock(void) {
+    struct ext_session_lock_v1* lock = ext_session_lock_manager_v1_lock(lock_mgr);
+    ext_session_lock_v1_add_listener(lock, &lk_listener, NULL);
+    CHECK(wait_for(&lk_locked, 500), "locked");
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.lock_count > 0 && seen.locked); usleep(10000); }
+    CHECK(got, "shell told the session is locked");
+
+    struct wl_surface* s = wl_compositor_create_surface(compositor);
+    struct ext_session_lock_surface_v1* ls = ext_session_lock_v1_get_lock_surface(lock, s, output);
+    ext_session_lock_surface_v1_add_listener(ls, &lks_listener, NULL);
+    CHECK(wait_for(&lk_configured, 500), "lock surface configured");
+    CHECK(lk_w == 1280 && lk_h == 800, "configured to the output: %ux%u", lk_w, lk_h);
+    int layers_before; LOCKED(layers_before = seen.layer_count);
+    struct wl_buffer* b = make_buffer((int)lk_w, (int)lk_h, WL_SHM_FORMAT_XRGB8888, NULL);
+    wl_surface_attach(s, b, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.layer_count > layers_before); usleep(10000); }
+    CHECK(got, "the lock surface reached the shell as a layer surface");
+    CHECK(seen.layer_info.layer == 3 && seen.layer_info.keyboard_interactivity == 1 &&
+          strcmp(seen.layer_info.namespace_, "session-lock") == 0,
+          "overlay, exclusive keys, namespace %s", seen.layer_info.namespace_);
+    CHECK(seen.layer_info.anchor == 15, "anchored to every edge (%u)", seen.layer_info.anchor);
+
+    struct ext_session_lock_v1* second = ext_session_lock_manager_v1_lock(lock_mgr);
+    ext_session_lock_v1_add_listener(second, &lk_listener, NULL);
+    CHECK(wait_for(&lk_finished, 500), "a second locker is finished");
+    ext_session_lock_v1_destroy(second);
+
+    ext_session_lock_surface_v1_destroy(ls);
+    wl_surface_destroy(s);
+    ext_session_lock_v1_unlock_and_destroy(lock);
+    wl_display_roundtrip(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.lock_count > 1 && !seen.locked); usleep(10000); }
+    CHECK(got, "shell told the session is unlocked");
+    wl_buffer_destroy(b);
+}
+
 /* The toplevel goes: the taskbars hear closed. */
 static void test_unmap(void) {
     ftl_closed = 0;
@@ -1120,6 +1182,7 @@ int main(void) {
     wayland_server_on_toplevel_position_request(server, cb_position, NULL);
     wayland_server_on_system_bell(server, cb_bell, NULL);
     wayland_server_on_shortcuts_inhibit(server, cb_inhibit, NULL);
+    wayland_server_on_session_lock(server, cb_lock, NULL);
     pthread_create(&server_thread, NULL, server_main, NULL);
 
     dpy = wl_display_connect(wayland_server_get_socket_name(server));
@@ -1146,6 +1209,7 @@ int main(void) {
         test_output_management();
         test_image_copy_capture();
         test_security_context();
+        test_session_lock();
         test_unmap();
     } else {
         CHECK(0, "core globals missing; protocol tests skipped");

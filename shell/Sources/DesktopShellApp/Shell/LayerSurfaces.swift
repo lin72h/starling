@@ -149,11 +149,13 @@ extension _DesktopShellState {
     /// 1 bottom, 2 top, 3 overlay), each followed by the popups rooted at
     /// it, which `stashedLayerPopups` collected during the popup pass.
     func _layerSurfaceWidgets(layers: Set<Int>,
-                              stashedLayerPopups: [UInt32: [Widget]]) -> [Widget] {
+                              stashedLayerPopups: [UInt32: [Widget]],
+                              namespace: String? = nil) -> [Widget] {
         guard let wl = waylandIntegration else { return [] }
         var out: [Widget] = []
         let ordered = layerSurfaces.values
-            .filter { layers.contains($0.info.layer) && $0.mapped }
+            .filter { layers.contains($0.info.layer) && $0.mapped &&
+                      (namespace == nil || $0.info.namespace == namespace) }
             .sorted { $0.info.layer != $1.info.layer ? $0.info.layer < $1.info.layer
                                                      : $0.surfaceId < $1.surfaceId }
         for entry in ordered {
@@ -386,6 +388,17 @@ extension _DesktopShellState {
         wayland.onSystemBell = { windowId in
             FileHandle.standardError.write(Data(
                 "[shell] bell from \(windowId ?? "no window")\n".utf8))
+        }
+
+        wayland.onSessionLock = { [weak self] locked in
+            guard let self = self else { return }
+            self.setState {
+                self._sessionLocked = locked
+                if !locked { self._layerKeyboardSurface = nil }
+                // The lock replaces every layer of the desktop: a fresh
+                // element tree, and the window cache with it.
+                self._windowChildCache.removeAll()
+            }
         }
 
         // Screencopy's frame-pump rider is wired with the recorders' (see

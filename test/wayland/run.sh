@@ -39,6 +39,7 @@ gen ext-image-capture-source-v1                 "$SYS/staging/ext-image-capture-
 gen ext-image-copy-capture-v1                   "$SYS/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml"
 gen security-context-v1                         "$SYS/staging/security-context/security-context-v1.xml"
 gen wlr-output-management-unstable-v1           "$REPO/shell/protocols/wlr-output-management-unstable-v1.xml"
+gen ext-session-lock-v1                         "$SYS/staging/ext-session-lock/ext-session-lock-v1.xml"
 
 cc -O1 -std=gnu11 -Wall -Wno-unused-function -Wno-unused-parameter \
     -I"$SRV/include" -I"$SRV" -I"$OUT" -I/usr/include/libdrm -D_GNU_SOURCE \

@@ -308,6 +308,12 @@ struct WaylandServer {
     struct wl_global* output_manager_global;
     struct wl_list output_managers;          // WaylandOutputManager.link
     uint32_t output_config_serial;
+    struct wl_global* session_lock_manager_global;
+    /* The ext_session_lock_v1 holding the session, NULL when unlocked. A
+     * locker that dies leaves the session locked (the protocol's rule);
+     * the next lock request takes over. */
+    struct wl_resource* session_lock;
+    int session_locked;
     /* CLOCK_MONOTONIC ms of the last input event the compositor delivered,
      * which is what ext-idle-notify measures idleness from. */
     uint32_t last_input_ms;
@@ -457,6 +463,10 @@ struct WaylandServer {
         /* A keyboard-shortcuts inhibitor for the surface was granted (1) or
          * went away (0). */
         void (*on_shortcuts_inhibit)(void* ctx, uint32_t surface_id, int inhibited);
+        /* ext-session-lock: the session locked (1) or unlocked (0). While
+         * locked the shell shows nothing but lock surfaces (which arrive as
+         * overlay layer surfaces named "session-lock") and black. */
+        void (*on_session_lock)(void* ctx, int locked);
     } cb;
 
     // Socket
@@ -475,7 +485,9 @@ struct WaylandLayerState {
 };
 
 struct WaylandLayerSurface {
-    struct wl_resource* resource;
+    struct wl_resource* resource;        // zwlr_layer_surface_v1, or NULL for
+                                         // a surface another role lent here
+                                         // (a session-lock surface)
     struct WaylandSurface* surface;      // NULL once the wl_surface died
     struct WaylandServer* server;
     int output_index;                    // resolved at creation (0 = ours to pick)
@@ -771,6 +783,18 @@ void wayland_layer_shell_surface_destroyed(struct WaylandServer* server,
 /* An output left the desktop: layer surfaces on it are closed. */
 void wayland_layer_shell_output_removed(struct WaylandServer* server,
                                         int output_index);
+/* Another role (session lock) borrowing the layer machinery: the surface is
+ * placed like a layer surface with this arrangement, announced to the shell
+ * through the layer callbacks, and configured by its own protocol. */
+struct WaylandLayerSurface* wayland_layer_shell_adopt(struct WaylandServer* server,
+                                                      struct WaylandSurface* surface,
+                                                      int output_index, uint32_t layer,
+                                                      uint32_t anchor,
+                                                      uint32_t keyboard_interactivity,
+                                                      const char* namespace_);
+void wayland_layer_shell_release(struct WaylandLayerSurface* ls);
+
+void wayland_session_lock_init(struct WaylandServer* server);
 
 void wayland_alpha_modifier_init(struct WaylandServer* server);
 void wayland_alpha_modifier_commit(struct WaylandServer* server,

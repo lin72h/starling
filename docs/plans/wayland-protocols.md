@@ -106,6 +106,17 @@ ships no package for are vendored beside it.
   use to parent a dialog; `set_parent_of` is recorded nowhere yet.
 - `wp_color_representation_manager_v1`: premultiplied RGB is the one
   encoding offered; anything else gets the protocol's error.
+- `ext_session_lock_manager_v1`: swaylock, gtklock, hyprlock. A lock
+  surface is lent to the layer machinery (overlay, anchored to every edge,
+  exclusive keyboard, namespace "session-lock"), and while locked the shell
+  draws black plus those surfaces and swallows every key. A locker that
+  dies leaves the session locked — the protocol's rule — and the next lock
+  request takes over; on the dev box that means restarting the shell.
+
+Verified against real clients on this box: `grim` (screencopy),
+`wlr-randr` (output management), `wl-copy`/`wl-paste` (data control),
+`swaylock -c 336699` (session lock: the output is the lock colour edge to
+edge, the desktop nowhere).
 
 ## What wmbench says now (2026-09-11, this box)
 
@@ -133,11 +144,10 @@ in the fast tier (`test/run.sh`). wmbench itself is the functional check:
 
 ## Not done
 
-- `ext_session_lock_v1`, `zwlr_virtual_pointer_v1` /
-  `zwp_virtual_keyboard_v1`, `ext_workspace_v1`, `xdg_toplevel_drag_v1`,
-  `wp_pointer_warp_v1` — each needs a shell feature behind it (a lock
-  screen, input injection at screen coordinates, spaces as workspaces, a
-  tear-off drag, cursor warping).
+- `zwlr_virtual_pointer_v1` / `zwp_virtual_keyboard_v1`,
+  `ext_workspace_v1`, `xdg_toplevel_drag_v1`, `wp_pointer_warp_v1` — each
+  needs a shell feature behind it (input injection at screen coordinates,
+  spaces as workspaces, a tear-off drag, cursor warping).
 - `wp_linux_drm_syncobj_v1` / explicit sync, `wp_color_management_v1`,
   `wp_fifo_v1` / `wp_commit_timing_v1` — real compositor work each.
 - Applying an output configuration through wlr-output-management.

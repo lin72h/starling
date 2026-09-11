@@ -337,6 +337,14 @@ void wayland_server_on_system_bell(WaylandServer* server,
  * Event-loop thread only; the shell tracks the callback instead. */
 int wayland_server_shortcuts_inhibited(WaylandServer* server, uint32_t surface_id);
 
+/* ext_session_lock_v1: the session locked (1) or unlocked (0). Lock
+ * surfaces arrive through the layer-surface callbacks as overlay surfaces
+ * with namespace "session-lock" and exclusive keyboard interactivity; while
+ * locked the shell must show nothing else — black where an output has no
+ * lock surface yet. */
+void wayland_server_on_session_lock(WaylandServer* server,
+    void (*cb)(void* ctx, int locked), void* ctx);
+
 /* zwp_keyboard_shortcuts_inhibit: a surface gained (1) or lost (0) an
  * inhibitor. While one holds, the shell forwards every key — its own
  * chords included — to that surface. */

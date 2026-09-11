@@ -147,6 +147,7 @@ WaylandServer* wayland_server_create(const WaylandServerConfig* config) {
     wayland_color_representation_init(server);
     wayland_security_context_init(server);
     wayland_output_management_init(server);
+    wayland_session_lock_init(server);
 
     /* Initialize deferred pointer event pipe + event source. Both ends are
      * non-blocking: the write side runs on the Flutter UI thread and must
@@ -775,6 +776,7 @@ DEF_CB_SETTER(screencopy_request)
 DEF_CB_SETTER(toplevel_position_request)
 DEF_CB_SETTER(system_bell)
 DEF_CB_SETTER(shortcuts_inhibit)
+DEF_CB_SETTER(session_lock)
 
 #undef DEF_CB_SETTER
 

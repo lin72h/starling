@@ -50,6 +50,7 @@ ext-data-control-v1                         $SYS/staging/ext-data-control/ext-da
 ext-idle-notify-v1                          $SYS/staging/ext-idle-notify/ext-idle-notify-v1.xml
 ext-image-capture-source-v1                 $SYS/staging/ext-image-capture-source/ext-image-capture-source-v1.xml
 ext-image-copy-capture-v1                   $SYS/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml
+ext-session-lock-v1                         $SYS/staging/ext-session-lock/ext-session-lock-v1.xml
 xdg-foreign-unstable-v2                     $SYS/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml
 color-representation-v1                     $SYS/staging/color-representation/color-representation-v1.xml
 security-context-v1                         $SYS/staging/security-context/security-context-v1.xml
