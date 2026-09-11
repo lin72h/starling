@@ -132,6 +132,12 @@ buffers now go back the moment their pixels are copied and a dying surface
 returns whatever it holds; the popup load holds 20 cycles/s (36 when asked
 for 40).
 
+Popups and layer surfaces then got layers of their own (OverlayLayers.swift):
+a menu appearing or a bar stepping across the screen rebuilds a widget with
+its own State, not the desktop. Under the stress mix the shell's full
+rebuilds went from ~60 a second at 3.4 ms each to a few dozen for the whole
+run; `move` and `resize` each cost a quarter less CPU, `stress` a third.
+
 The software-client path was then made one pass: the loop thread packs
 B,G,R,A rows into R,G,B,A with alpha forced where the role wants it, in one
 vectorised C loop, and the texture entry adopts that buffer — it used to be

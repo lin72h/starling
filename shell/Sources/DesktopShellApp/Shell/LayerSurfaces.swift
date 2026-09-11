@@ -304,22 +304,20 @@ extension _DesktopShellState {
         }
         wayland.onLayerSurfaceChanged = { [weak self] surfaceId, info in
             guard let self = self, let entry = self.layerSurfaces[surfaceId] else { return }
-            self.setState {
-                entry.info = info
-                if info.keyboardInteractivity == 1 {
-                    self._layerKeyboardSurface = surfaceId
-                } else if self._layerKeyboardSurface == surfaceId && info.keyboardInteractivity == 0 {
-                    self._layerKeyboardSurface = nil
-                }
-                self._applyLayerInsets()
+            entry.info = info
+            if info.keyboardInteractivity == 1 {
+                self._layerKeyboardSurface = surfaceId
+            } else if self._layerKeyboardSurface == surfaceId && info.keyboardInteractivity == 0 {
+                self._layerKeyboardSurface = nil
             }
+            self._applyLayerInsets()
+            self._layerSurfacesDidChange()
         }
         wayland.onLayerSurfaceBufferResized = { [weak self] surfaceId, w, h in
             guard let self = self, let entry = self.layerSurfaces[surfaceId] else { return }
-            self.setState {
-                entry.bufferWidth = Double(w)
-                entry.bufferHeight = Double(h)
-            }
+            entry.bufferWidth = Double(w)
+            entry.bufferHeight = Double(h)
+            self._layerSurfacesDidChange()
         }
         wayland.onLayerSurfaceDestroyed = { [weak self] surfaceId in
             guard let self = self else { return }
@@ -333,13 +331,15 @@ extension _DesktopShellState {
         // wp_alpha_modifier: whichever kind of surface it is.
         wayland.onSurfaceAlpha = { [weak self] surfaceId, alpha in
             guard let self = self else { return }
-            self.setState {
-                if let entry = self.layerSurfaces[surfaceId] {
-                    entry.alpha = alpha
-                } else if let id = wayland.windowId(forSurfaceId: surfaceId) {
-                    if self.popups[id] != nil {
-                        self.popupAlpha[id] = alpha
-                    } else if let win = self.windowManager.windows.first(where: { $0.id == id }) {
+            if let entry = self.layerSurfaces[surfaceId] {
+                entry.alpha = alpha
+                self._layerSurfacesDidChange()
+            } else if let id = wayland.windowId(forSurfaceId: surfaceId) {
+                if self.popups[id] != nil {
+                    self.popupAlpha[id] = alpha
+                    self._popupsDidChange()
+                } else if let win = self.windowManager.windows.first(where: { $0.id == id }) {
+                    self.setState {
                         win.contentOpacity = alpha
                         self._windowChildCache.removeValue(forKey: id)
                     }
