@@ -893,6 +893,7 @@ class WaylandIntegration {
         let frameId: UInt32
         let view: OpaquePointer
         let x: Int32, y: Int32, w: Int32, h: Int32
+        let started = DispatchTime.now()
         let deadline = DispatchTime.now() + .milliseconds(2000)
         var armedPresents = false
         init(frameId: UInt32, view: OpaquePointer, x: Int32, y: Int32, w: Int32, h: Int32) {
@@ -925,6 +926,14 @@ class WaylandIntegration {
                                           Int32(byteCount))
         screencopyInFlight.withLock { $0 -= 1 }
         onFramePumpNeedChanged?()
+        // A capture that waited out the deadline read whatever the mirror
+        // held — possibly an old frame. Said in the log, because that is
+        // indistinguishable from "the window was never drawn" from outside.
+        let ms = (DispatchTime.now().uptimeNanoseconds - job.started.uptimeNanoseconds) / 1_000_000
+        if !job.armedPresents || ms > 500 || ok == 0 {
+            FileHandle.standardError.write(Data(
+                "[screencopy] frame \(job.frameId): \(ok != 0 ? "read" : "no mirror") after \(ms) ms, presents \(job.armedPresents ? "seen" : "NOT seen (deadline)")\n".utf8))
+        }
         if ok != 0 {
             enqueueCommand(.screencopyDeliver(frameId: job.frameId, pixels: buf, stride: job.w * 4))
         } else {

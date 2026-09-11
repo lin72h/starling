@@ -129,11 +129,21 @@ The shm paths are the other cost worth a look: `video` (60 shm frames/s)
 and `transparent window` (120 redraws/s) each burn about a core, in the
 per-commit copy + swizzle + texture upload.
 
-`validate.sh`: motion, stale, pop, resize, offscreen pass. suspend and
-iconify put their pattern window fullscreen and expect it at the output's
-corner, which is what made fullscreen cover the whole output (it used to
-leave the 28 px status strip and a black bar). shape and leftovers cannot
-exist on Wayland.
+`validate.sh`: motion, stale, pop, resize, offscreen and iconify pass, and
+the stability pass with them. suspend and iconify put their pattern window
+fullscreen and expect it at the output's corner, which is what made
+fullscreen cover the whole output (it used to leave the 28 px status strip
+and a black bar); suspend then reports "not done", because Wayland has no
+compositing suspension to prove. shape and leftovers cannot exist on
+Wayland.
+
+Seen once and not reproduced: on a shell started seconds before the run,
+the checks passed for a minute and then every layer surface stopped being
+drawn for the rest of that process — screenshots showed a live clock and
+no windows. A fresh shell went through the whole suite twice without it.
+The screencopy path now logs a capture that waited out its deadline, so
+the next time it happens the log says whether the frame was old or the
+window undrawn.
 
 ## Tests
 
