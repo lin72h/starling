@@ -81,6 +81,10 @@ struct WaylandSurface {
     // Current committed state
     struct wl_resource* committed_buffer;
     struct wl_listener committed_buffer_destroy_listener;
+    /* The committed buffer was already handed back (wl_buffer.release):
+     * an shm buffer is released the moment its pixels are copied out, so
+     * the pointer is kept for bookkeeping but must not be released twice. */
+    int committed_buffer_released;
     struct wl_resource* frame_callback;   // active frame callback waiting for done
     /* Frame-callback throttle (Murmuration): 0 = full rate. While set, the
      * armed callback is held across flips until interval_ms has elapsed

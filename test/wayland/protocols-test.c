@@ -314,6 +314,10 @@ static int wait_for(volatile int* cond, int ms) {
     return *cond;
 }
 
+static volatile int buffers_released;
+static void buf_release(void* d, struct wl_buffer* b) { (void)d; (void)b; buffers_released++; }
+static const struct wl_buffer_listener buf_listener = { buf_release };
+
 /* An shm buffer of the given size, XRGB or ARGB. */
 static struct wl_buffer* make_buffer(int w, int h, uint32_t format, void** px_out) {
     int fd = memfd_create("test", MFD_CLOEXEC);
@@ -323,6 +327,7 @@ static struct wl_buffer* make_buffer(int w, int h, uint32_t format, void** px_ou
     memset(px, 0x42, size);
     struct wl_shm_pool* pool = wl_shm_create_pool(shm, fd, (int32_t)size);
     struct wl_buffer* b = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, format);
+    wl_buffer_add_listener(b, &buf_listener, NULL);
     wl_shm_pool_destroy(pool);
     close(fd);
     if (px_out) *px_out = px;
@@ -527,6 +532,38 @@ static void test_toplevel_state_and_taskbars(void) {
     got = 0;
     for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.request_count > before); usleep(10000); }
     CHECK(got && seen.last_request == WAYLAND_TOPLEVEL_REQUEST_MINIMIZE, "taskbar minimize reached the shell");
+}
+
+/* shm buffers come back the moment their pixels are copied, and whatever a
+ * dying surface holds comes back too — a client's buffer pool must never
+ * lose one to a popup that was shown once. */
+static void test_buffer_release(void) {
+    struct wl_surface* ps = wl_compositor_create_surface(compositor);
+    struct xdg_surface* pxs = xdg_wm_base_get_xdg_surface(wm_base, ps);
+    struct xdg_positioner* pos = xdg_wm_base_create_positioner(wm_base);
+    xdg_positioner_set_size(pos, 64, 32);
+    xdg_positioner_set_anchor_rect(pos, 0, 0, 1, 1);
+    struct xdg_popup* popup = xdg_surface_get_popup(pxs, tl_xdg, pos);
+    wl_surface_commit(ps);
+    wl_display_roundtrip(dpy);
+
+    buffers_released = 0;
+    struct wl_buffer* b = make_buffer(64, 32, WL_SHM_FORMAT_ARGB8888, NULL);
+    wl_surface_attach(ps, b, 0, 0);
+    wl_surface_commit(ps);
+    CHECK(wait_for(&buffers_released, 500), "an shm buffer is released on the commit that copied it");
+
+    /* Attached but never committed, then the surface goes: released too. */
+    buffers_released = 0;
+    struct wl_buffer* b2 = make_buffer(64, 32, WL_SHM_FORMAT_ARGB8888, NULL);
+    wl_surface_attach(ps, b2, 0, 0);
+    xdg_popup_destroy(popup);
+    xdg_surface_destroy(pxs);
+    wl_surface_destroy(ps);
+    CHECK(wait_for(&buffers_released, 500), "a dying surface hands its attached buffer back");
+    xdg_positioner_destroy(pos);
+    wl_buffer_destroy(b);
+    wl_buffer_destroy(b2);
 }
 
 /* xdg-activation: a minted token raises, an invented one does nothing. */
@@ -1197,6 +1234,7 @@ int main(void) {
     if (compositor && shm && wm_base && output && seat) {
         test_toplevel_state_and_taskbars();
         test_activation();
+        test_buffer_release();
         test_layer_shell();
         test_alpha();
         test_zones();

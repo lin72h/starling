@@ -3805,7 +3805,26 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         #endif
     }
 
+    /// STARLING_BUILD_LOG=1: one stderr line per shell rebuild slower than
+    /// 4 ms, with the cost. A rebuild is the whole desktop tree, so this is
+    /// the number every "why is X slow" question about the shell starts at.
+    nonisolated(unsafe) static let _buildLog =
+        ProcessInfo.processInfo.environment["STARLING_BUILD_LOG"] == "1"
+    nonisolated(unsafe) static var _buildCount = 0
+
     override func build(_ context: any BuildContext) -> Widget {
+        let t0 = Self._buildLog ? DispatchTime.now().uptimeNanoseconds : 0
+        defer {
+            if Self._buildLog {
+                Self._buildCount += 1
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                if ms > 4 {
+                    FileHandle.standardError.write(Data(String(
+                        format: "[build] #%d %.1f ms (%d windows, %d popups)\n",
+                        Self._buildCount, ms, windowManager.windows.count, popups.count).utf8))
+                }
+            }
+        }
         // Pointer tap for the recording zoom. Translucent so it only
         // observes: it sits in the hit path of everything below and consumes
         // nothing, which is the pattern the overlay note in CLAUDE.md

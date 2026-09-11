@@ -163,7 +163,7 @@ static void surface_commit(struct wl_client* client,
          * stalls after a couple of frames and the popup stays translucent. */
         if (surface->committed_buffer) {
             wl_list_remove(&surface->committed_buffer_destroy_listener.link);
-            if (surface->had_role &&
+            if (surface->had_role && !surface->committed_buffer_released &&
                 surface->committed_buffer != surface->pending.buffer) {
                 wl_buffer_send_release(surface->committed_buffer);
             }
@@ -173,6 +173,7 @@ static void surface_commit(struct wl_client* client,
         if (surface->pending.buffer)
             wl_list_remove(&surface->pending_buffer_destroy_listener.link);
         surface->committed_buffer = surface->pending.buffer;
+        surface->committed_buffer_released = 0;
         if (surface->committed_buffer) {
             surface->committed_buffer_destroy_listener.notify =
                 committed_buffer_destroyed;
@@ -314,6 +315,23 @@ static void surface_commit(struct wl_client* client,
             }
         }
     }
+    /* An shm buffer's pixels were copied out of the pool inside the
+     * callback above, so the client may reuse it NOW — released here rather
+     * than when the next buffer replaces it. A client that recycles a
+     * buffer only once it is released (wmbench, weston-simple-shm, any
+     * single- or double-buffered software client) otherwise waits a whole
+     * frame for it — and a popup that is created, shown once and destroyed
+     * never got its buffer back at all. dma-buf stays held until replaced:
+     * the GPU reads it for as long as it is on screen. */
+    if (surface->committed_buffer && !surface->committed_buffer_released &&
+        surface->had_role) {
+        enum WaylandBufferType* t = wl_resource_get_user_data(surface->committed_buffer);
+        if (t && *t == BUFFER_TYPE_SHM) {
+            wl_buffer_send_release(surface->committed_buffer);
+            surface->committed_buffer_released = 1;
+        }
+    }
+
     /* Frame pacing. Primary: real page flips (wayland_server_on_present)
      * fire frame callbacks + presentation feedback with kernel scanout
      * timestamps. The per-surface timer is the FALLBACK for commits that
@@ -501,12 +519,21 @@ static void surface_destroy_resource(struct wl_resource* resource) {
      * zwp_text_input_v3.enter. */
     wayland_text_input_surface_destroyed(surface->server, surface);
 
-    /* Clean up buffer destroy listeners. */
+    /* Clean up buffer destroy listeners — and hand the buffers back. A
+     * surface that dies with a buffer attached or on screen is done with
+     * it; a client that pools its buffers (every toolkit, wmbench) counts
+     * one as busy until release, and a popup surface made and destroyed
+     * per menu leaked its pool one buffer at a time. */
     if (surface->committed_buffer) {
         wl_list_remove(&surface->committed_buffer_destroy_listener.link);
+        if (!surface->committed_buffer_released &&
+            surface->committed_buffer != surface->pending.buffer) {
+            wl_buffer_send_release(surface->committed_buffer);
+        }
     }
     if (surface->pending.buffer) {
         wl_list_remove(&surface->pending_buffer_destroy_listener.link);
+        wl_buffer_send_release(surface->pending.buffer);
     }
 
     /* Discard any pending presentation feedback for this surface so the

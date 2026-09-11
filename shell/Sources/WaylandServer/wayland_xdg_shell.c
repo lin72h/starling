@@ -594,9 +594,6 @@ static void xdg_surface_get_popup_handler(struct wl_client* client,
     surface->xdg_popup = popup;
     surface->had_role = 1;
 
-    fprintf(stderr, "[WaylandServer] get_popup: surface=%u parent=%u pos=(%d,%d) size=(%d,%d)\n",
-            surface->id, parent_id, popup_x, popup_y, popup_w, popup_h);
-
     /* Send popup configure with computed position and size. */
     xdg_popup_send_configure(popup, popup_x, popup_y, popup_w, popup_h);
 
