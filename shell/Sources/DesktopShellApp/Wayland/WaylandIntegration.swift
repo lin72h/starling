@@ -387,13 +387,14 @@ class WaylandIntegration {
         // finds a NULL callback and silently drops every frame, so the client
         // attaches, damages, commits and gets its buffers released — while the
         // window composites as nothing at all.
-        wayland_server_on_shm_surface_commit(server, { (ctx, surfaceId, pixels, w, h, stride, format, firstCommit, bufferScale) in
+        wayland_server_on_shm_surface_commit(server, { (ctx, surfaceId, pixels, w, h, stride, format, firstCommit, bufferScale, keepAlpha) in
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             guard let pixels = pixels else { return }
             this.handleShmSurfaceCommit(surfaceId, pixels: pixels,
                                         width: Int(w), height: Int(h), stride: Int(stride),
                                         format: format, firstCommit: firstCommit != 0,
-                                        bufferScale: Int(bufferScale))
+                                        bufferScale: Int(bufferScale),
+                                        keepAlpha: keepAlpha != 0)
         }, ctx)
 
         wayland_server_on_toplevel_destroy(server, { (ctx, surfaceId) in
@@ -1138,42 +1139,26 @@ class WaylandIntegration {
         FrameCallbackScheduler.shared.noteTextureUpdate(textureId)
     }
 
-    /// wl_shm commit. `pixels` is this event's tightly-packed copy and is
-    /// deallocated here on every path.
+    /// wl_shm commit. `pixels` is this event's packed R,G,B,A copy, already
+    /// swizzled and alpha-forced on the event-loop thread (see
+    /// handleShmSurfaceCommit); the texture entry adopts it, or it is freed.
     private func processShmSurfaceCommit(_ surfaceId: UInt32,
                                           pixels: UnsafeMutableRawPointer,
                                           width: Int, height: Int, format: UInt32,
                                           firstCommit: Bool, bufferScale: Int,
                                           viewportWidth vpW: Int, viewportHeight vpH: Int) {
-        defer { pixels.deallocate() }
-        guard let textureId = surfaceTextures[surfaceId] else { return }
-
-        // wl_shm ARGB/XRGB8888 is B,G,R,A in memory; the CPU texture path
-        // uploads GL_RGBA. Swizzle in place — this runs on the UI thread, which
-        // is also where popup membership is known.
-        //
-        // Alpha is forced opaque for toplevels. Clients routinely leave it at
-        // zero on window surfaces, which composites the window away entirely —
-        // the same trap the dma-buf path sidesteps by importing with an opaque
-        // fourcc, and that the X server's shadow blit handles the same way.
-        // Popups keep their alpha: they need it for shadows and rounded corners.
-        let isPopup = popupSurfaceIds.contains(surfaceId) || layerSurfaceIds.contains(surfaceId)
-        let hasAlpha = format == kShmFormatARGB8888
-        let keepAlpha = isPopup && hasAlpha
-        let px = pixels.assumingMemoryBound(to: UInt8.self)
-        for i in stride(from: 0, to: width * height * 4, by: 4) {
-            let b = px[i]
-            px[i] = px[i + 2]
-            px[i + 2] = b
-            if !keepAlpha { px[i + 3] = 0xFF }
+        _ = format
+        guard let textureId = surfaceTextures[surfaceId] else {
+            pixels.deallocate()
+            return
         }
 
         applyCommitGeometry(surfaceId, width: width, height: height,
                             bufferScale: bufferScale,
                             viewportWidth: vpW, viewportHeight: vpH)
 
-        textureRegistry.updatePixelData(engine: engine, id: textureId,
-                                        data: pixels, width: width, height: height)
+        textureRegistry.adoptPixelData(engine: engine, id: textureId,
+                                       buffer: pixels, width: width, height: height)
 
         flushPendingResize(surfaceId)
         FrameCallbackScheduler.shared.noteTextureUpdate(textureId)
@@ -1305,7 +1290,7 @@ class WaylandIntegration {
     private func handleShmSurfaceCommit(_ surfaceId: UInt32, pixels: UnsafeRawPointer,
                                          width: Int, height: Int, stride: Int,
                                          format: UInt32, firstCommit: Bool,
-                                         bufferScale: Int) {
+                                         bufferScale: Int, keepAlpha: Bool) {
         guard width > 0, height > 0, stride >= width * 4 else { return }
 
         var vpW: Int32 = 0
@@ -1313,20 +1298,21 @@ class WaylandIntegration {
         let hasViewport = server != nil && wayland_server_get_viewport_destination(server, surfaceId, &vpW, &vpH) != 0
 
         // The pool mapping is only guaranteed for the duration of this callback
-        // (the client may destroy the pool the moment we return), so the pixels
-        // have to be copied out here on the event-loop thread. Rows are packed
-        // to width*4 on the way so the texture upload needs no stride handling.
+        // (the client may destroy the pool the moment we return, and the
+        // buffer is released to it as soon as we do), so the pixels have to
+        // leave the pool here, on the event-loop thread. One vectorised pass
+        // (wayland_shm_pack_rgba) packs the rows, swaps B,G,R,A to R,G,B,A
+        // and forces alpha opaque where the role wants it: the buffer that
+        // comes out is exactly what the GL upload takes, and the UI thread
+        // adopts it without another copy. It used to be a memcpy here, a
+        // per-byte Swift swizzle on the UI thread and a second memcpy into
+        // the texture entry — three passes over a 4K frame for every commit
+        // of a software client.
         let rowBytes = width * 4
         let copy = UnsafeMutableRawPointer.allocate(byteCount: rowBytes * height,
-                                                    alignment: MemoryLayout<UInt32>.alignment)
-        if stride == rowBytes {
-            copy.copyMemory(from: pixels, byteCount: rowBytes * height)
-        } else {
-            for row in 0..<height {
-                (copy + row * rowBytes).copyMemory(from: pixels + row * stride,
-                                                   byteCount: rowBytes)
-            }
-        }
+                                                    alignment: 16)
+        wayland_shm_pack_rgba(copy, pixels, Int32(width), Int32(height), Int32(stride),
+                              keepAlpha ? 1 : 0)
 
         pendingEvents.withLock { $0.append(.shmSurfaceCommit(
             surfaceId: surfaceId, pixels: copy, width: width, height: height,

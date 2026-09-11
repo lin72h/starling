@@ -120,14 +120,27 @@ edge, the desktop nowhere).
 
 ## What wmbench says now (2026-09-11, this box)
 
-`benchmark.sh`: every test runs. `stress` is reported failed because its
-popup load finished last by a wide margin — the compositor shows and hides
-popups at ~7 cycles/s against the 20 the load asks for, and the other five
-loads had finished. That is the shell rebuilding the whole desktop tree on
-every popup appearance, not a protocol gap; `popups` alone runs at ~14.
-The shm paths are the other cost worth a look: `video` (60 shm frames/s)
-and `transparent window` (120 redraws/s) each burn about a core, in the
-per-commit copy + swizzle + texture upload.
+`benchmark.sh`: every test runs, `stress` included. It did not at first:
+the popup load ran at half the rate it asked for and finished last by a
+wide margin. The guess was the desktop rebuilding per popup; the log said
+otherwise (`STARLING_BUILD_LOG=1`: not one slow rebuild in a run). The
+cause was buffer release — a committed buffer came back only when the next
+commit replaced it and never when the surface died, so a popup made,
+shown once and destroyed per menu cost the client's pool a buffer each
+time until every buffer looked busy and it spun on round-trips. shm
+buffers now go back the moment their pixels are copied and a dying surface
+returns whatever it holds; the popup load holds 20 cycles/s (36 when asked
+for 40).
+
+The software-client path was then made one pass: the loop thread packs
+B,G,R,A rows into R,G,B,A with alpha forced where the role wants it, in one
+vectorised C loop, and the texture entry adopts that buffer — it used to be
+a memcpy, a per-byte Swift swizzle on the UI thread and a second memcpy.
+`video` went from 40 to its 60 fps and a third less CPU; `transparent
+window` from 50 to 76 fps at half the CPU. What remains is the GL upload
+itself (glTexSubImage2D of every frame); the next step there is a
+GBM-backed linear buffer the loop thread writes into, so shm clients take
+the same zero-copy import as dma-buf ones.
 
 `validate.sh`: motion, stale, pop, resize, offscreen and iconify pass, and
 the stability pass with them. suspend and iconify put their pattern window
@@ -162,4 +175,5 @@ in the fast tier (`test/run.sh`). wmbench itself is the functional check:
   `wp_fifo_v1` / `wp_commit_timing_v1` — real compositor work each.
 - Applying an output configuration through wlr-output-management.
 - Layer surfaces and screencopy on secondary outputs.
-- Popup show/hide throughput (see above).
+- shm frames still go through glTexSubImage2D; a GBM-backed linear buffer
+  would make them zero-copy like dma-buf (see above).

@@ -267,6 +267,33 @@ static void shm_bind(struct wl_client* client, void* data,
 }
 
 /* ------------------------------------------------------------------ */
+/* Pixel packing for the shell's CPU texture path                       */
+/* ------------------------------------------------------------------ */
+
+/* wl_shm's ARGB/XRGB8888 is B,G,R,A in memory; the texture upload wants
+ * R,G,B,A, tightly packed, with alpha forced opaque unless the surface is
+ * one that needs it (a popup's shadow, a translucent bar). One pass, written
+ * so the compiler vectorises it: the Swift byte loop this replaces took
+ * longer per frame than the copy and the GL upload together. */
+static inline uint32_t swap_rb(uint32_t p) {
+    return (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16);
+}
+
+void wayland_shm_pack_rgba(void* dst, const void* src, int width, int height,
+                           int src_stride, int keep_alpha) {
+    if (!dst || !src || width <= 0 || height <= 0) return;
+    for (int y = 0; y < height; y++) {
+        const uint32_t* s = (const uint32_t*)((const char*)src + (size_t)y * src_stride);
+        uint32_t* d = (uint32_t*)((char*)dst + (size_t)y * width * 4);
+        if (keep_alpha) {
+            for (int x = 0; x < width; x++) d[x] = swap_rb(s[x]);
+        } else {
+            for (int x = 0; x < width; x++) d[x] = swap_rb(s[x]) | 0xFF000000u;
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Public init function                                                 */
 /* ------------------------------------------------------------------ */
 

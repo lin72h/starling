@@ -411,7 +411,7 @@ struct WaylandServer {
                                        const void* pixel_data,
                                        int w, int h, int stride,
                                        uint32_t format, int first_commit,
-                                       int buffer_scale);
+                                       int buffer_scale, int keep_alpha);
         void (*on_toplevel_resize_request)(void* ctx, uint32_t surface_id,
                                             int w, int h);
         // Client-initiated interactive move/resize (xdg_toplevel.move /

@@ -134,12 +134,23 @@ void wayland_server_on_surface_commit(WaylandServer* server,
                uint32_t fourcc, uint64_t modifier,
                int first_commit, int buffer_scale), void* ctx);
 
-/* SHM surface commit. pixel_data is valid only for the duration of the callback. */
+/* SHM surface commit. pixel_data is valid only for the duration of the
+ * callback — copy it out (wayland_shm_pack_rgba) before returning; the
+ * buffer is released to the client the moment the callback returns.
+ * keep_alpha: the surface's role wants its alpha honoured (a popup, a layer
+ * surface) and the buffer carries one; toplevels get alpha forced opaque. */
 void wayland_server_on_shm_surface_commit(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id,
                const void* pixel_data,
                int width, int height, int stride,
-               uint32_t format, int first_commit, int buffer_scale), void* ctx);
+               uint32_t format, int first_commit, int buffer_scale,
+               int keep_alpha), void* ctx);
+
+/* B,G,R,A rows `src_stride` bytes apart -> tightly packed R,G,B,A, alpha
+ * forced to 0xFF unless keep_alpha. One vectorised pass; dst holds
+ * width*height*4 bytes. */
+void wayland_shm_pack_rgba(void* dst, const void* src, int width, int height,
+                           int src_stride, int keep_alpha);
 
 /* Client set max/min size hint. */
 void wayland_server_on_toplevel_resize_request(WaylandServer* server,

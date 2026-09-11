@@ -303,6 +303,12 @@ static void surface_commit(struct wl_client* client,
                 struct ShmBuffer* buf = (struct ShmBuffer*)type_ptr;
                 if (server->cb.on_shm_surface_commit && buf->pool && buf->pool->data) {
                     const void* pixel_data = (const char*)buf->pool->data + buf->offset;
+                    /* Toplevels routinely commit alpha 0 on an ARGB buffer,
+                     * which composites the window away; only a popup (its
+                     * shadow) or a layer surface (a translucent bar) means
+                     * its alpha. */
+                    int keep_alpha = buf->format == WL_SHM_FORMAT_ARGB8888 &&
+                                     (target->xdg_popup || target->layer);
                     server->cb.on_shm_surface_commit(
                         server->cb_ctx,
                         target->id,
@@ -310,7 +316,8 @@ static void surface_commit(struct wl_client* client,
                         buf->width, buf->height,
                         buf->stride, buf->format,
                         first,
-                        surface->buffer_scale);
+                        surface->buffer_scale,
+                        keep_alpha);
                 }
             }
         }

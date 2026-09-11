@@ -183,8 +183,8 @@ static void cb_alpha(void* ctx, uint32_t sid, double alpha) {
     LOCKED(seen.alpha_surface = sid; seen.alpha = alpha);
 }
 static void cb_shm(void* ctx, uint32_t sid, const void* px, int w, int h, int stride,
-                   uint32_t format, int first, int scale) {
-    (void)ctx; (void)stride; (void)first; (void)scale;
+                   uint32_t format, int first, int scale, int keep_alpha) {
+    (void)ctx; (void)stride; (void)first; (void)scale; (void)keep_alpha;
     LOCKED(seen.shm_surface = sid; seen.shm_w = w; seen.shm_h = h; seen.shm_format = format;
            memcpy(seen.shm_px, px, 4); seen.shm_count++);
 }
@@ -1188,6 +1188,24 @@ static void test_session_lock(void) {
     wl_buffer_destroy(b);
 }
 
+/* The packer: B,G,R,A rows with a stride -> tight R,G,B,A, alpha forced or kept. */
+static void test_pack_rgba(void) {
+    uint8_t src[2 * 12] = {
+        /* row 0: two pixels + 4 bytes of stride padding */
+        0x11, 0x22, 0x33, 0x44,  0x55, 0x66, 0x77, 0x00,  0xEE, 0xEE, 0xEE, 0xEE,
+        /* row 1 */
+        0xAA, 0xBB, 0xCC, 0x80,  0x01, 0x02, 0x03, 0x10,  0xEE, 0xEE, 0xEE, 0xEE,
+    };
+    uint8_t dst[16];
+    wayland_shm_pack_rgba(dst, src, 2, 2, 12, 0);
+    CHECK(dst[0] == 0x33 && dst[1] == 0x22 && dst[2] == 0x11 && dst[3] == 0xFF,
+          "pixel 0 forced opaque: %02x %02x %02x %02x", dst[0], dst[1], dst[2], dst[3]);
+    CHECK(dst[4] == 0x77 && dst[5] == 0x66 && dst[6] == 0x55 && dst[7] == 0xFF, "pixel 1");
+    CHECK(dst[8] == 0xCC && dst[9] == 0xBB && dst[10] == 0xAA && dst[11] == 0xFF, "row 1 skipped the padding");
+    wayland_shm_pack_rgba(dst, src, 2, 2, 12, 1);
+    CHECK(dst[3] == 0x44 && dst[7] == 0x00 && dst[11] == 0x80 && dst[15] == 0x10, "alpha kept");
+}
+
 /* The toplevel goes: the taskbars hear closed. */
 static void test_unmap(void) {
     ftl_closed = 0;
@@ -1231,6 +1249,7 @@ int main(void) {
     if (wm_base) xdg_wm_base_add_listener(wm_base, &wm_listener, NULL);
 
     test_globals();
+    test_pack_rgba();
     if (compositor && shm && wm_base && output && seat) {
         test_toplevel_state_and_taskbars();
         test_activation();

@@ -466,6 +466,36 @@ class LinuxTextureRegistry: @unchecked Sendable {
         FlutterEngineScheduleFrame(engine)
     }
 
+    /// Like updatePixelData, but the entry takes ownership of `buffer`
+    /// (allocated with UnsafeMutableRawPointer.allocate, width*height*4
+    /// bytes of R,G,B,A) instead of copying it. The wl_shm path's frame is
+    /// already a private copy, so copying it again bought nothing but a
+    /// memcpy of every software client's frame. Freed here if the entry is
+    /// gone.
+    func adoptPixelData(
+        engine: OpaquePointer,
+        id: Int64,
+        buffer: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int
+    ) {
+        lock.lock()
+        guard let entry = entries[id] else {
+            lock.unlock()
+            buffer.deallocate()
+            return
+        }
+        entry.pixelData?.deallocate()
+        entry.pixelData = buffer
+        entry.width = width
+        entry.height = height
+        entry.dirty = true
+        lock.unlock()
+        RecordingService.noteSourceContentChanged(textureId: id)
+        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        FlutterEngineScheduleFrame(engine)
+    }
+
     // ─── GL Texture Population (raster thread) ──────────────────────────
 
     /// Called by the engine's raster thread via the texture frame callback.
