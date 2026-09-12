@@ -439,6 +439,26 @@ struct X11Client {
     int      deferred_reply_len;
 };
 
+/* ===== RENDER resources (real drawing into the window/pixmap shadow) ===== */
+struct RenderPicture {
+    uint32_t id = 0;
+    uint32_t drawable = 0;   /* window or pixmap this picture draws into/reads */
+    uint32_t format = 0;
+    bool     is_solid = false;
+    uint32_t solid_argb = 0; /* 8-bit ARGB, non-premultiplied */
+};
+struct RenderGlyph {
+    uint16_t w = 0, h = 0;
+    int16_t  x = 0, y = 0;      /* origin -> bitmap-top-left offset (placement is negated) */
+    int16_t  xOff = 0, yOff = 0;
+    std::vector<uint8_t> a8;    /* coverage, w*h bytes */
+};
+struct RenderGlyphSet {
+    uint32_t id = 0;
+    uint32_t format = 0;
+    std::map<uint32_t, RenderGlyph> glyphs;
+};
+
 struct X11Server {
     int listen_fd;      /* abstract namespace socket */
     int listen_fd2;     /* filesystem socket (fallback) */
@@ -449,6 +469,8 @@ struct X11Server {
 
     std::vector<X11Window> windows;
     std::vector<X11Pixmap> pixmaps;
+    std::vector<RenderPicture> pictures;      /* RENDER Picture objects */
+    std::vector<RenderGlyphSet> glyphsets;    /* RENDER glyph sets (text) */
     std::vector<X11Fence> fences;
     std::vector<X11Atom> atoms;
     std::vector<X11Extension> extensions;
@@ -791,6 +813,182 @@ static void handle_present(X11Server* server, int client_idx, uint8_t minor,
                            const uint8_t* data, int len, uint16_t seq);
 static void handle_glx(X11Server* server, int client_idx, uint8_t minor,
                        const uint8_t* data, int len, uint16_t seq);
+
+/* ===== RENDER drawing helpers ===== */
+
+static RenderPicture* find_picture(X11Server* server, uint32_t id) {
+    for (auto& p : server->pictures) if (p.id == id) return &p;
+    return nullptr;
+}
+static RenderGlyphSet* find_glyphset(X11Server* server, uint32_t id) {
+    for (auto& g : server->glyphsets) if (g.id == id) return &g;
+    return nullptr;
+}
+
+/* The RGBA shadow buffer a picture draws into, its size, and the offset to add
+ * to picture-local coordinates (a child window's content sits at its origin in
+ * the top-level shadow). win_out is the window to flush afterwards. */
+static uint8_t* picture_shadow(X11Server* server, uint32_t drawable,
+                               int* w, int* h, int* ox, int* oy,
+                               X11Window** win_out, X11Pixmap** pix_out) {
+    *ox = 0; *oy = 0; *win_out = nullptr; *pix_out = nullptr;
+    X11Window* win = shadow_target(server, drawable, ox, oy);
+    if (win) {
+        ensure_shadow(win);
+        if (win->shadow.empty()) return nullptr;
+        *w = win->shadow_w; *h = win->shadow_h; *win_out = win;
+        return win->shadow.data();
+    }
+    X11Pixmap* pix = find_pixmap(server, drawable);
+    if (pix && pix->width && pix->height) {
+        size_t need = static_cast<size_t>(pix->width) * pix->height * 4;
+        if (pix->shadow.size() < need) pix->shadow.assign(need, 0);
+        *w = pix->width; *h = pix->height; *pix_out = pix;
+        return pix->shadow.data();
+    }
+    return nullptr;
+}
+
+/* Source colour of a picture: the solid fill's colour, else opaque black. */
+static uint32_t picture_source_color(X11Server* server, uint32_t src_id) {
+    RenderPicture* p = find_picture(server, src_id);
+    if (p && p->is_solid) return p->solid_argb;
+    return 0xFF000000;
+}
+
+/* One pixel, dst in R,G,B,A order; src is non-premultiplied 8-bit ARGB, cov 0-255.
+ * PictOpSrc replaces; anything else composites Over. Window shadow stays opaque. */
+static inline void blend_px(uint8_t* dp, uint32_t argb, uint32_t cov, bool src_op) {
+    uint32_t sa = ((argb >> 24) & 0xff) * cov / 255;
+    uint32_t sr = (argb >> 16) & 0xff, sg = (argb >> 8) & 0xff, sb = argb & 0xff;
+    if (src_op) {
+        dp[0] = static_cast<uint8_t>(sr * cov / 255);
+        dp[1] = static_cast<uint8_t>(sg * cov / 255);
+        dp[2] = static_cast<uint8_t>(sb * cov / 255);
+        dp[3] = 0xff;
+        return;
+    }
+    if (sa == 0) return;
+    uint32_t ia = 255 - sa;
+    dp[0] = static_cast<uint8_t>((sr * sa + dp[0] * ia) / 255);
+    dp[1] = static_cast<uint8_t>((sg * sa + dp[1] * ia) / 255);
+    dp[2] = static_cast<uint8_t>((sb * sa + dp[2] * ia) / 255);
+    dp[3] = 0xff;
+}
+
+static void render_fill_rect(uint8_t* buf, int W, int H, int rx, int ry, int rw, int rh,
+                             uint32_t argb, bool src_op) {
+    for (int y = ry; y < ry + rh; y++) {
+        if (y < 0 || y >= H) continue;
+        uint8_t* row = buf + static_cast<size_t>(y) * W * 4;
+        for (int x = rx; x < rx + rw; x++) {
+            if (x < 0 || x >= W) continue;
+            blend_px(row + static_cast<size_t>(x) * 4, argb, 255, src_op);
+        }
+    }
+}
+
+static void render_draw_glyph(uint8_t* buf, int W, int H, const RenderGlyph& g,
+                              int gx, int gy, uint32_t argb, bool src_op) {
+    for (int row = 0; row < g.h; row++) {
+        int y = gy + row; if (y < 0 || y >= H) continue;
+        const uint8_t* cov = g.a8.data() + static_cast<size_t>(row) * g.w;
+        uint8_t* d = buf + static_cast<size_t>(y) * W * 4;
+        for (int col = 0; col < g.w; col++) {
+            int x = gx + col; if (x < 0 || x >= W) continue;
+            uint8_t c = cov[col];
+            if (c) blend_px(d + static_cast<size_t>(x) * 4, argb, c, src_op);
+        }
+    }
+}
+
+/* X RENDER COLOR = red,green,blue,alpha as CARD16 each -> 8-bit ARGB. */
+static uint32_t render_color(const uint8_t* p) {
+    uint16_t r = *reinterpret_cast<const uint16_t*>(p + 0);
+    uint16_t g = *reinterpret_cast<const uint16_t*>(p + 2);
+    uint16_t b = *reinterpret_cast<const uint16_t*>(p + 4);
+    uint16_t a = *reinterpret_cast<const uint16_t*>(p + 6);
+    return (static_cast<uint32_t>(a >> 8) << 24) | (static_cast<uint32_t>(r >> 8) << 16) |
+           (static_cast<uint32_t>(g >> 8) << 8) | (b >> 8);
+}
+
+/* Bytes per scanline for a glyph image of the given RENDER format. */
+static int glyph_stride(uint32_t format, int width) {
+    switch (format) {
+        case 0x30: return width * 4;                 /* ARGB32 */
+        case 0x34: return ((width + 31) >> 5) << 2;  /* A1 */
+        case 0x33: return ((width * 4 + 31) >> 5) << 2; /* A4 */
+        default:   return (width + 3) & ~3;          /* A8 */
+    }
+}
+
+/* Convert one glyph image (in `format`) to an A8 coverage bitmap w*h. */
+static void glyph_to_a8(uint32_t format, const uint8_t* img, int stride,
+                        int w, int h, std::vector<uint8_t>& out) {
+    out.assign(static_cast<size_t>(w) * h, 0);
+    for (int y = 0; y < h; y++) {
+        const uint8_t* row = img + static_cast<size_t>(y) * stride;
+        uint8_t* o = out.data() + static_cast<size_t>(y) * w;
+        for (int x = 0; x < w; x++) {
+            if (format == 0x30)       o[x] = row[x * 4 + 3];       /* ARGB32 alpha */
+            else if (format == 0x34)  o[x] = (row[x >> 3] & (1 << (x & 7))) ? 0xff : 0;
+            else if (format == 0x33) { uint8_t n = (x & 1) ? (row[x >> 1] >> 4) : (row[x >> 1] & 0xf);
+                                       o[x] = static_cast<uint8_t>(n * 17); }
+            else                      o[x] = row[x];               /* A8 */
+        }
+    }
+}
+
+/* CompositeGlyphs8/16/32 (idx_size = 1/2/4). Blends each glyph's coverage,
+ * coloured by the source picture, into the destination window's shadow. */
+static void render_composite_glyphs(X11Server* server, const uint8_t* data, int len,
+                                    int idx_size) {
+    uint8_t op = data[4];
+    bool src_op = (op == 1);
+    uint32_t src_id = *reinterpret_cast<const uint32_t*>(data + 8);
+    uint32_t dst_id = *reinterpret_cast<const uint32_t*>(data + 12);
+    uint32_t glyphset_id = *reinterpret_cast<const uint32_t*>(data + 20);
+    RenderPicture* dst = find_picture(server, dst_id);
+    if (!dst) return;
+    int W, H, ox, oy; X11Window* win; X11Pixmap* pix;
+    uint8_t* buf = picture_shadow(server, dst->drawable, &W, &H, &ox, &oy, &win, &pix);
+    if (!buf) return;
+    uint32_t color = picture_source_color(server, src_id);
+    RenderGlyphSet* gs = find_glyphset(server, glyphset_id);
+    int off = 28;
+    int penx = 0, peny = 0;
+    while (off + 8 <= len) {
+        uint8_t count = data[off];
+        if (count == 255) {                       /* glyphset switch */
+            gs = find_glyphset(server, *reinterpret_cast<const uint32_t*>(data + off + 4));
+            off += 8;
+            continue;
+        }
+        int16_t dx = *reinterpret_cast<const int16_t*>(data + off + 4);
+        int16_t dy = *reinterpret_cast<const int16_t*>(data + off + 6);
+        penx += dx; peny += dy;
+        const uint8_t* ids = data + off + 8;
+        for (int i = 0; i < count; i++) {
+            uint32_t gid = 0;
+            if (idx_size == 1) gid = ids[i];
+            else if (idx_size == 2) gid = *reinterpret_cast<const uint16_t*>(ids + i * 2);
+            else gid = *reinterpret_cast<const uint32_t*>(ids + i * 4);
+            if (gs) {
+                auto it = gs->glyphs.find(gid);
+                if (it != gs->glyphs.end()) {
+                    const RenderGlyph& g = it->second;
+                    render_draw_glyph(buf, W, H, g, ox + penx - g.x, oy + peny - g.y,
+                                      color, src_op);
+                    penx += g.xOff; peny += g.yOff;
+                }
+            }
+        }
+        int ids_bytes = (count * idx_size + 3) & ~3;
+        off += 8 + ids_bytes;
+    }
+    if (win) flush_shadow(server, win);
+}
+
 static void handle_render(X11Server* server, int client_idx, uint8_t minor,
                           const uint8_t* data, int len, uint16_t seq);
 static void handle_randr(X11Server* server, int client_idx, uint8_t minor,
@@ -3727,13 +3925,21 @@ static void handle_render(X11Server* server, int client_idx, uint8_t minor,
         *reinterpret_cast<uint32_t*>(reply + 12) = 11;
         send_to_client(server, client_idx, reply, 32);
     } else if (minor == 1) {
-        /* Both visuals must appear here. 0x22 (depth 32, ARGB) is the ROOT
-         * visual, so toolkits routinely ask for its picture format — and
-         * XRenderFindVisualFormat returns NULL for a visual we omit, after
-         * which XRenderCreatePicture dereferences it and the CLIENT segfaults
-         * inside libXrender with no protocol error to show for it. Listing
-         * only 0x21 crashed every Java/Swing app at startup. */
-        int num_formats = 2;
+        /* QueryPictFormats. The ARGB32/RGB24 visuals must appear (a toolkit
+         * asks for the depth-32 root visual's format and XRenderCreatePicture
+         * segfaults inside libXrender if it is absent). The A8/A4/A1 alpha
+         * formats are what antialiased text needs: Xft/cairo create an A8
+         * glyphset, and XRenderFindStandardFormat(A8) returns NULL — no text —
+         * unless A8 is listed here. Alpha formats carry no screen visual. */
+        struct Fmt { uint32_t id; uint8_t depth; uint16_t rs, rm, gs, gm, bs, bm, as_, am; };
+        const Fmt fmts[] = {
+            { 0x30, 32, 16,0xFF, 8,0xFF, 0,0xFF, 24,0xFF }, /* ARGB32 */
+            { 0x31, 24, 16,0xFF, 8,0xFF, 0,0xFF,  0,0    }, /* RGB24  */
+            { 0x32,  8,  0,0,    0,0,    0,0,     0,0xFF }, /* A8     */
+            { 0x33,  4,  0,0,    0,0,    0,0,     0,0x0F }, /* A4     */
+            { 0x34,  1,  0,0,    0,0,    0,0,     0,0x01 }, /* A1     */
+        };
+        int num_formats = 5;
         int num_depths = 2;
         int num_visuals = 2;
         int format_bytes = num_formats * 28;
@@ -3750,30 +3956,19 @@ static void handle_render(X11Server* server, int client_idx, uint8_t minor,
         *reinterpret_cast<uint32_t*>(&reply[16]) = static_cast<uint32_t>(num_depths);
         *reinterpret_cast<uint32_t*>(&reply[20]) = static_cast<uint32_t>(num_visuals);
         int off = 32;
-        /* Format 0: ARGB32 */
-        *reinterpret_cast<uint32_t*>(&reply[off]) = 0x30; off += 4;
-        reply[off] = 1; reply[off+1] = 32; off += 4;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 16; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 8; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 24; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint32_t*>(&reply[off]) = 0; off += 4;
-        /* Format 1: RGB24 */
-        *reinterpret_cast<uint32_t*>(&reply[off]) = 0x31; off += 4;
-        reply[off] = 1; reply[off+1] = 24; off += 4;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 16; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 8; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0xFF; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0; off += 2;
-        *reinterpret_cast<uint16_t*>(&reply[off]) = 0; off += 2;
-        *reinterpret_cast<uint32_t*>(&reply[off]) = 0; off += 4;
+        for (const auto& f : fmts) {
+            *reinterpret_cast<uint32_t*>(&reply[off]) = f.id; off += 4;
+            reply[off] = 1; reply[off+1] = f.depth; off += 4;   /* type=Direct, depth */
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.rs; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.rm; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.gs; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.gm; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.bs; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.bm; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.as_; off += 2;
+            *reinterpret_cast<uint16_t*>(&reply[off]) = f.am; off += 2;
+            *reinterpret_cast<uint32_t*>(&reply[off]) = 0; off += 4; /* colormap */
+        }
         /* Screen 0: depth 24 -> visual 0x21 (RGB24), depth 32 -> visual 0x22 (ARGB32) */
         *reinterpret_cast<uint32_t*>(&reply[off]) = static_cast<uint32_t>(num_depths); off += 4;
         *reinterpret_cast<uint32_t*>(&reply[off]) = 0x31; off += 4; /* fallback format */
@@ -3783,12 +3978,122 @@ static void handle_render(X11Server* server, int client_idx, uint8_t minor,
         };
         for (const auto& sd : screen_depths) {
             reply[off] = sd.depth; reply[off + 1] = 0;
-            *reinterpret_cast<uint16_t*>(&reply[off + 2]) = 1; /* visuals at this depth */
+            *reinterpret_cast<uint16_t*>(&reply[off + 2]) = 1;
             off += 8;
             *reinterpret_cast<uint32_t*>(&reply[off]) = sd.visual; off += 4;
             *reinterpret_cast<uint32_t*>(&reply[off]) = sd.format; off += 4;
         }
         send_to_client(server, client_idx, reply.data(), reply_len);
+    } else if (minor == 4) {                     /* CreatePicture */
+        uint32_t pid = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t drawable = *reinterpret_cast<const uint32_t*>(data + 8);
+        uint32_t format = *reinterpret_cast<const uint32_t*>(data + 12);
+        server->pictures.erase(std::remove_if(server->pictures.begin(), server->pictures.end(),
+            [&](const RenderPicture& p){ return p.id == pid; }), server->pictures.end());
+        RenderPicture np; np.id = pid; np.drawable = drawable; np.format = format;
+        server->pictures.push_back(np);
+    } else if (minor == 33) {                    /* CreateSolidFill */
+        uint32_t pid = *reinterpret_cast<const uint32_t*>(data + 4);
+        server->pictures.erase(std::remove_if(server->pictures.begin(), server->pictures.end(),
+            [&](const RenderPicture& p){ return p.id == pid; }), server->pictures.end());
+        RenderPicture np; np.id = pid; np.is_solid = true; np.solid_argb = render_color(data + 8);
+        server->pictures.push_back(np);
+    } else if (minor == 5 || minor == 6 || minor == 28 || minor == 30) {
+        /* ChangePicture / SetPictureClipRectangles / SetPictureTransform /
+         * SetPictureFilter — accepted; no clip/transform state acted on. */
+    } else if (minor == 7) {                     /* FreePicture */
+        uint32_t pid = *reinterpret_cast<const uint32_t*>(data + 4);
+        server->pictures.erase(std::remove_if(server->pictures.begin(), server->pictures.end(),
+            [&](const RenderPicture& p){ return p.id == pid; }), server->pictures.end());
+    } else if (minor == 26) {                    /* FillRectangles */
+        uint8_t op = data[4];
+        uint32_t dst_id = *reinterpret_cast<const uint32_t*>(data + 8);
+        uint32_t color = render_color(data + 12);
+        RenderPicture* dst = find_picture(server, dst_id);
+        if (dst) {
+            int W, H, ox, oy; X11Window* win; X11Pixmap* pix;
+            uint8_t* buf = picture_shadow(server, dst->drawable, &W, &H, &ox, &oy, &win, &pix);
+            if (buf) {
+                bool src_op = (op == 1);
+                for (int o = 20; o + 8 <= len; o += 8) {
+                    int16_t rx = *reinterpret_cast<const int16_t*>(data + o);
+                    int16_t ry = *reinterpret_cast<const int16_t*>(data + o + 2);
+                    uint16_t rw = *reinterpret_cast<const uint16_t*>(data + o + 4);
+                    uint16_t rh = *reinterpret_cast<const uint16_t*>(data + o + 6);
+                    render_fill_rect(buf, W, H, ox + rx, oy + ry, rw, rh, color, src_op);
+                }
+                if (win) flush_shadow(server, win);
+            }
+        }
+    } else if (minor == 17) {                    /* CreateGlyphSet */
+        uint32_t gsid = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t fmt = *reinterpret_cast<const uint32_t*>(data + 8);
+        server->glyphsets.erase(std::remove_if(server->glyphsets.begin(), server->glyphsets.end(),
+            [&](const RenderGlyphSet& g){ return g.id == gsid; }), server->glyphsets.end());
+        RenderGlyphSet gs; gs.id = gsid; gs.format = fmt;
+        server->glyphsets.push_back(gs);
+    } else if (minor == 19) {                    /* FreeGlyphSet */
+        uint32_t gsid = *reinterpret_cast<const uint32_t*>(data + 4);
+        server->glyphsets.erase(std::remove_if(server->glyphsets.begin(), server->glyphsets.end(),
+            [&](const RenderGlyphSet& g){ return g.id == gsid; }), server->glyphsets.end());
+    } else if (minor == 20) {                    /* AddGlyphs */
+        uint32_t gsid = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t nglyphs = *reinterpret_cast<const uint32_t*>(data + 8);
+        RenderGlyphSet* gs = find_glyphset(server, gsid);
+        if (gs && nglyphs <= 4096) {
+            const uint8_t* gids = data + 12;
+            const uint8_t* infos = gids + nglyphs * 4;
+            const uint8_t* img = infos + nglyphs * 12;
+            const uint8_t* end = data + len;
+            for (uint32_t i = 0; i < nglyphs; i++) {
+                uint32_t gid = *reinterpret_cast<const uint32_t*>(gids + i * 4);
+                const uint8_t* gi = infos + i * 12;
+                RenderGlyph g;
+                g.w = *reinterpret_cast<const uint16_t*>(gi + 0);
+                g.h = *reinterpret_cast<const uint16_t*>(gi + 2);
+                g.x = *reinterpret_cast<const int16_t*>(gi + 4);
+                g.y = *reinterpret_cast<const int16_t*>(gi + 6);
+                g.xOff = *reinterpret_cast<const int16_t*>(gi + 8);
+                g.yOff = *reinterpret_cast<const int16_t*>(gi + 10);
+                int stride = glyph_stride(gs->format, g.w);
+                size_t need = static_cast<size_t>(stride) * g.h;
+                if (img + need > end) break;
+                if (g.w && g.h) glyph_to_a8(gs->format, img, stride, g.w, g.h, g.a8);
+                img += need;
+                gs->glyphs[gid] = std::move(g);
+            }
+        }
+    } else if (minor == 22) {                    /* FreeGlyphs */
+        uint32_t gsid = *reinterpret_cast<const uint32_t*>(data + 4);
+        RenderGlyphSet* gs = find_glyphset(server, gsid);
+        if (gs) {
+            for (int o = 8; o + 4 <= len; o += 4)
+                gs->glyphs.erase(*reinterpret_cast<const uint32_t*>(data + o));
+        }
+    } else if (minor == 23) { render_composite_glyphs(server, data, len, 1);
+    } else if (minor == 24) { render_composite_glyphs(server, data, len, 2);
+    } else if (minor == 25) { render_composite_glyphs(server, data, len, 4);
+    } else if (minor == 8) {                     /* Composite (solid source only) */
+        uint8_t op = data[4];
+        uint32_t src_id = *reinterpret_cast<const uint32_t*>(data + 8);
+        uint32_t dst_id = *reinterpret_cast<const uint32_t*>(data + 16);
+        int16_t xDst = *reinterpret_cast<const int16_t*>(data + 28);
+        int16_t yDst = *reinterpret_cast<const int16_t*>(data + 30);
+        uint16_t cw = *reinterpret_cast<const uint16_t*>(data + 32);
+        uint16_t ch = *reinterpret_cast<const uint16_t*>(data + 34);
+        RenderPicture* src = find_picture(server, src_id);
+        RenderPicture* dst = find_picture(server, dst_id);
+        if (dst && src && src->is_solid) {
+            int W, H, ox, oy; X11Window* win; X11Pixmap* pix;
+            uint8_t* buf = picture_shadow(server, dst->drawable, &W, &H, &ox, &oy, &win, &pix);
+            if (buf) {
+                render_fill_rect(buf, W, H, ox + xDst, oy + yDst, cw, ch,
+                                 src->solid_argb, op == 1);
+                if (win) flush_shadow(server, win);
+            }
+        }
+        /* Non-solid sources (image blits) fall through: the client's own
+         * PutImage/CopyArea path already covers those. */
     } else if (minor == 29) {
         uint8_t reply[32] = {};
         reply[0] = 1; *reinterpret_cast<uint16_t*>(reply + 2) = seq;
