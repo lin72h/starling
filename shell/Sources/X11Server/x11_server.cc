@@ -2948,10 +2948,26 @@ static void handle_request(X11Server* server, int client_idx,
     }
 
     case X11_GET_MODIFIER_MAPPING: {
+        /* 8 modifiers x 2 keycodes. These are X keycodes (evdev+8) and MUST
+         * match both the modifier keysyms in GetKeyboardMapping and the bits
+         * x11_server_key_event tracks (Shift=0, Lock=1, Control=2, Mod1=3,
+         * Mod4=6). An empty map here builds an incomplete keymap in GDK/GTK,
+         * so keys are delivered but never translated to text. */
+        static const uint8_t modmap[16] = {
+            50, 62,   /* Shift:   Shift_L, Shift_R */
+            66, 0,    /* Lock:    Caps_Lock */
+            37, 105,  /* Control: Control_L, Control_R */
+            64, 108,  /* Mod1:    Alt_L, Alt_R */
+            0, 0,     /* Mod2 */
+            0, 0,     /* Mod3 */
+            133, 0,   /* Mod4:    Super_L */
+            0, 0,     /* Mod5 */
+        };
         uint8_t reply[32 + 16] = {};
-        reply[0] = 1; reply[1] = 2;
+        reply[0] = 1; reply[1] = 2;  /* keycodes per modifier */
         *reinterpret_cast<uint16_t*>(reply + 2) = seq;
-        *reinterpret_cast<uint32_t*>(reply + 4) = 4;
+        *reinterpret_cast<uint32_t*>(reply + 4) = 4;  /* 16 bytes / 4 */
+        memcpy(reply + 32, modmap, sizeof(modmap));
         send_to_client(server, client_idx, reply, 32 + 16);
         break;
     }
