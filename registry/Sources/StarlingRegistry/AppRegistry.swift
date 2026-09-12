@@ -173,6 +173,12 @@ public final class AppRegistry: @unchecked Sendable {
                 path: installedDir + "/" + id + ".app", group: "Starling App")
             out.append(makeRecord(id: id, catalog: kf, installed: installedRecord))
         }
+        // Snaps installed through the App Center have no catalog file — they
+        // are their own package system. Surface each installed GUI snap from
+        // the snapd desktop directory (skipping any a catalog record already
+        // covers, e.g. the App Center itself), so an App Center install lights
+        // up the launcher the same way an apt install does.
+        out.append(contentsOf: Self.discoverSnaps(covering: out))
         out.sort {
             $0.order != $1.order ? $0.order < $1.order : $0.name < $1.name
         }
@@ -358,6 +364,86 @@ public final class AppRegistry: @unchecked Sendable {
     }
 
     /// "Is it on disk?" — the fallback for apps the store did not install.
+    /// The snapd desktop directory: one `<snap>_<app>.desktop` per app of
+    /// each installed snap, with an absolute `Icon` path.
+    static let snapDesktopDir = "/var/lib/snapd/desktop/applications"
+
+    /// Synthesize a record for every installed GUI snap not already described
+    /// by a catalog record. `covering` is the catalog-built list, checked so a
+    /// snap the catalog names (the App Center) is not listed twice.
+    static func discoverSnaps(covering existing: [AppRecord]) -> [AppRecord] {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: snapDesktopDir) else {
+            return []
+        }
+        let coveredExec = Set(existing.filter { $0.kind == .snap }.map { $0.exec })
+        var out: [AppRecord] = []
+        var order = 900
+        for file in files.sorted() where file.hasSuffix(".desktop") {
+            guard let kf = KeyFile(path: snapDesktopDir + "/" + file,
+                                   group: "Desktop Entry") else { continue }
+            // Only launchable GUI apps: skip the hidden, the terminal-only,
+            // and non-application entries.
+            if (kf.string("Type") ?? "Application") != "Application" { continue }
+            if kf.string("NoDisplay")?.lowercased() == "true" { continue }
+            if kf.string("Hidden")?.lowercased() == "true" { continue }
+            if kf.string("Terminal")?.lowercased() == "true" { continue }
+            guard let name = kf.string("Name"), !name.isEmpty else { continue }
+
+            // `<snap>_<app>` → the /snap/bin target (`<snap>` for the main app,
+            // `<snap>.<app>` otherwise).
+            let base = String(file.dropLast(".desktop".count))
+            let parts = base.split(separator: "_", maxSplits: 1).map(String.init)
+            let snap = parts.first ?? base
+            let app = parts.count > 1 ? parts[1] : snap
+            let target = (app == snap) ? snap : "\(snap).\(app)"
+            if coveredExec.contains(target) { continue }
+            if !fm.isExecutableFile(atPath: "/snap/bin/\(target)") { continue }
+
+            let wmClass = kf.string("StartupWMClass") ?? base
+            // A snap's Icon is either an absolute path (often SVG, which the
+            // engine cannot decode) or a theme name. Keep only a raster file
+            // that exists; otherwise the tile falls back to the glyph.
+            var iconPath: String? = nil
+            if let icon = kf.string("Icon") {
+                if icon.hasPrefix("/") {
+                    if fm.fileExists(atPath: icon), !icon.lowercased().hasSuffix(".svg") {
+                        iconPath = icon
+                    }
+                } else {
+                    iconPath = DesktopEntry.resolveIcon(icon, in: DesktopEntry.dataDirs())
+                }
+            }
+            // Skip one an already-INSTALLED record covers, by identity or
+            // display name, so the desktop never shows two of the same app
+            // (the shipped Calculator and its snap). A catalog app that is
+            // only installable — not on disk — does not suppress a snap the
+            // user really installed (an apt GIMP record vs a GIMP snap).
+            let lname = name.lowercased()
+            if existing.contains(where: {
+                $0.installed && ($0.matches(appId: wmClass) || $0.matches(appId: base)
+                                 || $0.name.lowercased() == lname)
+            }) { continue }
+
+            var appIds = [wmClass, base, "snap-\(target)"]
+            var seen = Set<String>()
+            appIds = appIds.filter { seen.insert($0.lowercased()).inserted }
+
+            order += 1
+            out.append(AppRecord(
+                id: "snap-\(target)", name: name, kind: .snap, order: order,
+                glyph: "externalApp", color: 0x5E5E6B, dockOrder: nil,
+                category: "", publisher: "", subtitle: "", sizeLabel: "",
+                details: "", exec: target, windowRect: nil,
+                installRecipe: nil, bins: ["/snap/bin/\(target)"],
+                desktopEntries: [base], wmClasses: [wmClass], titleMatches: [],
+                renameWindows: false, debURL: nil, debMarker: nil,
+                desktopFile: snapDesktopDir + "/" + file, iconPath: iconPath,
+                version: nil, installedAt: nil, installed: true, appIds: appIds))
+        }
+        return out
+    }
+
     static func probe(kind: AppRecord.Kind, exec: String, bins: [String],
                       resolver: (@Sendable (String) -> String?)?) -> Bool {
         let fm = FileManager.default
@@ -374,6 +460,9 @@ public final class AppRegistry: @unchecked Sendable {
                 .contains { fm.isExecutableFile(atPath: $0) }
         case .host, .x11:
             return bins.contains { fm.isExecutableFile(atPath: $0) }
+        case .snap:
+            return fm.isExecutableFile(atPath: "/snap/bin/\(exec)")
+                || bins.contains { fm.isExecutableFile(atPath: $0) }
         }
     }
 
@@ -409,7 +498,9 @@ public final class AppRegistry: @unchecked Sendable {
         // and self-correcting, since the watch narrows to installed.d on the
         // first event. The .deb ships the directory, so a packaged install
         // never takes this path at all.
-        for dir in [Self.catalogDir, Self.nearestExisting(Self.installedDir)] {
+        for dir in [Self.catalogDir,
+                    Self.nearestExisting(Self.installedDir),
+                    Self.nearestExisting(Self.snapDesktopDir)] {
             _ = inotify_add_watch(fd, dir, mask)
         }
 
@@ -424,6 +515,7 @@ public final class AppRegistry: @unchecked Sendable {
             // now. inotify_add_watch on a path already watched just updates
             // the existing watch, so this is safe to repeat.
             _ = inotify_add_watch(fd, Self.nearestExisting(Self.installedDir), mask)
+            _ = inotify_add_watch(fd, Self.nearestExisting(Self.snapDesktopDir), mask)
             self.reload()
             onChange()
         }

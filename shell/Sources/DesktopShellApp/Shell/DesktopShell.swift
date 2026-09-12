@@ -8100,6 +8100,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
             return
         #elseif os(Linux)
+        case _ where _record(appId)?.kind == .snap:
+            // A snap (the App Center and anything it installs). app-run's
+            // --snap path runs `snap run <target>` against the real per-user
+            // runtime dir and the socket the compositor exposes there —
+            // confinement cannot see the session's private runtime dir. The
+            // window returns via the onNewWindow Wayland callback like any
+            // other client.
+            _spawnLauncher(
+                ProcessInfo.processInfo.environment["STARLING_APP_RUN"]
+                    ?? "/usr/bin/app-run",
+                args: ["--snap", _record(appId)?.exec ?? appId])
+            return
         case _ where _record(appId)?.kind == .host:
             // Third-party host app. Every one of them goes out through
             // app-run, which owns the per-app launch recipe — the flags, the

@@ -6,11 +6,14 @@
 #endif
 #include "wayland_server_internal.h"
 #include "xdg-shell-protocol.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 /* Forward declarations for deferred input. */
@@ -170,6 +173,8 @@ void wayland_server_destroy(WaylandServer* server) {
         free(surface);
     }
 
+    if (server->extra_socket_path[0])
+        unlink(server->extra_socket_path);
     if (server->deferred_input.source)
         wl_event_source_remove(server->deferred_input.source);
     if (server->deferred_input.pipe_fd[0] >= 0)
@@ -766,6 +771,48 @@ DEF_CB_SETTER(unfullscreen_request)
 /* --------------------------------------------------------------------------
  * Utility
  * -------------------------------------------------------------------------- */
+
+int wayland_server_add_socket_at(WaylandServer* server, const char* path) {
+    if (!server || !path || !*path)
+        return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        fprintf(stderr, "wayland_server: socket path too long: %s\n", path);
+        return -1;
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        fprintf(stderr, "wayland_server: socket(): %s\n", strerror(errno));
+        return -1;
+    }
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    unlink(path);  /* clear a socket a previous run left behind */
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "wayland_server: bind %s: %s\n", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    /* Confined snaps run as the session user; a root dev shell must let that
+     * user connect. In a normal (unprivileged) session this is a no-op. */
+    chmod(path, 0777);
+    if (listen(fd, 128) < 0) {
+        fprintf(stderr, "wayland_server: listen %s: %s\n", path, strerror(errno));
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    if (wl_display_add_socket_fd(server->display, fd) < 0) {
+        fprintf(stderr, "wayland_server: add_socket_fd %s failed\n", path);
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    snprintf(server->extra_socket_path, sizeof(server->extra_socket_path), "%s", path);
+    fprintf(stderr, "wayland_server: also listening at %s\n", path);
+    return 0;
+}
 
 const char* wayland_server_get_socket_name(WaylandServer* server) {
     return server->socket_name;

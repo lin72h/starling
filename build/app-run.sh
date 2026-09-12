@@ -108,6 +108,41 @@ if ! is_starling_os && [ "$(id -u)" -eq 0 ]; then
 fi
 NAME="$1"; shift
 
+# ── Snap apps (Ubuntu App Center ecosystem) ───────────────────────
+# A snap is AppArmor-confined and may reach the compositor only at the
+# standard @{run}/user/@{uid}/ socket, never Starling's private runtime dir
+# — so it runs against the real /run/user/<uid> (where the shell also exposes
+# its Wayland socket) and the real user session bus. `snap run` refuses to
+# run as root, so under a root dev shell we drop to the login user first; the
+# shipped session is already that user. This is its own exec because the
+# generic launch path below forces the private runtime dir a snap cannot use.
+if [ "$NAME" = "--snap" ]; then
+    SNAP_APP="${1:?app-run --snap needs a snap name}"; shift
+    if ! is_starling_os && [ "$(id -u)" -eq 0 ] && [ "${STAY_ROOT:-0}" -eq 0 ]; then
+        LOGIN_HOME="$(getent passwd "$LOGIN_USER" | cut -d: -f6)"
+        LOGIN_UID="$(id -u "$LOGIN_USER" 2>/dev/null || echo 1000)"
+        exec runuser -u "$LOGIN_USER" -- env -i \
+            HOME="$LOGIN_HOME" USER="$LOGIN_USER" LOGNAME="$LOGIN_USER" \
+            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin" \
+            LANG="${LANG:-en_US.UTF-8}" \
+            XDG_RUNTIME_DIR="/run/user/$LOGIN_UID" \
+            WAYLAND_DISPLAY="$SOCKET" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$LOGIN_UID/bus" \
+            XDG_SESSION_TYPE=wayland \
+            GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland \
+            snap run "$SNAP_APP" "$@"
+    fi
+    RUID="$(id -u)"
+    exec env \
+        PATH="/snap/bin:$PATH" \
+        XDG_RUNTIME_DIR="/run/user/$RUID" \
+        WAYLAND_DISPLAY="$SOCKET" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$RUID/bus" \
+        XDG_SESSION_TYPE=wayland \
+        GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland \
+        snap run "$SNAP_APP" "$@"
+fi
+
 # ── App registry ─────────────────────────────────────────────────────────
 # Resolve a friendly name to the command line to run in the runtime. The
 # per-app home is keyed on $NAME. Add entries here as apps are installed.

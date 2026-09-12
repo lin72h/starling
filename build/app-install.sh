@@ -1,10 +1,14 @@
 #!/bin/sh
 # app-install.sh — install third-party apps onto the HOST via apt/dpkg only.
 #
-# v0 Ubuntu launch model (user direction): apps run HOST-DIRECT and install
-# through apt — NO SNAP, ever. Browsers: Chrome only — firefox and chromium
-# are deliberately absent (Ubuntu's archive versions of both are snap shims,
-# and the product ships one browser).
+# Two ways an app reaches the desktop. The CURATED apps below install
+# HOST-DIRECT through apt (a vetted recipe per app, no snap) — this script.
+# The BROADER ecosystem comes through Ubuntu's App Center (snap), a launchable
+# app in its own right (registry/catalog.d/appcenter.app); snaps it installs
+# are discovered straight from the snapd desktop directory and need no recipe
+# here. Browsers stay apt-only and Chrome-only — firefox and chromium in
+# Ubuntu's archive are snap shims, and the product ships one curated browser.
+# The one snap this script installs is the App Center itself.
 #
 # Recipe kinds:
 #   archive      plain `apt-get install` from the Ubuntu archive
@@ -477,6 +481,15 @@ case "$NAME" in
         rm -rf /opt/idea
         mkdir -p /opt/idea
         tar -xzf "$TMP/idea.tar.gz" -C /opt/idea --strip-components=1
+        ;;
+    appcenter|snap-store)
+        # Ubuntu's App Center is itself a snap; usually preinstalled. Install
+        # it if missing. Everything else snap-shaped is installed THROUGH it.
+        command -v snap >/dev/null 2>&1 || {
+            echo "app-install: snapd is not present; cannot install App Center" >&2
+            exit 2
+        }
+        snap install snap-store
         ;;
     blender)      inst blender ;;
     gimp)         inst gimp ;;

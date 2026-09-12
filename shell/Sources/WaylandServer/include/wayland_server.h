@@ -353,6 +353,13 @@ void wayland_server_keyboard_modifiers(WaylandServer* server,
 
 const char* wayland_server_get_socket_name(WaylandServer* server);
 
+/* Also listen on an absolute filesystem path (in addition to the primary
+ * socket), for clients that cannot reach the primary — confined snaps, whose
+ * AppArmor profile only allows the wayland socket under /run/user/<uid>/.
+ * The socket is made world-connectable (a root dev shell serving a
+ * user's snaps). Returns 0 on success. Loop thread only. */
+int wayland_server_add_socket_at(WaylandServer* server, const char* path);
+
 /* Update the output scale and notify all connected clients.
  * |scale|: integer output scale (wl_output.scale).
  * |fractional_scale_120ths|: fractional scale in 120ths (e.g. 240 = 2.0x, 180 = 1.5x).

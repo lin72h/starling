@@ -331,6 +331,11 @@ struct WaylandServer {
 
     // Socket
     char socket_name[64];
+    // A second listening socket in the real per-user runtime dir
+    // (/run/user/<uid>), so AppArmor-confined snaps — which may reach the
+    // compositor only at the standard @{run}/user/@{uid}/ path — can connect.
+    // Empty when not exposed. Unlinked on destroy.
+    char extra_socket_path[108];
 };
 
 // Presentation feedback (one per wp_presentation.feedback request)

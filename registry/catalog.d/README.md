@@ -13,7 +13,7 @@ Staged to `<share>/catalog.d`, installed to `/usr/share/starling/catalog.d`.
 |---|---|
 | `Id` | app id — also the `app-run` / `app-install` name. Defaults to the filename. |
 | `Name` | what the launcher label and dock tooltip say |
-| `Kind` | `first-party` \| `host` \| `android` \| `x11` — how it launches |
+| `Kind` | `first-party` \| `host` \| `android` \| `x11` \| `snap` — how it launches |
 | `Order` | launcher sort key |
 | `Dock` | position in the default dock; absent = launcher-only until pinned |
 | `Glyph` | painter fallback shape (an `IconType` case). Never a brand mark — see below |
@@ -39,6 +39,18 @@ IntelliJ's project window is titled `untitled – Main.java` and contains no
 window is titled `Xwayland on :N`), and Waydroid (one window for every Android
 app, titled after whichever is foreground). Every real Wayland client sets
 `xdg_toplevel.set_app_id`; use `DesktopEntry`/`WmClass` for those.
+
+**Snaps are discovered, not cataloged.** Ubuntu's App Center (`appcenter.app`,
+`Kind=snap`) is the one snap with a catalog record. Everything it installs is
+surfaced automatically: the registry scans `/var/lib/snapd/desktop/applications`
+and synthesizes a launcher entry for each installed GUI snap (name, window
+class, and — when it is a raster file — icon), skipping any an installed
+catalog app already covers so the shipped Calculator and its snap twin don't
+both show. A snap whose `.desktop` names a theme or SVG icon falls back to a
+glyph, since the engine decodes raster only. Launch goes through
+`app-run --snap <target>`, which runs it against the real per-user runtime dir
+(snap confinement cannot see the session's private one), where the compositor
+also exposes its Wayland socket.
 
 **No third-party artwork is shipped.** `Glyph` names a shape we draw
 ourselves, deliberately by category — a browser gets a globe, not a coloured

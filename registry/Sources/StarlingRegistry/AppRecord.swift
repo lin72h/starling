@@ -37,6 +37,11 @@ public struct AppRecord: Sendable {
         /// An X11-only app in its own rootful Xwayland (WeChat); `exec` names
         /// the launcher script.
         case x11
+        /// A snap from Ubuntu's App Center ecosystem; `exec` is its
+        /// `/snap/bin` target, run with `snap run` against the real per-user
+        /// runtime dir (snap confinement cannot see the session's private
+        /// one). Discovered from the snapd desktop directory, not the catalog.
+        case snap
     }
 
     // ── Catalog: shipped, static ─────────────────────────────────────────

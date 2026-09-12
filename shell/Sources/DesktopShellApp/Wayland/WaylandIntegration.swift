@@ -392,6 +392,17 @@ class WaylandIntegration {
         return String(cString: wayland_server_get_socket_name(server))
     }
 
+    /// Also listen for clients in `dir` (its basename kept the same as the
+    /// primary socket). Confined snaps can only reach the compositor at the
+    /// standard /run/user/<uid>/ path — the App Center itself is one — so the
+    /// shell exposes a socket there in addition to its private one. Returns
+    /// true on success.
+    @discardableResult
+    func exposeExtraSocket(inDir dir: String) -> Bool {
+        guard let server = server, let name = socketName else { return false }
+        return wayland_server_add_socket_at(server, "\(dir)/\(name)") == 0
+    }
+
     /// True while any client holds a zwp_idle_inhibitor_v1 — Chrome or
     /// Firefox playing video, a slideshow, a player. The shell's screensaver
     /// idle timer treats this as ongoing activity, so a film watched without

@@ -256,6 +256,18 @@ done
 # on the dev path and shows up only on the shipping-shaped one.
 NO_MUX=(-u TMUX -u TMUX_PANE -u TERM_PROGRAM -u TERM_PROGRAM_VERSION -u STY -u WINDOW)
 
+# polkit authentication agent (dev), so the App Center's Install button can
+# be authorized like it will be in the shipped session. Waits for the
+# compositor socket, then registers with polkitd. Session semantics under a
+# root dev shell are murky, so this is best-effort here; the real test is a
+# GDM login (test/vm.sh) or the packaged session.
+if command -v lxpolkit >/dev/null 2>&1; then
+    ( for _ in $(seq 40); do [ -S "$XDG/wayland-0" ] && break; sleep 0.25; done
+      exec env XDG_RUNTIME_DIR="$XDG" WAYLAND_DISPLAY=wayland-0 \
+          DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG/bus" \
+          GDK_BACKEND=wayland lxpolkit ) >/dev/null 2>&1 &
+fi
+
 cd "$LIB"
 if [ "$SEAT" = direct ]; then
     exec sudo env "${ENV_ARGS[@]}" ./DesktopShellApp --drm "${ARGS[@]+"${ARGS[@]}"}"

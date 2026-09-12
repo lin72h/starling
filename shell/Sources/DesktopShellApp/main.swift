@@ -793,6 +793,16 @@ func runDRM() -> Never {
     // refreshMhz: the panel's real refresh rate from the active DRM mode.
     wayland.start(screenWidth: drmWidth, screenHeight: drmHeight, scale: drmDpiInt, shellDpi: currentShellDpi,
                   refreshMhz: Int(fl_drm_view_get_refresh_mhz(view)))
+
+    // Confined snaps (Ubuntu's App Center and the apps it installs) can only
+    // reach the compositor at the standard per-user runtime path, never the
+    // session's private one. Expose a second socket there — skipped when that
+    // path is already where the primary socket lives.
+    let realRuntimeDir = "/run/user/\(LoginUser.uid)"
+    if realRuntimeDir != LoginUser.runtimeDir,
+       FileManager.default.fileExists(atPath: realRuntimeDir) {
+        wayland.exposeExtraSocket(inDir: realRuntimeDir)
+    }
     // REAL multi-output: advertise the arrangement to clients — one
     // wl_output per display with logical positions (replaces the single
     // config-built output). Surface enter/leave follows window rects via
