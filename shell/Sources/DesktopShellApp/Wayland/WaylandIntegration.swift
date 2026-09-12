@@ -125,6 +125,25 @@ private enum WaylandEvent: @unchecked Sendable {
     case systemBell(surfaceId: UInt32)
     case shortcutsInhibit(surfaceId: UInt32, inhibited: Bool)
     case sessionLock(locked: Bool)
+    /// ext_workspace: a panel's request (WAYLAND_WORKSPACE_REQUEST_*).
+    case workspaceRequest(id: UInt32, request: Int32, name: String)
+    /// ext_background_effect: blur rects (x, y, w, h)… in surface coords.
+    case surfaceBlur(surfaceId: UInt32, rects: [Int32])
+    /// zwlr_virtual_pointer: one frame of synthetic pointer input.
+    case virtualPointer(outputIndex: Int, hasAbs: Bool, ax: Double, ay: Double,
+                        dx: Double, dy: Double, buttons: Int64,
+                        wheelDx: Double, wheelDy: Double)
+    /// zwp_virtual_keyboard: one key, decoded through the client's keymap.
+    case virtualKey(evdev: UInt32, keysym: UInt32, text: String, pressed: Bool)
+    /// wp_pointer_warp: put the pointer at (x, y) of the surface.
+    case pointerWarp(surfaceId: UInt32, x: Double, y: Double)
+    /// wl_data_device drag: `active` while a drag is on; the icon surface
+    /// (0 = none) is a role of its own, drawn at the pointer.
+    case dragIcon(surfaceId: UInt32, active: Bool)
+    /// xdg_toplevel_drag: the toplevel riding the drag, and its offset.
+    case toplevelDrag(surfaceId: UInt32, xOff: Int32, yOff: Int32, active: Bool)
+    /// wlr-output-management apply: the host output's scale.
+    case outputConfig(configId: UInt32, hostScale: Double)
 }
 
 /// Commands produced on the UI thread, executed on the platform thread.
@@ -146,6 +165,16 @@ private enum WaylandCommand: @unchecked Sendable {
     case toplevelPositionFailed(surfaceId: UInt32)
     case setWorkArea(outputIndex: Int32, x: Int32, y: Int32, w: Int32, h: Int32)
     case setFrameExtents(top: Int32, bottom: Int32, left: Int32, right: Int32)
+    case setWorkspaces(list: [WaylandWorkspaceEntry])
+    case outputConfigResult(configId: UInt32, ok: Bool)
+}
+
+/// One workspace as ext_workspace_v1 advertises it: the shell's space id,
+/// its display name and whether it is the active one.
+struct WaylandWorkspaceEntry: Equatable {
+    let id: UInt32
+    let name: String
+    let active: Bool
 }
 
 // MARK: - WaylandIntegration
@@ -293,6 +322,40 @@ class WaylandIntegration {
     /// overlay layer surfaces named "session-lock"; while locked the shell
     /// draws nothing but those, and black.
     var onSessionLock: ((_ locked: Bool) -> Void)?
+    /// ext_workspace_v1: a panel activated/removed/created a workspace.
+    var onWorkspaceRequest: ((_ id: UInt32, _ request: Int32, _ name: String) -> Void)?
+    /// ext_background_effect_v1: blur these rects (surface coords, flat
+    /// x,y,w,h quads; empty = no blur) behind the surface's content.
+    var onSurfaceBlur: ((_ surfaceId: UInt32, _ rects: [Int32]) -> Void)?
+    /// zwlr_virtual_pointer_v1: a client's pointer frame — absolute as
+    /// fractions of the output, or relative in logical px; buttons are the
+    /// Flutter mask; wheel deltas are Flutter's units.
+    var onVirtualPointer: ((_ outputIndex: Int, _ hasAbs: Bool, _ ax: Double, _ ay: Double,
+                            _ dx: Double, _ dy: Double, _ buttons: Int64,
+                            _ wheelDx: Double, _ wheelDy: Double) -> Void)?
+    /// zwp_virtual_keyboard_v1: a decoded key press/release.
+    var onVirtualKey: ((_ evdev: UInt32, _ keysym: UInt32, _ text: String, _ pressed: Bool) -> Void)?
+    /// wp_pointer_warp_v1: (x, y) are logical, surface-local.
+    var onPointerWarp: ((_ surfaceId: UInt32, _ x: Double, _ y: Double) -> Void)?
+    /// A drag-and-drop began or ended.
+    var onDragStateChanged: ((_ active: Bool) -> Void)?
+    /// The drag's icon surface appeared (its id and texture) or went (nil).
+    var onDragIcon: ((_ iconId: String?, _ textureId: Int) -> Void)?
+    /// xdg_toplevel_drag_v1: keep the window's content origin at the
+    /// pointer minus the offset while active.
+    var onToplevelDrag: ((_ windowId: String, _ xOff: Int, _ yOff: Int, _ active: Bool) -> Void)?
+    /// wlr-output-management: apply this host scale, then answer through
+    /// outputConfigResult.
+    var onOutputConfig: ((_ configId: UInt32, _ hostScale: Double) -> Void)?
+    /// A wl_data_device drag is in progress: ordinary per-window pointer
+    /// forwarding pauses and the shell's drag router steers the pointer
+    /// (see _DesktopShellState._dragPointerMoved).
+    private(set) var dragActive = false
+    private var dragIconSurfaceId: UInt32? = nil
+    private var lastWorkspaces: [WaylandWorkspaceEntry]? = nil
+    /// Surface coordinates → shell logical px (the inverse of what
+    /// sendPointerEvent applies on the way in).
+    var surfaceToLogical: Double { fractionalScale / shellDpi }
     /// Screencopy is in flight: the desktop must present so the engine's
     /// capture mirror refreshes. Same rider contract as the recorders.
     nonisolated(unsafe) var onFramePumpNeedChanged: (() -> Void)?
@@ -520,6 +583,58 @@ class WaylandIntegration {
             this.queueEvent(.sessionLock(locked: locked != 0))
         }, ctx)
 
+        wayland_server_on_workspace_request(server, { (ctx, id, request, name) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.workspaceRequest(id: id, request: request,
+                                              name: name.map { String(cString: $0) } ?? ""))
+        }, ctx)
+
+        wayland_server_on_surface_blur(server, { (ctx, surfaceId, rects, count) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            var flat: [Int32] = []
+            if let rects = rects, count > 0 {
+                flat = Array(UnsafeBufferPointer(start: rects, count: Int(count) * 4))
+            }
+            this.queueEvent(.surfaceBlur(surfaceId: surfaceId, rects: flat))
+        }, ctx)
+
+        wayland_server_on_virtual_pointer(server, { (ctx, outputIndex, hasAbs, ax, ay, dx, dy,
+                                                     buttons, wheelDx, wheelDy) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.virtualPointer(outputIndex: Int(outputIndex), hasAbs: hasAbs != 0,
+                                            ax: ax, ay: ay, dx: dx, dy: dy,
+                                            buttons: Int64(buttons),
+                                            wheelDx: wheelDx, wheelDy: wheelDy))
+        }, ctx)
+
+        wayland_server_on_virtual_key(server, { (ctx, evdev, keysym, utf8, pressed) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.virtualKey(evdev: evdev, keysym: keysym,
+                                        text: utf8.map { String(cString: $0) } ?? "",
+                                        pressed: pressed != 0))
+        }, ctx)
+
+        wayland_server_on_pointer_warp(server, { (ctx, surfaceId, x, y) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.pointerWarp(surfaceId: surfaceId, x: x, y: y))
+        }, ctx)
+
+        wayland_server_on_drag_icon(server, { (ctx, surfaceId, active) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.dragIcon(surfaceId: surfaceId, active: active != 0))
+        }, ctx)
+
+        wayland_server_on_toplevel_drag(server, { (ctx, surfaceId, xOff, yOff, active) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.toplevelDrag(surfaceId: surfaceId, xOff: xOff, yOff: yOff,
+                                          active: active != 0))
+        }, ctx)
+
+        wayland_server_on_output_config(server, { (ctx, configId, hostScale) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.outputConfig(configId: configId, hostScale: hostScale))
+        }, ctx)
+
         // Screencopy stays on the platform thread: the capture is read out
         // of the engine on a worker and answered through the command queue.
         wayland_server_on_screencopy_request(server, { (ctx, frameId, outputIndex, x, y, w, h) in
@@ -643,6 +758,21 @@ class WaylandIntegration {
                 wayland_server_set_work_area(server, outputIndex, x, y, w, h)
             case .setFrameExtents(let top, let bottom, let left, let right):
                 wayland_server_set_frame_extents(server, top, bottom, left, right)
+            case .setWorkspaces(let list):
+                var descs = list.map { entry -> WaylandWorkspaceDesc in
+                    var d = WaylandWorkspaceDesc()
+                    d.id = entry.id
+                    d.active = entry.active ? 1 : 0
+                    withUnsafeMutableBytes(of: &d.name) { buf in
+                        let bytes = Array(entry.name.utf8.prefix(buf.count - 1))
+                        for (i, b) in bytes.enumerated() { buf[i] = b }
+                        buf[bytes.count] = 0
+                    }
+                    return d
+                }
+                wayland_server_set_workspaces(server, &descs, Int32(descs.count))
+            case .outputConfigResult(let configId, let ok):
+                wayland_server_output_config_result(server, configId, ok ? 1 : 0)
             }
         }
     }
@@ -752,8 +882,109 @@ class WaylandIntegration {
                 }
             case .sessionLock(let locked):
                 onSessionLock?(locked)
+            case .workspaceRequest(let id, let request, let name):
+                onWorkspaceRequest?(id, request, name)
+            case .surfaceBlur(let surfaceId, let rects):
+                // A blurred surface is seen through: its alpha must survive
+                // the dma-buf import, which otherwise goes opaque for toplevels.
+                if let textureId = surfaceTextures[surfaceId] {
+                    textureRegistry.setKeepsAlpha(id: textureId, !rects.isEmpty)
+                }
+                onSurfaceBlur?(surfaceId, rects)
+            case .virtualPointer(let outputIndex, let hasAbs, let ax, let ay, let dx, let dy,
+                                 let buttons, let wheelDx, let wheelDy):
+                onVirtualPointer?(outputIndex, hasAbs, ax, ay, dx, dy, buttons, wheelDx, wheelDy)
+            case .virtualKey(let evdev, let keysym, let text, let pressed):
+                onVirtualKey?(evdev, keysym, text, pressed)
+            case .pointerWarp(let surfaceId, let x, let y):
+                onPointerWarp?(surfaceId, x * surfaceToLogical, y * surfaceToLogical)
+            case .dragIcon(let surfaceId, let active):
+                processDragIcon(surfaceId, active: active)
+            case .toplevelDrag(let surfaceId, let xOff, let yOff, let active):
+                if let windowId = surfaceWindows[surfaceId],
+                   !popupSurfaceIds.contains(surfaceId), !layerSurfaceIds.contains(surfaceId) {
+                    onToplevelDrag?(windowId, Int(xOff), Int(yOff), active)
+                }
+            case .outputConfig(let configId, let hostScale):
+                if let handler = onOutputConfig {
+                    handler(configId, hostScale)
+                } else {
+                    outputConfigResult(configId: configId, ok: false)
+                }
             }
         }
+    }
+
+    // ─── Drag-and-drop (UI thread) ───────────────────────────────────────
+
+    /// The drag's state: begins with its icon surface (or none), ends with
+    /// active = false. The icon is a texture of its own, drawn by the
+    /// shell at the pointer like a popup that follows it.
+    private func processDragIcon(_ surfaceId: UInt32, active: Bool) {
+        if let old = dragIconSurfaceId, old != surfaceId || !active {
+            dragIconSurfaceId = nil
+            popupSurfaceIds.remove(old)
+            surfaceWindows.removeValue(forKey: old)
+            if let textureId = surfaceTextures.removeValue(forKey: old) {
+                textureRegistry.unregisterTexture(engine: engine, id: textureId)
+            }
+            surfaceSizes.removeValue(forKey: old)
+            surfaceBufferScales.removeValue(forKey: old)
+            onDragIcon?(nil, 0)
+        }
+        if dragActive != active {
+            dragActive = active
+            onDragStateChanged?(active)
+        }
+        guard active, surfaceId != 0, dragIconSurfaceId != surfaceId else { return }
+        let textureId = textureRegistry.registerTexture(engine: engine)
+        textureRegistry.markAsWaylandSurface(id: textureId)
+        textureRegistry.markAsPopupSurface(id: textureId)   // alpha kept
+        surfaceTextures[surfaceId] = textureId
+        popupSurfaceIds.insert(surfaceId)
+        dragIconSurfaceId = surfaceId
+        let iconId = "dragicon-\(surfaceId)"
+        surfaceWindows[surfaceId] = iconId
+        onDragIcon?(iconId, Int(textureId))
+    }
+
+    /// The drag router's pointer: enter/motion/leave/button on the surface
+    /// under the pointer while a drag is on (surfaceId 0 = over nothing,
+    /// which leaves the last surface).
+    func sendDragPointer(surfaceId: UInt32, phase: Int32, x: Double, y: Double) {
+        guard let server = server else { return }
+        if surfaceId == 0 {
+            if pointerFocusSurface != 0 {
+                wayland_server_pointer_leave(server, pointerFocusSurface)
+                pointerFocusSurface = 0
+            }
+            return
+        }
+        _sendPointer(surfaceId: surfaceId, phase: phase, x: x, y: y, buttons: 0)
+    }
+
+    /// The drag's button came up over nothing a client owns: end it there.
+    func pointerGlobalRelease() {
+        guard let server = server else { return }
+        if pointerFocusSurface != 0 {
+            wayland_server_pointer_leave(server, pointerFocusSurface)
+            pointerFocusSurface = 0
+        }
+        wayland_server_pointer_global_release(server)
+    }
+
+    /// ext_workspace_v1: the shell's spaces, pushed when they change.
+    func setWorkspaces(_ list: [WaylandWorkspaceEntry]) {
+        if lastWorkspaces == list { return }
+        lastWorkspaces = list
+        enqueueCommand(.setWorkspaces(list: list))
+        enqueueCommand(.flushClients)
+    }
+
+    /// wlr-output-management: the answer to an apply.
+    func outputConfigResult(configId: UInt32, ok: Bool) {
+        enqueueCommand(.outputConfigResult(configId: configId, ok: ok))
+        enqueueCommand(.flushClients)
     }
 
     // ─── Layer surfaces (UI thread) ──────────────────────────────────────
@@ -1725,6 +1956,14 @@ class WaylandIntegration {
     }
 
     func sendPointerEvent(surfaceId: UInt32, phase: Int32, x: Double, y: Double, buttons: Int64) {
+        // A drag owns the pointer: the per-window forwarding that Flutter
+        // keeps routing to the surface the button went down on would fight
+        // the drag router, which follows the pointer across windows.
+        guard !dragActive else { return }
+        _sendPointer(surfaceId: surfaceId, phase: phase, x: x, y: y, buttons: buttons)
+    }
+
+    private func _sendPointer(surfaceId: UInt32, phase: Int32, x: Double, y: Double, buttons: Int64) {
         guard let server = server else { return }
 
         let timeMs = UInt32(DispatchTime.now().uptimeNanoseconds / 1_000_000)

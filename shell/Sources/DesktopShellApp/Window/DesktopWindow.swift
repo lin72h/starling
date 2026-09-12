@@ -31,6 +31,21 @@ class DesktopWindow: StatelessWidget {
         if windowInfo.contentOpacity < 1.0 {
             content = Opacity(opacity: max(0.0, windowInfo.contentOpacity), child: content)
         }
+        // ext_background_effect: frosted glass under the client's blur
+        // region — the desktop behind the window, blurred, then the
+        // (translucent) content over it. Oversized rects clip to the area.
+        if !windowInfo.blurRects.isEmpty {
+            var layers: [Widget] = []
+            for r in windowInfo.blurRects {
+                layers.append(Positioned(
+                    left: r.left, top: r.top, width: r.width, height: r.height,
+                    child: ClipRect(child: BackdropFilter(
+                        filter: ShellPalette.frostFilter(blurSigma: 16, saturation: 1.0),
+                        child: SizedBox(expand: ())))))
+            }
+            layers.append(Positioned(fill: (), child: content))
+            content = Stack(fit: .expand, children: layers)
+        }
         let texture = content
         guard let forward = windowInfo.onPointerEvent else {
             // No pointer forwarding (native Flutter content) — still listen

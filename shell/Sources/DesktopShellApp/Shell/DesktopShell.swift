@@ -278,6 +278,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The overlay layers' own states (OverlayLayers.swift): a popup or a
     /// layer-surface change rebuilds these, not the whole desktop.
     var _popupLayerState: PopupLayerState? = nil
+    /// wl_data_device drag: the icon surface riding the pointer
+    /// (DragAndDrop.swift). Size arrives with its first buffer.
+    var _dragIcon: (id: String, textureId: Int, width: Double, height: Double)? = nil
+    /// xdg_toplevel_drag: the window following the pointer, and the offset
+    /// its content origin keeps from it.
+    var _toplevelDrag: (windowId: String, xOff: Int, yOff: Int)? = nil
+    /// The last relative-motion base for a virtual pointer, until the
+    /// injected event has come back through the root listener.
+    var _injectedPointer: Offset? = nil
     var _layerSurfaceLayerStates: [String: LayerSurfacesLayerState] = [:]
     /// ext_session_lock: a locker holds the session. The desktop draws its
     /// lock surfaces over black and nothing else, and no key or click
@@ -496,6 +505,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// sees motion over windows and panes too rather than only the parts of
     /// the wallpaper nothing claimed. Recording zoom centres on it.
     var _lastPointer: Offset = Offset(0, 0)
+    /// The Flutter button mask as of the last root pointer event.
+    var _lastButtons: Int = 0
 
     /// `_lastPointer` as fractions of the screen — the coordinates the
     /// recording zoom consumes (`stepZoom` at the key, follow in the pump).
@@ -1132,7 +1143,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The DRM embedder emits only down/up; typematic repeat is synthesized
     // here (vsync Ticker) and routed like a real key. Wayland clients are
     // excluded — they run their own repeat from wl_keyboard repeat_info.
-    private var _keyRouter: ((KeyData) -> Bool)?
+    var _keyRouter: ((KeyData) -> Bool)?
     private var _heldKeyForRepeat: KeyData?
     private var _repeatTicker: Ticker?
     private var _repeatsFired = 0
@@ -2065,6 +2076,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         wayland.onPopupBufferResized = { [weak self] (popupId: String, logicalWidth: Int, logicalHeight: Int, geoX: Int, geoY: Int) in
             guard let self = self else { return }
+            if popupId.hasPrefix("dragicon-"), self._dragIcon?.id == popupId {
+                self._dragIcon?.width = Double(logicalWidth)
+                self._dragIcon?.height = Double(logicalHeight)
+                self._popupsDidChange()
+                return
+            }
             if var popup = self.popups[popupId] {
                 popup.width = Double(logicalWidth)
                 popup.height = Double(logicalHeight)
@@ -3839,10 +3856,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // settles on (a ColoredBox here would swallow the desktop).
         // Deliberately NOT setState — this feeds a crop, and rebuilding the
         // whole shell on every mouse move would be absurd.
+        // The same tap steers a drag-and-drop (DragAndDrop.swift): Flutter
+        // keeps routing a held button to the window it went down on, so a
+        // drag crossing windows is followed from here, the one Listener
+        // that sees every move.
         return Listener(
-            onPointerDown: { [self] e in _lastPointer = e.position },
-            onPointerMove: { [self] e in _lastPointer = e.position },
-            onPointerHover: { [self] e in _lastPointer = e.position },
+            onPointerDown: { [self] e in
+                _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
+            },
+            onPointerMove: { [self] e in
+                _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
+                _dragPointerMoved(e.position)
+            },
+            onPointerUp: { [self] e in
+                _lastPointer = e.position; _lastButtons = 0; _injectedPointer = nil
+                _dragPointerReleased(e.position)
+            },
+            onPointerHover: { [self] e in _lastPointer = e.position; _injectedPointer = nil },
             behavior: .translucent,
             child: _buildShellRoot(context))
     }

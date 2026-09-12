@@ -328,6 +328,12 @@ extension _DesktopShellState {
             }
         }
 
+        _wireWorkspaces(wayland)
+        _wireBackgroundEffect(wayland)
+        _wireVirtualInput(wayland)
+        _wireDragAndDrop(wayland)
+        _wireOutputConfig(wayland)
+
         // wp_alpha_modifier: whichever kind of surface it is.
         wayland.onSurfaceAlpha = { [weak self] surfaceId, alpha in
             guard let self = self else { return }
@@ -428,6 +434,7 @@ extension _DesktopShellState {
         guard let wl = waylandIntegration else { return }
         wl.syncAllToplevelStates()
         _reportWindowPositions()
+        wl.setWorkspaces(_workspaceEntries())
     }
 
     func _reportWindowPositions() {

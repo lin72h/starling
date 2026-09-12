@@ -167,6 +167,20 @@ struct WaylandSurface {
      * about it only once the parent is known, or at its first commit. */
     int popup_parent_pending;
 
+    /* ext_background_effect: the region behind which the shell blurs,
+     * double-buffered; count 0 = none. Rects are x,y,w,h, surface-local. */
+    #define WAYLAND_MAX_REGION_RECTS 32
+    int32_t blur_rects[WAYLAND_MAX_REGION_RECTS][4];
+    int blur_count;
+    int32_t pending_blur_rects[WAYLAND_MAX_REGION_RECTS][4];
+    int pending_blur_count;
+    int pending_blur_set;
+    struct wl_resource* background_effect_resource;
+
+    /* The icon of a drag-and-drop in progress (wl_data_device.start_drag):
+     * a role of its own, drawn by the shell at the pointer. */
+    int is_drag_icon;
+
     // The single output this surface's frame callbacks pace off (a straddler
     // intersects two panels with different refresh rates, and firing on both
     // over-paces the client). One bit; 0 = default to the primary, which is
@@ -201,6 +215,34 @@ struct ShmBuffer {
     uint32_t format;                      // wl_shm_format
 };
 
+/* wl_region: the rectangles added to it. Subtraction is rare enough in
+ * practice (no client this desktop runs uses it) to be ignored. */
+struct WaylandRegion {
+    int32_t rects[WAYLAND_MAX_REGION_RECTS][4];
+    int count;
+};
+
+/* A drag-and-drop in progress. */
+struct WaylandDrag {
+    int active;
+    struct WaylandDataSource* source;    // NULL for a drag with no data
+    struct wl_resource* source_resource;
+    struct wl_client* client;            // the dragging client
+    struct WaylandSurface* origin;
+    struct WaylandSurface* icon;         // NULL when none
+    struct WaylandSurface* focus;        // the surface under the pointer, or NULL
+    struct wl_resource* focus_offer;     // the wl_data_offer minted for it
+    uint32_t source_actions;             // wl_data_device_manager_dnd_action mask
+    uint32_t offer_actions, offer_preferred;   // what the target asked for
+    uint32_t chosen_action;
+    int accepted;                        // the target accepted a mime
+    double last_x, last_y;               // surface-local, on `focus`
+    /* xdg_toplevel_drag_v1: the toplevel riding along, and its offset. */
+    struct WaylandSurface* attached;
+    int32_t attach_x, attach_y;
+    struct wl_resource* toplevel_drag;
+};
+
 struct WaylandServer {
     struct wl_display* display;
     struct wl_event_loop* event_loop;
@@ -211,7 +253,7 @@ struct WaylandServer {
     struct wl_global* xdg_wm_base_global;
     struct wl_global* seat_global;
     struct wl_global* seat_agent_global;   // Murmuration: the agent seat
-    struct WaylandSeatDesc { struct WaylandServer* server; int index; } seat_descs[2];
+    struct WaylandSeatDesc { struct WaylandServer* server; int index; const char* name; } seat_descs[2];
     // Outputs (virtual desktop): outputs[0] defaults to the create-time
     // config; wayland_server_set_outputs installs the real arrangement.
     // Each bound wl_output resource's user_data is its struct WaylandOutput.
@@ -312,6 +354,21 @@ struct WaylandServer {
     struct wl_global* output_manager_global;
     struct wl_list output_managers;          // WaylandOutputManager.link
     uint32_t output_config_serial;
+    /* ext-workspace: the shell's spaces, as pushed, and every manager. */
+    struct wl_global* workspace_manager_global;
+    struct wl_list workspaces;               // WaylandWorkspace.link
+    struct wl_list workspace_managers;       // WaylandWorkspaceManager.link
+    struct wl_global* background_effect_global;
+    struct wl_global* transient_seat_manager_global;
+    struct wl_list transient_seats;          // WaylandTransientSeat.link
+    struct wl_global* virtual_pointer_manager_global;
+    struct wl_global* virtual_keyboard_manager_global;
+    struct wl_global* pointer_warp_global;
+    struct wl_global* toplevel_drag_manager_global;
+    struct WaylandDrag drag;
+    /* wlr-output-management apply: the configuration awaiting the shell. */
+    uint32_t next_output_config_id;
+    struct wl_list output_configs;           // WaylandOutputConfig.link
     struct wl_global* session_lock_manager_global;
     /* The ext_session_lock_v1 holding the session, NULL when unlocked. A
      * locker that dies leaves the session locked (the protocol's rule);
@@ -471,6 +528,28 @@ struct WaylandServer {
          * locked the shell shows nothing but lock surfaces (which arrive as
          * overlay layer surfaces named "session-lock") and black. */
         void (*on_session_lock)(void* ctx, int locked);
+        /* ext-workspace: a client asked to activate/deactivate/remove a
+         * space (by id) or create one (name). */
+        void (*on_workspace_request)(void* ctx, uint32_t workspace_id, int request,
+                                     const char* name);
+        /* ext-background-effect: blur behind these surface-local rects. */
+        void (*on_surface_blur)(void* ctx, uint32_t surface_id,
+                                const int32_t* rects, int count);
+        /* Virtual input: a frame of pointer state, and one key. */
+        void (*on_virtual_pointer)(void* ctx, int output_index, int has_abs,
+                                   double ax, double ay, double dx, double dy,
+                                   uint32_t buttons, double wheel_dx, double wheel_dy);
+        void (*on_virtual_key)(void* ctx, uint32_t evdev_key, uint32_t keysym,
+                               const char* utf8, int pressed);
+        /* wp_pointer_warp: put the pointer at (x, y) of the surface. */
+        void (*on_pointer_warp)(void* ctx, uint32_t surface_id, double x, double y);
+        /* Drag-and-drop: the icon to draw at the pointer (0 = none), and a
+         * toplevel riding along (active 0 = let go). */
+        void (*on_drag_icon)(void* ctx, uint32_t surface_id, int active);  // active: a drag is on
+        void (*on_toplevel_drag)(void* ctx, uint32_t surface_id, int32_t x_off,
+                                 int32_t y_off, int active);
+        /* wlr-output-management apply: the host output's scale. */
+        void (*on_output_config)(void* ctx, uint32_t config_id, double host_scale);
     } cb;
 
     // Socket
@@ -585,6 +664,51 @@ struct WaylandSandboxedClient {
     struct wl_listener destroy;
     char sandbox_engine[64], app_id[128], instance_id[64];
     struct wl_list link;                 // server->sandboxed_clients
+};
+
+/* One of the shell's spaces, as ext-workspace shows it. */
+struct WaylandWorkspace {
+    uint32_t id;
+    char name[64];
+    int active;
+    int index;
+    struct wl_list link;                 // server->workspaces
+};
+
+struct WaylandWorkspaceHandle {
+    struct wl_resource* resource;
+    struct WaylandWorkspaceManager* manager;
+    uint32_t workspace_id;
+    int removed;
+    struct wl_list link;                 // manager->handles
+};
+
+struct WaylandWorkspaceManager {
+    struct wl_resource* resource;
+    struct wl_resource* group;
+    struct WaylandServer* server;
+    int stopped;
+    struct wl_list handles;              // WaylandWorkspaceHandle.link
+    /* Requests wait for commit. */
+    uint32_t pending_activate, pending_deactivate, pending_remove;
+    char pending_create[64];
+    int pending_create_set;
+    struct wl_list link;                 // server->workspace_managers
+};
+
+struct WaylandTransientSeat {
+    struct wl_resource* resource;
+    struct wl_global* global;
+    struct WaylandSeatDesc desc;
+    char name[32];
+    struct wl_list link;                 // server->transient_seats
+};
+
+/* An applied wlr-output-management configuration awaiting the shell. */
+struct WaylandOutputConfig {
+    struct wl_resource* resource;
+    uint32_t id;
+    struct wl_list link;                 // server->output_configs
 };
 
 /* zwlr_output_manager_v1: one bind, with a head resource per output. */
@@ -799,6 +923,29 @@ struct WaylandLayerSurface* wayland_layer_shell_adopt(struct WaylandServer* serv
 void wayland_layer_shell_release(struct WaylandLayerSurface* ls);
 
 void wayland_session_lock_init(struct WaylandServer* server);
+void wayland_workspace_init(struct WaylandServer* server);
+void wayland_background_effect_init(struct WaylandServer* server);
+void wayland_background_effect_commit(struct WaylandServer* server,
+                                      struct WaylandSurface* surface);
+void wayland_transient_seat_init(struct WaylandServer* server);
+/* A wl_seat global aliasing the human seat under another name (transient
+ * seats); the desc must outlive the global. */
+struct wl_global* wayland_seat_create_global(struct WaylandServer* server,
+                                             struct WaylandSeatDesc* desc);
+void wayland_virtual_input_init(struct WaylandServer* server);
+void wayland_pointer_warp_init(struct WaylandServer* server);
+void wayland_toplevel_drag_init(struct WaylandServer* server);
+/* Drag-and-drop, in the data-device module: pointer events are routed here
+ * while a drag is active (returns 1 when consumed). */
+int wayland_dnd_pointer_event(struct WaylandServer* server,
+                              const struct WaylandPointerEvent* ev,
+                              struct WaylandSurface* surface);
+void wayland_dnd_surface_destroyed(struct WaylandServer* server,
+                                   struct WaylandSurface* surface);
+void wayland_dnd_end(struct WaylandServer* server, int dropped);
+/* wlr-output-management: the shell's answer to an applied configuration. */
+void wayland_output_management_config_result(struct WaylandServer* server,
+                                             uint32_t config_id, int ok);
 
 void wayland_alpha_modifier_init(struct WaylandServer* server);
 void wayland_alpha_modifier_commit(struct WaylandServer* server,

@@ -100,8 +100,9 @@ ships no package for are vendored beside it.
   the privileged globals (capture, clipboard managers, layer shell, the
   taskbar lists, output configuration, zones, idle, shortcuts inhibit,
   and the protocol itself) from them.
-- `zwlr_output_manager_v1` v4, read-only: heads and modes for wlr-randr
-  and kanshi; `apply`/`test` answer `failed` rather than pretending.
+- `zwlr_output_manager_v1` v4: heads and modes for wlr-randr and kanshi;
+  `apply`/`test` answered `failed` until the third batch (below) taught
+  them the host scale.
 - `zxdg_exporter_v2` / `zxdg_importer_v2`: the handle handshake portals
   use to parent a dialog; `set_parent_of` is recorded nowhere yet.
 - `wp_color_representation_manager_v1`: premultiplied RGB is the one
@@ -117,6 +118,68 @@ Verified against real clients on this box: `grim` (screencopy),
 `wlr-randr` (output management), `wl-copy`/`wl-paste` (data control),
 `swaylock -c 336699` (session lock: the output is the lock colour edge to
 edge, the desktop nowhere).
+
+## The third batch — the ones that needed a shell feature
+
+Each of these was a protocol the compositor could not answer honestly
+until the shell grew something behind it. The shell's side lives in
+`shell/Sources/DesktopShellApp/Shell/WaylandFeatures.swift`.
+
+- `ext_workspace_manager_v1`: the shell's user spaces, one group across
+  every output, pushed with `wayland_server_set_workspaces` (diffed per
+  manager: name, coordinates, state, `removed`, then `done`). A panel's
+  activate/remove/create waits for `commit` and reaches the shell as
+  `on_workspace_request`; activate is a space switch, create adds a space,
+  remove drops one. Fullscreen and agent spaces are the shell's own and
+  are not advertised.
+- `ext_background_effect_manager_v1` (blur): `wl_region` now keeps the
+  rects a client adds (it was a no-op); a blur region is double-buffered
+  and reaches the shell on commit as rects, and `DesktopWindow` draws a
+  `BackdropFilter` under the content there. A surface with a blur region
+  keeps its alpha — shm through `keep_alpha`, dma-buf through a
+  `keepsAlpha` flag on the texture that stops the opaque-fourcc import —
+  since the effect is only visible through a translucent window.
+- `ext_transient_seat_manager_v1`: a `create` makes a fresh `wl_seat`
+  global that ALIASES the human seat (own name `seat-transient-N`, same
+  input stream); it goes with the object. `wl_seat.name` now comes from
+  the seat descriptor rather than its index.
+- `zwlr_virtual_pointer_v1` / `zwp_virtual_keyboard_v1`: a pointer frame
+  (absolute as fractions of the output, or relative; buttons; wheel) is
+  accumulated and handed to the shell, which turns it into host physical
+  pixels and calls `fl_drm_view_inject_pointer_abs`, so chrome, chords
+  and clients see the mouse. A virtual keyboard brings its own xkb keymap
+  and every key is decoded here (evdev code, keysym, text); the shell
+  builds a `KeyData` from it and runs it through the same key router as a
+  physical key. Verified live: `wtype` typed into the Terminal, a
+  virtual click on the dock opened it (`wlrctl`/`wayvnc`-class clients).
+- `wp_pointer_warp_v1`: the shell moves the real cursor to the point of
+  the surface, only when the pointer is over that surface.
+- Drag-and-drop (`wl_data_device.start_drag`) and `xdg_toplevel_drag_v1`:
+  a drag owns the pointer; the shell's root listener (the one Listener
+  that sees every move, since Flutter keeps a held button on the window it
+  went down on) hit-tests the surface under the pointer and steers
+  enter/motion/leave/button to the compositor, which turns them into
+  data_device events with a minted offer per entered surface, negotiates
+  the action (target preference within the source's set), and delivers
+  drop → `dnd_drop_performed` → `receive`/`send` → `finish` →
+  `dnd_finished`, or `cancelled` when released over nothing or unaccepted.
+  The icon surface is a role of its own drawn at the pointer by the popup
+  layer; an attached toplevel follows the pointer minus its offset
+  (Chrome's tab tear-off). Verified live with gtk4-demo's Drag-and-Drop
+  page. **Trap:** GTK binds every `wl_seat` and makes a data device for
+  each; the drag's events must go to the device of the seat that is
+  dragging (seat 0) — sent to the agent seat's device they are refused
+  with `accept(nil)`, which reads as "released, no target".
+- wlr-output-management `apply`: a configuration that keeps every head's
+  mode, position and transform and changes at most the host's scale is
+  accepted; the scale goes to the shell (`on_output_config`), which runs
+  the DPI slider's path and answers through
+  `wayland_server_output_config_result`. Anything else, or a head left
+  unconfigured, fails. `wlr-randr --output primary --scale 1.5` re-renders
+  the desktop at 1.5; `wl_output`'s advertised scale is deliberately not
+  rebroadcast (the DPI path's contract for Chrome's buffers), so
+  `wlr-randr` keeps reporting the startup scale and every requested scale
+  is forwarded, equal or not.
 
 ## What wmbench says now (2026-09-11, this box)
 
@@ -173,13 +236,14 @@ in the fast tier (`test/run.sh`). wmbench itself is the functional check:
 
 ## Not done
 
-- `zwlr_virtual_pointer_v1` / `zwp_virtual_keyboard_v1`,
-  `ext_workspace_v1`, `xdg_toplevel_drag_v1`, `wp_pointer_warp_v1` — each
-  needs a shell feature behind it (input injection at screen coordinates,
-  spaces as workspaces, a tear-off drag, cursor warping).
 - `wp_linux_drm_syncobj_v1` / explicit sync, `wp_color_management_v1`,
   `wp_fifo_v1` / `wp_commit_timing_v1` — real compositor work each.
-- Applying an output configuration through wlr-output-management.
+- Output configuration beyond the host's scale (modes, positions,
+  transforms, disabling an output) — the display layout is the
+  hardware's and the shell's settings', not a client's.
+- Blur on popups and layer surfaces (windows only today); `wl_region`
+  subtraction (no client this desktop runs blurs a subtracted region).
+- Drop targets among popups (menus) — windows and layer surfaces only.
 - Layer surfaces and screencopy on secondary outputs.
 - shm frames still go through glTexSubImage2D; a GBM-backed linear buffer
   would make them zero-copy like dma-buf (see above).

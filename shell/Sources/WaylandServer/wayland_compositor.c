@@ -190,6 +190,7 @@ static void surface_commit(struct wl_client* client,
     wayland_layer_shell_commit(server, surface);
     wayland_alpha_modifier_commit(server, surface);
     wayland_zones_commit(server, surface);
+    wayland_background_effect_commit(server, surface);
 
     /* A popup whose parent never arrived through the layer shell: the
      * shell has not heard of it at all yet, so tell it now, parentless. */
@@ -259,7 +260,8 @@ static void surface_commit(struct wl_client* client,
 
     /* Notify compositor if we have a buffer and the target has a role. */
     if (surface->committed_buffer &&
-        (target->xdg_toplevel || target->xdg_popup || target->layer)) {
+        (target->xdg_toplevel || target->xdg_popup || target->layer ||
+         target->is_drag_icon)) {
         enum WaylandBufferType* type_ptr =
             wl_resource_get_user_data(surface->committed_buffer);
         if (type_ptr) {
@@ -308,7 +310,8 @@ static void surface_commit(struct wl_client* client,
                      * shadow) or a layer surface (a translucent bar) means
                      * its alpha. */
                     int keep_alpha = buf->format == WL_SHM_FORMAT_ARGB8888 &&
-                                     (target->xdg_popup || target->layer);
+                                     (target->xdg_popup || target->layer ||
+                                      target->is_drag_icon || target->blur_count > 0);
                     server->cb.on_shm_surface_commit(
                         server->cb_ctx,
                         target->id,
@@ -350,7 +353,8 @@ static void surface_commit(struct wl_client* client,
      * mapped role surface — not just ones that requested a frame callback. */
     if (surface->frame_done_timer &&
         (surface->frame_callback ||
-         ((surface->xdg_toplevel || surface->xdg_popup || surface->layer) &&
+         ((surface->xdg_toplevel || surface->xdg_popup || surface->layer ||
+           surface->is_drag_icon) &&
           surface->committed_buffer))) {
         wl_event_source_timer_update(surface->frame_done_timer,
                                      server->saw_flip ? 100 : 16);
@@ -502,6 +506,9 @@ static void surface_destroy_resource(struct wl_resource* resource) {
     wayland_layer_shell_surface_destroyed(surface->server, surface);
     wayland_foreign_toplevel_unmap(surface->server, surface);
     wayland_xdg_foreign_surface_destroyed(surface->server, surface);
+    wayland_dnd_surface_destroyed(surface->server, surface);
+    if (surface->background_effect_resource)
+        wl_resource_set_user_data(surface->background_effect_resource, NULL);
     wayland_zones_surface_destroyed(surface->server, surface);
     wayland_shortcuts_inhibit_surface_destroyed(surface->server, surface);
 
@@ -620,7 +627,14 @@ static void region_destroy(struct wl_client* client,
 
 static void region_add(struct wl_client* client, struct wl_resource* resource,
                        int32_t x, int32_t y, int32_t width, int32_t height) {
-    (void)client; (void)resource; (void)x; (void)y; (void)width; (void)height;
+    (void)client;
+    struct WaylandRegion* reg = wl_resource_get_user_data(resource);
+    if (!reg || reg->count >= WAYLAND_MAX_REGION_RECTS || width <= 0 || height <= 0) return;
+    reg->rects[reg->count][0] = x;
+    reg->rects[reg->count][1] = y;
+    reg->rects[reg->count][2] = width;
+    reg->rects[reg->count][3] = height;
+    reg->count++;
 }
 
 static void region_subtract(struct wl_client* client, struct wl_resource* resource,
@@ -634,16 +648,25 @@ static const struct wl_region_interface region_impl = {
     .subtract = region_subtract,
 };
 
+static void region_resource_destroyed(struct wl_resource* resource) {
+    free(wl_resource_get_user_data(resource));
+}
+
 static void compositor_create_region(struct wl_client* client,
                                      struct wl_resource* resource,
                                      uint32_t id) {
+    /* The rects a client adds are kept: a blur region
+     * (ext-background-effect) reads them. Opaque/input regions are still
+     * ignored — the shell composites whole surfaces. */
+    struct WaylandRegion* reg = calloc(1, sizeof(*reg));
     struct wl_resource* region = wl_resource_create(client,
         &wl_region_interface, wl_resource_get_version(resource), id);
-    if (!region) {
+    if (!region || !reg) {
+        free(reg);
         wl_resource_post_no_memory(resource);
         return;
     }
-    wl_resource_set_implementation(region, &region_impl, NULL, NULL);
+    wl_resource_set_implementation(region, &region_impl, reg, region_resource_destroyed);
 }
 
 /*

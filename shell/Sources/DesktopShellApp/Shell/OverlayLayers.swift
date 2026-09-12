@@ -357,6 +357,17 @@ extension _DesktopShellState {
             }
         }
         #endif
+        // The drag-and-drop icon rides the pointer, above every popup.
+        if let icon = _dragIcon, icon.width > 0, icon.height > 0 {
+            let flipped = Transform(
+                transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
+                alignment: Alignment.center,
+                child: TextureWidget(textureId: icon.textureId, filterQuality: .none))
+            children.append(Positioned(
+                left: _lastPointer.dx, top: _lastPointer.dy,
+                width: icon.width, height: icon.height,
+                child: IgnorePointer(child: flipped)))
+        }
         return (children, stashedLayerPopups)
     }
 }

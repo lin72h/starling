@@ -148,6 +148,12 @@ WaylandServer* wayland_server_create(const WaylandServerConfig* config) {
     wayland_security_context_init(server);
     wayland_output_management_init(server);
     wayland_session_lock_init(server);
+    wayland_workspace_init(server);
+    wayland_background_effect_init(server);
+    wayland_transient_seat_init(server);
+    wayland_virtual_input_init(server);
+    wayland_pointer_warp_init(server);
+    wayland_toplevel_drag_init(server);
 
     /* Initialize deferred pointer event pipe + event source. Both ends are
      * non-blocking: the write side runs on the Flutter UI thread and must
@@ -405,13 +411,37 @@ static void deferred_input_send_one(WaylandServer* server,
     }
 
     struct WaylandSurface* surface = wayland_server_find_surface(server, ev->surface_id);
-    if (!surface) return;
+    if (!surface) {
+        /* A drag released over no client surface (the desktop, the shell's
+         * own chrome): the drag ends there, with nothing to drop on. */
+        if (server->drag.active && ev->seat == 0 && ev->type == WL_PTR_BUTTON &&
+            ev->state == 0 && ev->surface_id == 0) {
+            wayland_dnd_end(server, 1);
+        }
+        return;
+    }
 
     /* A person moved, clicked, scrolled or typed: ext-idle-notify's clocks
      * restart. The agent seat's synthetic input is not a person. */
     if (ev->seat == 0 && (ev->type == WL_PTR_MOTION || ev->type == WL_PTR_BUTTON ||
                           ev->type == WL_PTR_AXIS || ev->type == WL_KB_KEY)) {
         wayland_idle_notify_activity(server);
+    }
+
+    /* Where the human's pointer last was on a surface: a drag that begins
+     * now starts there. */
+    if (ev->seat == 0 && !server->drag.active &&
+        (ev->type == WL_PTR_MOTION || ev->type == WL_PTR_ENTER)) {
+        server->drag.last_x = ev->x;
+        server->drag.last_y = ev->y;
+    }
+
+    /* A drag in progress owns the pointer: enter/motion/leave/button become
+     * data_device events on the surface under it, and wl_pointer stays
+     * quiet until the drop. */
+    if (server->drag.active && ev->seat == 0 &&
+        wayland_dnd_pointer_event(server, ev, surface)) {
+        return;
     }
 
     struct wl_client* target = wl_resource_get_client(surface->resource);
@@ -777,6 +807,14 @@ DEF_CB_SETTER(toplevel_position_request)
 DEF_CB_SETTER(system_bell)
 DEF_CB_SETTER(shortcuts_inhibit)
 DEF_CB_SETTER(session_lock)
+DEF_CB_SETTER(workspace_request)
+DEF_CB_SETTER(surface_blur)
+DEF_CB_SETTER(virtual_pointer)
+DEF_CB_SETTER(virtual_key)
+DEF_CB_SETTER(pointer_warp)
+DEF_CB_SETTER(drag_icon)
+DEF_CB_SETTER(toplevel_drag)
+DEF_CB_SETTER(output_config)
 
 #undef DEF_CB_SETTER
 

@@ -51,6 +51,13 @@ ext-idle-notify-v1                          $SYS/staging/ext-idle-notify/ext-idl
 ext-image-capture-source-v1                 $SYS/staging/ext-image-capture-source/ext-image-capture-source-v1.xml
 ext-image-copy-capture-v1                   $SYS/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml
 ext-session-lock-v1                         $SYS/staging/ext-session-lock/ext-session-lock-v1.xml
+ext-workspace-v1                            $SYS/staging/ext-workspace/ext-workspace-v1.xml
+ext-background-effect-v1                    $SYS/staging/ext-background-effect/ext-background-effect-v1.xml
+ext-transient-seat-v1                       $SYS/staging/ext-transient-seat/ext-transient-seat-v1.xml
+pointer-warp-v1                             $SYS/staging/pointer-warp/pointer-warp-v1.xml
+xdg-toplevel-drag-v1                        $SYS/staging/xdg-toplevel-drag/xdg-toplevel-drag-v1.xml
+wlr-virtual-pointer-unstable-v1             $HERE/wlr-virtual-pointer-unstable-v1.xml
+virtual-keyboard-unstable-v1                $HERE/virtual-keyboard-unstable-v1.xml
 xdg-foreign-unstable-v2                     $SYS/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml
 color-representation-v1                     $SYS/staging/color-representation/color-representation-v1.xml
 security-context-v1                         $SYS/staging/security-context/security-context-v1.xml

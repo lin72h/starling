@@ -26,6 +26,9 @@ class WindowInfo {
     /// wp_alpha_modifier: the client asked for its content at this opacity.
     /// The frame stays opaque; only the content area is drawn through it.
     var contentOpacity: Double = 1.0
+    /// ext_background_effect: what is behind these content-local rects is
+    /// blurred under the (translucent) content.
+    var blurRects: [Rect] = []
     /// The floating rect remembered when tiling first captured this window;
     /// restored when the user switches back to the floating layout.
     var preTileRect: Rect? = nil

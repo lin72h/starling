@@ -149,6 +149,9 @@ private class TextureEntry {
     /// (translucent backgrounds) and should NOT have their format overridden
     /// to XBGR. Toplevel surfaces have unused alpha (0x00) and need XBGR.
     var isPopupSurface: Bool = false
+    /// A toplevel that asked to be seen through (a blur region): its
+    /// alpha is imported as-is instead of being forced opaque.
+    var keepsAlpha: Bool = false
 
     deinit {
         pixelData?.deallocate()
@@ -296,6 +299,12 @@ class LinuxTextureRegistry: @unchecked Sendable {
     func markAsPopupSurface(id: Int64) {
         lock.lock()
         entries[id]?.isPopupSurface = true
+        lock.unlock()
+    }
+
+    func setKeepsAlpha(id: Int64, _ keeps: Bool) {
+        lock.lock()
+        entries[id]?.keepsAlpha = keeps
         lock.unlock()
     }
 
@@ -609,7 +618,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
                 // causing the "ghost window" effect if alpha blending is applied.
                 // Popup surfaces keep ABGR — they use premultiplied alpha for
                 // translucent backgrounds, drop shadows, and rounded corners.
-                let isPopup = entry.isPopupSurface
+                let isPopup = entry.isPopupSurface || entry.keepsAlpha
                 var importFourcc = dmaFourcc
                 if isWayland && !isPopup {
                     let DRM_FORMAT_ABGR8888: UInt32 = 0x34324241

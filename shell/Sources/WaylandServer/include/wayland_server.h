@@ -356,6 +356,90 @@ int wayland_server_shortcuts_inhibited(WaylandServer* server, uint32_t surface_i
 void wayland_server_on_session_lock(WaylandServer* server,
     void (*cb)(void* ctx, int locked), void* ctx);
 
+/* --------------------------------------------------------------------------
+ * ext-workspace — the shell's spaces, for panels
+ * -------------------------------------------------------------------------- */
+
+typedef struct WaylandWorkspaceDesc {
+    uint32_t id;          /* the shell's space id, stable for its lifetime */
+    char     name[64];
+    int      active;
+} WaylandWorkspaceDesc;
+
+/* Replace the advertised workspace list (in display order). Diffed against
+ * the previous push; every bound manager hears the changes + done. */
+void wayland_server_set_workspaces(WaylandServer* server,
+                                   const WaylandWorkspaceDesc* list, int count);
+
+enum {
+    WAYLAND_WORKSPACE_REQUEST_ACTIVATE   = 0,
+    WAYLAND_WORKSPACE_REQUEST_DEACTIVATE = 1,
+    WAYLAND_WORKSPACE_REQUEST_REMOVE     = 2,
+    WAYLAND_WORKSPACE_REQUEST_CREATE     = 3,   /* workspace_id 0, name set */
+};
+void wayland_server_on_workspace_request(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t workspace_id, int request, const char* name),
+    void* ctx);
+
+/* --------------------------------------------------------------------------
+ * ext-background-effect — blur behind a surface region
+ * -------------------------------------------------------------------------- */
+
+/* rects: count quads of x,y,w,h in surface-local logical coordinates; count
+ * 0 clears. Fires on the commit that changes the region. */
+void wayland_server_on_surface_blur(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, const int32_t* rects, int count),
+    void* ctx);
+
+/* --------------------------------------------------------------------------
+ * Virtual input (wlr-virtual-pointer, virtual-keyboard) and pointer warp
+ * -------------------------------------------------------------------------- */
+
+/* One frame of a virtual pointer: has_abs says (ax, ay) are fractions
+ * [0,1] of output `output_index`; otherwise (dx, dy) are a relative move in
+ * logical pixels. `buttons` is the pointer's button state as Flutter's
+ * mask (1 primary, 2 secondary, 4 middle); wheel deltas in pixels. */
+void wayland_server_on_virtual_pointer(WaylandServer* server,
+    void (*cb)(void* ctx, int output_index, int has_abs, double ax, double ay,
+               double dx, double dy, uint32_t buttons,
+               double wheel_dx, double wheel_dy), void* ctx);
+/* One key from a virtual keyboard, decoded through its own keymap. */
+void wayland_server_on_virtual_key(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t evdev_key, uint32_t keysym,
+               const char* utf8, int pressed), void* ctx);
+/* wp_pointer_warp: a client wants the pointer at (x, y) of its surface. */
+void wayland_server_on_pointer_warp(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, double x, double y), void* ctx);
+
+/* --------------------------------------------------------------------------
+ * Drag-and-drop (wl_data_device.start_drag) and xdg-toplevel-drag
+ * -------------------------------------------------------------------------- */
+
+/* The drag icon surface to draw at the pointer (its buffers arrive through
+ * the ordinary commit callbacks), 0 when the drag ends. */
+void wayland_server_on_drag_icon(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int active), void* ctx);
+/* A toplevel attached to the drag: keep its content origin at the pointer
+ * minus (x_off, y_off) while active; active 0 = the drag ended. */
+void wayland_server_on_toplevel_drag(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int32_t x_off, int32_t y_off,
+               int active), void* ctx);
+/* The pointer's button was released somewhere no client surface saw it
+ * (the shell's own chrome): a drag in progress ends there. Any thread. */
+void wayland_server_pointer_global_release(WaylandServer* server);
+
+/* --------------------------------------------------------------------------
+ * wlr-output-management apply
+ * -------------------------------------------------------------------------- */
+
+/* A client applied a configuration that only changes the host output's
+ * scale (anything else is refused before this fires). The shell applies
+ * it and answers with wayland_server_output_config_result. */
+void wayland_server_on_output_config(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t config_id, double host_scale), void* ctx);
+void wayland_server_output_config_result(WaylandServer* server,
+                                         uint32_t config_id, int ok);
+
 /* zwp_keyboard_shortcuts_inhibit: a surface gained (1) or lost (0) an
  * inhibitor. While one holds, the shell forwards every key — its own
  * chords included — to that surface. */

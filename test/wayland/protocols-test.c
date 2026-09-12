@@ -54,6 +54,14 @@
 #include "security-context-v1-client-protocol.h"
 #include "wlr-output-management-unstable-v1-client-protocol.h"
 #include "ext-session-lock-v1-client-protocol.h"
+#include "ext-workspace-v1-client-protocol.h"
+#include "ext-background-effect-v1-client-protocol.h"
+#include "ext-transient-seat-v1-client-protocol.h"
+#include "pointer-warp-v1-client-protocol.h"
+#include "xdg-toplevel-drag-v1-client-protocol.h"
+#include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
+#include "virtual-keyboard-unstable-v1-client-protocol.h"
+#include <xkbcommon/xkbcommon.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -150,6 +158,15 @@ static struct {
     int locked;
     int lock_count;
     char title[64];
+    int shm_keep_alpha;
+    uint32_t ws_id; int ws_request; char ws_name[64]; int ws_count;
+    uint32_t blur_surface; int blur_count; int32_t blur_rect0[4]; int blur_events;
+    int vp_count, vp_has_abs; double vp_ax, vp_ay, vp_dx, vp_dy; uint32_t vp_buttons; double vp_wheel_dy;
+    int vk_count; uint32_t vk_evdev, vk_keysym; char vk_utf8[16]; int vk_pressed;
+    uint32_t warp_surface; double warp_x, warp_y; int warp_count;
+    uint32_t drag_icon; int drag_active; int drag_icon_count;
+    uint32_t tdrag_surface; int32_t tdrag_x, tdrag_y; int tdrag_active; int tdrag_count;
+    uint32_t outcfg_id; double outcfg_scale; int outcfg_count;
 } seen;
 
 #define LOCKED(stmt) do { pthread_mutex_lock(&seen_mu); stmt; pthread_mutex_unlock(&seen_mu); } while (0)
@@ -184,9 +201,9 @@ static void cb_alpha(void* ctx, uint32_t sid, double alpha) {
 }
 static void cb_shm(void* ctx, uint32_t sid, const void* px, int w, int h, int stride,
                    uint32_t format, int first, int scale, int keep_alpha) {
-    (void)ctx; (void)stride; (void)first; (void)scale; (void)keep_alpha;
+    (void)ctx; (void)stride; (void)first; (void)scale;
     LOCKED(seen.shm_surface = sid; seen.shm_w = w; seen.shm_h = h; seen.shm_format = format;
-           memcpy(seen.shm_px, px, 4); seen.shm_count++);
+           memcpy(seen.shm_px, px, 4); seen.shm_count++; seen.shm_keep_alpha = keep_alpha);
 }
 static void cb_screencopy(void* ctx, uint32_t frame, int output, int32_t x, int32_t y,
                           int32_t w, int32_t h) {
@@ -210,6 +227,45 @@ static void cb_inhibit(void* ctx, uint32_t sid, int inhibited) {
 static void cb_lock(void* ctx, int locked) {
     (void)ctx;
     LOCKED(seen.locked = locked; seen.lock_count++);
+}
+static void cb_workspace(void* ctx, uint32_t id, int request, const char* name) {
+    (void)ctx;
+    LOCKED(seen.ws_id = id; seen.ws_request = request;
+           snprintf(seen.ws_name, sizeof(seen.ws_name), "%s", name ? name : ""); seen.ws_count++);
+}
+static void cb_blur(void* ctx, uint32_t sid, const int32_t* rects, int count) {
+    (void)ctx;
+    LOCKED(seen.blur_surface = sid; seen.blur_count = count;
+           if (count > 0) memcpy(seen.blur_rect0, rects, sizeof(seen.blur_rect0));
+           seen.blur_events++);
+}
+static void cb_vpointer(void* ctx, int output, int has_abs, double ax, double ay,
+                        double dx, double dy, uint32_t buttons, double wdx, double wdy) {
+    (void)ctx; (void)output; (void)wdx;
+    LOCKED(seen.vp_count++; seen.vp_has_abs = has_abs; seen.vp_ax = ax; seen.vp_ay = ay;
+           seen.vp_dx = dx; seen.vp_dy = dy; seen.vp_buttons = buttons; seen.vp_wheel_dy = wdy);
+}
+static void cb_vkey(void* ctx, uint32_t evdev, uint32_t keysym, const char* utf8, int pressed) {
+    (void)ctx;
+    LOCKED(seen.vk_count++; seen.vk_evdev = evdev; seen.vk_keysym = keysym;
+           snprintf(seen.vk_utf8, sizeof(seen.vk_utf8), "%s", utf8 ? utf8 : ""); seen.vk_pressed = pressed);
+}
+static void cb_warp(void* ctx, uint32_t sid, double x, double y) {
+    (void)ctx;
+    LOCKED(seen.warp_surface = sid; seen.warp_x = x; seen.warp_y = y; seen.warp_count++);
+}
+static void cb_drag_icon(void* ctx, uint32_t sid, int active) {
+    (void)ctx;
+    LOCKED(seen.drag_icon = sid; seen.drag_active = active; seen.drag_icon_count++);
+}
+static void cb_tdrag(void* ctx, uint32_t sid, int32_t x, int32_t y, int active) {
+    (void)ctx;
+    LOCKED(seen.tdrag_surface = sid; seen.tdrag_x = x; seen.tdrag_y = y; seen.tdrag_active = active;
+           seen.tdrag_count++);
+}
+static void cb_outcfg(void* ctx, uint32_t id, double scale) {
+    (void)ctx;
+    LOCKED(seen.outcfg_id = id; seen.outcfg_scale = scale; seen.outcfg_count++);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -240,8 +296,17 @@ static struct ext_image_copy_capture_manager_v1* copycap_mgr;
 static struct wp_security_context_manager_v1* secctx_mgr;
 static struct zwlr_output_manager_v1* outmgr;
 static struct ext_session_lock_manager_v1* lock_mgr;
+static struct ext_background_effect_manager_v1* bgfx_mgr;
+static struct ext_transient_seat_manager_v1* tseat_mgr;
+static struct wp_pointer_warp_v1* warp;
+static struct xdg_toplevel_drag_manager_v1* tdrag_mgr;
+static struct zwlr_virtual_pointer_manager_v1* vptr_mgr;
+static struct zwp_virtual_keyboard_manager_v1* vkbd_mgr;
+static struct wl_data_device_manager* dd_mgr;
 static struct wl_registry* registry;
 static uint32_t outmgr_name, outmgr_version;
+static uint32_t wsmgr_name;
+static int globals_removed;
 
 struct global_seen { char name[64]; uint32_t version; };
 static struct global_seen globals[128];
@@ -279,6 +344,14 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     BIND(copycap_mgr, ext_image_copy_capture_manager_v1, 1);
     BIND(secctx_mgr, wp_security_context_manager_v1, 1);
     BIND(lock_mgr, ext_session_lock_manager_v1, 1);
+    BIND(bgfx_mgr, ext_background_effect_manager_v1, 1);
+    BIND(tseat_mgr, ext_transient_seat_manager_v1, 1);
+    BIND(warp, wp_pointer_warp_v1, 1);
+    BIND(tdrag_mgr, xdg_toplevel_drag_manager_v1, 1);
+    BIND(vptr_mgr, zwlr_virtual_pointer_manager_v1, 2);
+    BIND(vkbd_mgr, zwp_virtual_keyboard_manager_v1, 1);
+    BIND(dd_mgr, wl_data_device_manager, 3);
+    if (strcmp(iface, ext_workspace_manager_v1_interface.name) == 0) wsmgr_name = id;
     /* Bound later, listener first: its heads arrive the moment it binds. */
     if (strcmp(iface, zwlr_output_manager_v1_interface.name) == 0) {
         outmgr_name = id;
@@ -286,7 +359,7 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     }
 #undef BIND
 }
-static void reg_gone(void* d, struct wl_registry* r, uint32_t id) { (void)d; (void)r; (void)id; }
+static void reg_gone(void* d, struct wl_registry* r, uint32_t id) { (void)d; (void)r; (void)id; globals_removed++; }
 static const struct wl_registry_listener reg_listener = { reg_global, reg_gone };
 
 static uint32_t global_version(const char* name) {
@@ -971,9 +1044,16 @@ static const struct zwlr_output_head_v1_listener head_listener = {
     head_name, head_desc, head_phys, head_mode, head_enabled, head_current, head_position,
     head_transform, head_scale, head_finished, head_make, head_model, head_serial, head_adaptive
 };
+static struct zwlr_output_head_v1* om_head_res;
 static void om_head(void* d, struct zwlr_output_manager_v1* m, struct zwlr_output_head_v1* h) {
     (void)d; (void)m; om_heads++;
+    om_head_res = h;
     zwlr_output_head_v1_add_listener(h, &head_listener, NULL);
+}
+static void task_outcfg_ok(void* arg) {
+    (void)arg;
+    uint32_t id; LOCKED(id = seen.outcfg_id);
+    wayland_server_output_config_result(server, id, 1);
 }
 static void om_done_cb(void* d, struct zwlr_output_manager_v1* m, uint32_t serial) { (void)d; (void)m; (void)serial; om_done = 1; }
 static void om_finished(void* d, struct zwlr_output_manager_v1* m) { (void)d; (void)m; }
@@ -995,8 +1075,48 @@ static void test_output_management(void) {
     struct zwlr_output_configuration_v1* cfg = zwlr_output_manager_v1_create_configuration(outmgr, 1);
     zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
     zwlr_output_configuration_v1_apply(cfg);
-    CHECK(wait_for(&cfg_failed, 500), "apply is refused, not faked");
+    CHECK(wait_for(&cfg_failed, 500), "an apply that leaves the head unconfigured fails");
     CHECK(!cfg_succeeded, "no succeeded");
+    zwlr_output_configuration_v1_destroy(cfg);
+
+    /* A different position: the shell cannot move a monitor. */
+    cfg_failed = cfg_succeeded = 0;
+    cfg = zwlr_output_manager_v1_create_configuration(outmgr, 1);
+    zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
+    struct zwlr_output_configuration_head_v1* ch =
+        zwlr_output_configuration_v1_enable_head(cfg, om_head_res);
+    zwlr_output_configuration_head_v1_set_position(ch, 100, 0);
+    zwlr_output_configuration_v1_test(cfg);
+    CHECK(wait_for(&cfg_failed, 500), "moving the head fails the test");
+    zwlr_output_configuration_v1_destroy(cfg);
+
+    /* The same everything: nothing to do, succeeded. */
+    cfg_failed = cfg_succeeded = 0;
+    cfg = zwlr_output_manager_v1_create_configuration(outmgr, 1);
+    zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
+    ch = zwlr_output_configuration_v1_enable_head(cfg, om_head_res);
+    zwlr_output_configuration_head_v1_set_position(ch, om_pos_x, om_pos_y);
+    zwlr_output_configuration_v1_apply(cfg);
+    CHECK(wait_for(&cfg_succeeded, 500), "an unchanged configuration succeeds");
+    CHECK(!cfg_failed, "and does not fail");
+    zwlr_output_configuration_v1_destroy(cfg);
+
+    /* A new scale on the host: the shell hears it and answers. */
+    cfg_failed = cfg_succeeded = 0;
+    int before; LOCKED(before = seen.outcfg_count);
+    cfg = zwlr_output_manager_v1_create_configuration(outmgr, 1);
+    zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
+    ch = zwlr_output_configuration_v1_enable_head(cfg, om_head_res);
+    zwlr_output_configuration_head_v1_set_scale(ch, wl_fixed_from_double(1.5));
+    zwlr_output_configuration_v1_apply(cfg);
+    wl_display_flush(dpy);
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.outcfg_count > before); usleep(10000); }
+    CHECK(got, "the shell was asked for the new scale");
+    CHECK(seen.outcfg_scale == 1.5, "scale %.2f", seen.outcfg_scale);
+    CHECK(!cfg_succeeded && !cfg_failed, "no answer before the shell's");
+    on_server(task_outcfg_ok, NULL);
+    CHECK(wait_for(&cfg_succeeded, 500), "succeeded once the shell applied it");
     zwlr_output_configuration_v1_destroy(cfg);
 }
 
@@ -1188,6 +1308,420 @@ static void test_session_lock(void) {
     wl_buffer_destroy(b);
 }
 
+/* ext-workspace: the shell's spaces, a panel's requests. */
+static volatile int ws_done;
+static int ws_handles, ws_removed, ws_group_enter;
+static char ws_name0[64]; static uint32_t ws_state_last; static uint32_t ws_coord_last;
+static struct ext_workspace_handle_v1* ws_handle[8];
+static void wsh_id(void* d, struct ext_workspace_handle_v1* h, const char* id) { (void)d; (void)h; (void)id; }
+static void wsh_name(void* d, struct ext_workspace_handle_v1* h, const char* n) { (void)d; if (h == ws_handle[0]) snprintf(ws_name0, 64, "%s", n); }
+static void wsh_coords(void* d, struct ext_workspace_handle_v1* h, struct wl_array* a) { (void)d; (void)h; if (a->size >= 4) ws_coord_last = *(uint32_t*)a->data; }
+static void wsh_state(void* d, struct ext_workspace_handle_v1* h, uint32_t s) { (void)d; (void)h; ws_state_last = s; }
+static void wsh_caps(void* d, struct ext_workspace_handle_v1* h, uint32_t c) { (void)d; (void)h; (void)c; }
+static void wsh_removed(void* d, struct ext_workspace_handle_v1* h) { (void)d; (void)h; ws_removed++; }
+static const struct ext_workspace_handle_v1_listener wsh_listener = { wsh_id, wsh_name, wsh_coords, wsh_state, wsh_caps, wsh_removed };
+static void wsg_caps(void* d, struct ext_workspace_group_handle_v1* g, uint32_t c) { (void)d; (void)g; (void)c; }
+static void wsg_out_enter(void* d, struct ext_workspace_group_handle_v1* g, struct wl_output* o) { (void)d; (void)g; (void)o; }
+static void wsg_out_leave(void* d, struct ext_workspace_group_handle_v1* g, struct wl_output* o) { (void)d; (void)g; (void)o; }
+static void wsg_ws_enter(void* d, struct ext_workspace_group_handle_v1* g, struct ext_workspace_handle_v1* w) { (void)d; (void)g; (void)w; ws_group_enter++; }
+static void wsg_ws_leave(void* d, struct ext_workspace_group_handle_v1* g, struct ext_workspace_handle_v1* w) { (void)d; (void)g; (void)w; }
+static void wsg_removed(void* d, struct ext_workspace_group_handle_v1* g) { (void)d; (void)g; }
+static const struct ext_workspace_group_handle_v1_listener wsg_listener = { wsg_caps, wsg_out_enter, wsg_out_leave, wsg_ws_enter, wsg_ws_leave, wsg_removed };
+static struct ext_workspace_group_handle_v1* ws_group;
+static void wsm_group(void* d, struct ext_workspace_manager_v1* m, struct ext_workspace_group_handle_v1* g) { (void)d; (void)m; ws_group = g; ext_workspace_group_handle_v1_add_listener(g, &wsg_listener, NULL); }
+static void wsm_workspace(void* d, struct ext_workspace_manager_v1* m, struct ext_workspace_handle_v1* w) {
+    (void)d; (void)m;
+    if (ws_handles < 8) ws_handle[ws_handles] = w;
+    ws_handles++;
+    ext_workspace_handle_v1_add_listener(w, &wsh_listener, NULL);
+}
+static void wsm_done(void* d, struct ext_workspace_manager_v1* m) { (void)d; (void)m; ws_done = 1; }
+static void wsm_finished(void* d, struct ext_workspace_manager_v1* m) { (void)d; (void)m; }
+static const struct ext_workspace_manager_v1_listener wsm_listener = { wsm_group, wsm_workspace, wsm_done, wsm_finished };
+
+static WaylandWorkspaceDesc ws_push[3];
+static int ws_push_count;
+static void task_push_workspaces(void* arg) { (void)arg; wayland_server_set_workspaces(server, ws_push, ws_push_count); }
+
+static void test_workspaces(void) {
+    ws_push[0] = (WaylandWorkspaceDesc){ .id = 1, .name = "Desktop 1", .active = 1 };
+    ws_push[1] = (WaylandWorkspaceDesc){ .id = 2, .name = "Desktop 2", .active = 0 };
+    ws_push_count = 2;
+    on_server(task_push_workspaces, NULL);
+
+    struct ext_workspace_manager_v1* wsm = wl_registry_bind(registry, wsmgr_name,
+        &ext_workspace_manager_v1_interface, 1);
+    ext_workspace_manager_v1_add_listener(wsm, &wsm_listener, NULL);
+    CHECK(wait_for(&ws_done, 500), "workspaces listed with done");
+    CHECK(ws_group != NULL, "one group");
+    CHECK(ws_handles == 2, "%d workspaces", ws_handles);
+    CHECK(ws_group_enter == 2, "both in the group (%d)", ws_group_enter);
+    CHECK(strcmp(ws_name0, "Desktop 1") == 0, "first is \"%s\"", ws_name0);
+
+    /* A panel activates the second: the shell hears it on commit only. */
+    int before; LOCKED(before = seen.ws_count);
+    ext_workspace_handle_v1_activate(ws_handle[1]);
+    wl_display_roundtrip(dpy);
+    usleep(30000);
+    int n; LOCKED(n = seen.ws_count);
+    CHECK(n == before, "nothing before commit");
+    ext_workspace_manager_v1_commit(wsm);
+    wl_display_flush(dpy);
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.ws_count > before); usleep(10000); }
+    CHECK(got && seen.ws_request == WAYLAND_WORKSPACE_REQUEST_ACTIVATE && seen.ws_id == 2,
+          "activate workspace 2 reached the shell (request %d id %u)", seen.ws_request, seen.ws_id);
+
+    /* The shell switched: the second is active now, the first is not. */
+    ws_push[0].active = 0; ws_push[1].active = 1;
+    ws_done = 0;
+    on_server(task_push_workspaces, NULL);
+    CHECK(wait_for(&ws_done, 500), "state change came with done");
+    CHECK(ws_state_last == EXT_WORKSPACE_HANDLE_V1_STATE_ACTIVE, "last state event: active (%u)", ws_state_last);
+
+    /* A new one is asked for by name. */
+    LOCKED(before = seen.ws_count);
+    ext_workspace_group_handle_v1_create_workspace(ws_group, "Work");
+    ext_workspace_manager_v1_commit(wsm);
+    wl_display_flush(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.ws_count > before); usleep(10000); }
+    CHECK(got && seen.ws_request == WAYLAND_WORKSPACE_REQUEST_CREATE && strcmp(seen.ws_name, "Work") == 0,
+          "create \"%s\" reached the shell", seen.ws_name);
+
+    /* The shell added it, then dropped the first. */
+    ws_push[2] = (WaylandWorkspaceDesc){ .id = 3, .name = "Work", .active = 0 };
+    ws_push_count = 3;
+    ws_done = 0;
+    on_server(task_push_workspaces, NULL);
+    CHECK(wait_for(&ws_done, 500), "the third arrived");
+    CHECK(ws_handles == 3, "%d workspaces", ws_handles);
+    ws_push[0] = ws_push[1]; ws_push[1] = ws_push[2]; ws_push_count = 2;
+    ws_done = 0;
+    on_server(task_push_workspaces, NULL);
+    CHECK(wait_for(&ws_done, 500), "the removal arrived");
+    CHECK(ws_removed == 1, "one removed (%d)", ws_removed);
+    CHECK(ws_coord_last == 1, "the survivor renumbered to position 1 (%u)", ws_coord_last);
+    ext_workspace_manager_v1_stop(wsm);
+    wl_display_roundtrip(dpy);
+}
+
+/* ext-background-effect: a blur region reaches the shell as rects, and the
+ * surface keeps its alpha. */
+static void test_background_effect(void) {
+    struct ext_background_effect_surface_v1* fx =
+        ext_background_effect_manager_v1_get_background_effect(bgfx_mgr, tl_surface);
+    struct wl_region* region = wl_compositor_create_region(compositor);
+    wl_region_add(region, 0, 0, 100, 50);
+    wl_region_add(region, 10, 10, 20, 20);
+    ext_background_effect_surface_v1_set_blur_region(fx, region);
+    int before; LOCKED(before = seen.blur_events);
+    wl_surface_commit(tl_surface);
+    wl_display_flush(dpy);
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.blur_events > before); usleep(10000); }
+    CHECK(got, "the blur region reached the shell");
+    CHECK(seen.blur_count == 2 && seen.blur_rect0[0] == 0 && seen.blur_rect0[1] == 0 &&
+          seen.blur_rect0[2] == 100 && seen.blur_rect0[3] == 50,
+          "%d rects, first %d,%d %dx%d", seen.blur_count, seen.blur_rect0[0], seen.blur_rect0[1],
+          seen.blur_rect0[2], seen.blur_rect0[3]);
+    /* An ARGB buffer on a blurred toplevel keeps its alpha. */
+    int shm_before; LOCKED(shm_before = seen.shm_count);
+    struct wl_buffer* b = make_buffer(4, 4, WL_SHM_FORMAT_ARGB8888, NULL);
+    wl_surface_attach(tl_surface, b, 0, 0);
+    wl_surface_commit(tl_surface);
+    wl_display_flush(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.shm_count > shm_before); usleep(10000); }
+    CHECK(got && seen.shm_keep_alpha == 1, "alpha kept on the blurred toplevel");
+    /* No region: the blur goes. */
+    ext_background_effect_surface_v1_set_blur_region(fx, NULL);
+    LOCKED(before = seen.blur_events);
+    wl_surface_commit(tl_surface);
+    wl_display_flush(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.blur_events > before); usleep(10000); }
+    CHECK(got && seen.blur_count == 0, "cleared");
+    wl_region_destroy(region);
+    ext_background_effect_surface_v1_destroy(fx);
+    wl_display_roundtrip(dpy);
+    wl_buffer_destroy(b);
+}
+
+/* ext-transient-seat: a seat of its own, gone with the object. */
+static volatile int ts_ready, ts_denied; static uint32_t ts_global;
+static void ts_ready_cb(void* d, struct ext_transient_seat_v1* s, uint32_t g) { (void)d; (void)s; ts_global = g; ts_ready = 1; }
+static void ts_denied_cb(void* d, struct ext_transient_seat_v1* s) { (void)d; (void)s; ts_denied = 1; }
+static const struct ext_transient_seat_v1_listener ts_listener = { ts_ready_cb, ts_denied_cb };
+static char tseat_name[64]; static volatile int tseat_named;
+static void tseat_caps(void* d, struct wl_seat* s, uint32_t c) { (void)d; (void)s; (void)c; }
+static void tseat_name_cb(void* d, struct wl_seat* s, const char* n) { (void)d; (void)s; snprintf(tseat_name, 64, "%s", n); tseat_named = 1; }
+static const struct wl_seat_listener tseat_listener = { tseat_caps, tseat_name_cb };
+
+static void test_transient_seat(void) {
+    struct ext_transient_seat_v1* ts = ext_transient_seat_manager_v1_create(tseat_mgr);
+    ext_transient_seat_v1_add_listener(ts, &ts_listener, NULL);
+    CHECK(wait_for(&ts_ready, 500), "transient seat ready");
+    CHECK(!ts_denied, "not denied");
+    struct wl_seat* s = wl_registry_bind(registry, ts_global, &wl_seat_interface, 9);
+    wl_seat_add_listener(s, &tseat_listener, NULL);
+    CHECK(wait_for(&tseat_named, 500), "its wl_seat binds");
+    CHECK(strncmp(tseat_name, "seat-transient-", 15) == 0, "named %s", tseat_name);
+    int removed_before = globals_removed;
+    wl_seat_release(s);
+    ext_transient_seat_v1_destroy(ts);
+    wl_display_roundtrip(dpy);
+    wl_display_roundtrip(dpy);
+    CHECK(globals_removed > removed_before, "its global went with it");
+}
+
+/* Virtual pointer and keyboard: frames and decoded keys reach the shell. */
+static void test_virtual_input(void) {
+    struct zwlr_virtual_pointer_v1* vp = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(vptr_mgr, seat);
+    int before; LOCKED(before = seen.vp_count);
+    zwlr_virtual_pointer_v1_motion_absolute(vp, 0, 640, 200, 1280, 800);
+    zwlr_virtual_pointer_v1_button(vp, 0, 0x110, WL_POINTER_BUTTON_STATE_PRESSED);
+    zwlr_virtual_pointer_v1_frame(vp);
+    wl_display_flush(dpy);
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.vp_count > before); usleep(10000); }
+    CHECK(got && seen.vp_has_abs && seen.vp_ax == 0.5 && seen.vp_ay == 0.25 && seen.vp_buttons == 1,
+          "absolute frame: (%.2f, %.2f) buttons %u", seen.vp_ax, seen.vp_ay, seen.vp_buttons);
+    LOCKED(before = seen.vp_count);
+    zwlr_virtual_pointer_v1_motion(vp, 0, wl_fixed_from_int(10), wl_fixed_from_int(-5));
+    zwlr_virtual_pointer_v1_axis_discrete(vp, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(10), 1);
+    zwlr_virtual_pointer_v1_frame(vp);
+    wl_display_flush(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.vp_count > before); usleep(10000); }
+    CHECK(got && !seen.vp_has_abs && seen.vp_dx == 10 && seen.vp_dy == -5 && seen.vp_buttons == 1 &&
+          seen.vp_wheel_dy == 20, "relative frame: (%.0f, %.0f) wheel %.0f, button held",
+          seen.vp_dx, seen.vp_dy, seen.vp_wheel_dy);
+    LOCKED(before = seen.vp_count);
+    zwlr_virtual_pointer_v1_destroy(vp);
+    wl_display_flush(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.vp_count > before); usleep(10000); }
+    CHECK(got && seen.vp_buttons == 0, "a pointer dying with a button down releases it");
+
+    struct zwp_virtual_keyboard_v1* vk = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, seat);
+    struct xkb_context* xctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    struct xkb_rule_names names = { .layout = "us" };
+    struct xkb_keymap* km = xkb_keymap_new_from_names(xctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    CHECK(km != NULL, "a us keymap compiles here");
+    if (km) {
+        char* text = xkb_keymap_get_as_string(km, XKB_KEYMAP_FORMAT_TEXT_V1);
+        size_t len = strlen(text) + 1;
+        int fd = memfd_create("keymap", MFD_CLOEXEC);
+        if (ftruncate(fd, (off_t)len) == 0) {
+            void* m = mmap(NULL, len, PROT_WRITE, MAP_SHARED, fd, 0);
+            memcpy(m, text, len);
+            munmap(m, len);
+        }
+        zwp_virtual_keyboard_v1_keymap(vk, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)len);
+        close(fd);
+        free(text);
+        LOCKED(before = seen.vk_count);
+        zwp_virtual_keyboard_v1_key(vk, 0, 30 /* KEY_A */, WL_KEYBOARD_KEY_STATE_PRESSED);
+        wl_display_flush(dpy);
+        got = 0;
+        for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.vk_count > before); usleep(10000); }
+        CHECK(got && seen.vk_evdev == 30 && seen.vk_keysym == XKB_KEY_a && strcmp(seen.vk_utf8, "a") == 0 &&
+              seen.vk_pressed, "KEY_A decoded: keysym %x \"%s\"", seen.vk_keysym, seen.vk_utf8);
+        zwp_virtual_keyboard_v1_key(vk, 0, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
+        xkb_mod_mask_t shift = 1u << xkb_keymap_mod_get_index(km, XKB_MOD_NAME_SHIFT);
+        zwp_virtual_keyboard_v1_modifiers(vk, shift, 0, 0, 0);
+        LOCKED(before = seen.vk_count);
+        zwp_virtual_keyboard_v1_key(vk, 0, 30, WL_KEYBOARD_KEY_STATE_PRESSED);
+        wl_display_flush(dpy);
+        got = 0;
+        for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.vk_count > before + 1); usleep(10000); }
+        CHECK(got && seen.vk_keysym == XKB_KEY_A && strcmp(seen.vk_utf8, "A") == 0,
+              "with shift: keysym %x \"%s\"", seen.vk_keysym, seen.vk_utf8);
+        zwp_virtual_keyboard_v1_key(vk, 0, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
+        xkb_keymap_unref(km);
+    }
+    xkb_context_unref(xctx);
+    zwp_virtual_keyboard_v1_destroy(vk);
+    wl_display_roundtrip(dpy);
+}
+
+/* wp-pointer-warp: the request names the surface and the point. */
+static void test_pointer_warp(void) {
+    struct wl_pointer* ptr = wl_seat_get_pointer(seat);
+    int before; LOCKED(before = seen.warp_count);
+    wp_pointer_warp_v1_warp_pointer(warp, tl_surface, ptr, wl_fixed_from_double(10.5),
+                                    wl_fixed_from_int(20), 0);
+    wl_display_flush(dpy);
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.warp_count > before); usleep(10000); }
+    uint32_t sid; LOCKED(sid = seen.new_toplevel_id);
+    CHECK(got && seen.warp_surface == sid && seen.warp_x == 10.5 && seen.warp_y == 20,
+          "warp to (%.1f, %.1f) of surface %u", seen.warp_x, seen.warp_y, seen.warp_surface);
+    wl_pointer_release(ptr);
+}
+
+/* Drag-and-drop with a toplevel riding along. The test client is both
+ * ends: it starts the drag from its toplevel, and the same toplevel is the
+ * target the compositor drops on. */
+static volatile int dnd_entered, dnd_motion, dnd_dropped, dnd_left, dnd_offer_seen;
+static volatile int src_target, src_drop_performed, src_finished, src_cancelled, src_send_count;
+static uint32_t src_action, offer_action, offer_source_actions;
+static char offer_mime[64];
+static struct wl_data_offer* dnd_offer;
+static void off_offer(void* d, struct wl_data_offer* o, const char* mime) { (void)d; (void)o; snprintf(offer_mime, 64, "%s", mime); }
+static void off_source_actions(void* d, struct wl_data_offer* o, uint32_t a) { (void)d; (void)o; offer_source_actions = a; }
+static void off_action(void* d, struct wl_data_offer* o, uint32_t a) { (void)d; (void)o; offer_action = a; }
+static const struct wl_data_offer_listener off_listener = { off_offer, off_source_actions, off_action };
+static void dd_data_offer(void* d, struct wl_data_device* dd, struct wl_data_offer* o) {
+    (void)d; (void)dd; dnd_offer = o; dnd_offer_seen++;
+    wl_data_offer_add_listener(o, &off_listener, NULL);
+}
+static void dd_enter(void* d, struct wl_data_device* dd, uint32_t serial, struct wl_surface* s,
+                     wl_fixed_t x, wl_fixed_t y, struct wl_data_offer* o) {
+    (void)d; (void)dd; (void)serial; (void)s; (void)x; (void)y; (void)o; dnd_entered++;
+}
+static void dd_leave(void* d, struct wl_data_device* dd) { (void)d; (void)dd; dnd_left++; }
+static void dd_motion(void* d, struct wl_data_device* dd, uint32_t t, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)dd; (void)t; (void)x; (void)y; dnd_motion++; }
+static void dd_drop(void* d, struct wl_data_device* dd) { (void)d; (void)dd; dnd_dropped++; }
+static void dd_selection(void* d, struct wl_data_device* dd, struct wl_data_offer* o) { (void)d; (void)dd; (void)o; }
+static const struct wl_data_device_listener dd_listener = { dd_data_offer, dd_enter, dd_leave, dd_motion, dd_drop, dd_selection };
+static void src_target_cb(void* d, struct wl_data_source* s, const char* mime) { (void)d; (void)s; src_target += mime != NULL; }
+static void src_send(void* d, struct wl_data_source* s, const char* mime, int32_t fd) {
+    (void)d; (void)s; (void)mime;
+    ssize_t w = write(fd, "dragged", 7); (void)w;
+    close(fd);
+    src_send_count++;
+}
+static void src_cancelled_cb(void* d, struct wl_data_source* s) { (void)d; (void)s; src_cancelled++; }
+static void src_drop_performed_cb(void* d, struct wl_data_source* s) { (void)d; (void)s; src_drop_performed++; }
+static void src_finished_cb(void* d, struct wl_data_source* s) { (void)d; (void)s; src_finished++; }
+static void src_action_cb(void* d, struct wl_data_source* s, uint32_t a) { (void)d; (void)s; src_action = a; }
+static const struct wl_data_source_listener src_listener = {
+    src_target_cb, src_send, src_cancelled_cb, src_drop_performed_cb, src_finished_cb, src_action_cb
+};
+static volatile int ptr_entered, ptr_left;
+static void p_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* sf, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)s; (void)sf; (void)x; (void)y; ptr_entered++; }
+static void p_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* sf) { (void)d; (void)p; (void)s; (void)sf; ptr_left++; }
+static void p_motion(void* d, struct wl_pointer* p, uint32_t t, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)t; (void)x; (void)y; }
+static void p_button(void* d, struct wl_pointer* p, uint32_t s, uint32_t t, uint32_t b, uint32_t st) { (void)d; (void)p; (void)s; (void)t; (void)b; (void)st; }
+static void p_axis(void* d, struct wl_pointer* p, uint32_t t, uint32_t a, wl_fixed_t v) { (void)d; (void)p; (void)t; (void)a; (void)v; }
+static void p_frame(void* d, struct wl_pointer* p) { (void)d; (void)p; }
+static void p_axis_source(void* d, struct wl_pointer* p, uint32_t a) { (void)d; (void)p; (void)a; }
+static void p_axis_stop(void* d, struct wl_pointer* p, uint32_t t, uint32_t a) { (void)d; (void)p; (void)t; (void)a; }
+static void p_axis_discrete(void* d, struct wl_pointer* p, uint32_t a, int32_t v) { (void)d; (void)p; (void)a; (void)v; }
+static void p_axis_value120(void* d, struct wl_pointer* p, uint32_t a, int32_t v) { (void)d; (void)p; (void)a; (void)v; }
+static void p_axis_rel_dir(void* d, struct wl_pointer* p, uint32_t a, uint32_t v) { (void)d; (void)p; (void)a; (void)v; }
+static const struct wl_pointer_listener p_listener = {
+    p_enter, p_leave, p_motion, p_button, p_axis, p_frame, p_axis_source, p_axis_stop,
+    p_axis_discrete, p_axis_value120, p_axis_rel_dir
+};
+static uint32_t dnd_tl_sid;
+static void task_dnd_motion(void* arg) { (void)arg; wayland_server_pointer_motion(server, dnd_tl_sid, 1, 5, 6); }
+static void task_dnd_release(void* arg) { (void)arg; wayland_server_pointer_button(server, dnd_tl_sid, 2, 0x110, 0); }
+static void task_dnd_release_nowhere(void* arg) { (void)arg; wayland_server_pointer_global_release(server); }
+
+static void test_dnd(void) {
+    LOCKED(dnd_tl_sid = seen.new_toplevel_id);
+    struct wl_pointer* ptr = wl_seat_get_pointer(seat);
+    wl_pointer_add_listener(ptr, &p_listener, NULL);
+    struct wl_data_device* dd = wl_data_device_manager_get_data_device(dd_mgr, seat);
+    wl_data_device_add_listener(dd, &dd_listener, NULL);
+    struct wl_data_source* src = wl_data_device_manager_create_data_source(dd_mgr);
+    wl_data_source_add_listener(src, &src_listener, NULL);
+    wl_data_source_offer(src, "text/plain");
+    wl_data_source_set_actions(src, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+                                    WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+
+    /* The toplevel rides along: attached before the drag starts. */
+    struct xdg_toplevel_drag_v1* td = xdg_toplevel_drag_manager_v1_get_xdg_toplevel_drag(tdrag_mgr, src);
+    xdg_toplevel_drag_v1_attach(td, tl_toplevel, 5, 7);
+
+    struct wl_surface* icon = wl_compositor_create_surface(compositor);
+    int icon_before; LOCKED(icon_before = seen.drag_icon_count);
+    int td_before; LOCKED(td_before = seen.tdrag_count);
+    wl_data_device_start_drag(dd, src, tl_surface, icon, 0);
+    CHECK(wait_for(&dnd_entered, 500), "the origin is entered as the first target");
+    CHECK(dnd_offer_seen == 1 && strcmp(offer_mime, "text/plain") == 0, "with an offer of %s", offer_mime);
+    CHECK(offer_source_actions == (WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE),
+          "source actions %u", offer_source_actions);
+    CHECK(ptr_left == 1, "wl_pointer left the origin for the drag (%d)", ptr_left);
+    volatile int got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.drag_icon_count > icon_before); usleep(10000); }
+    CHECK(got && seen.drag_active && seen.drag_icon != 0, "the shell got the icon surface %u", seen.drag_icon);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.tdrag_count > td_before); usleep(10000); }
+    CHECK(got && seen.tdrag_active && seen.tdrag_surface == dnd_tl_sid && seen.tdrag_x == 5 && seen.tdrag_y == 7,
+          "the toplevel follows at (%d, %d)", seen.tdrag_x, seen.tdrag_y);
+
+    /* An icon buffer is a role of its own: it reaches the shell as a commit. */
+    int shm_before; LOCKED(shm_before = seen.shm_count);
+    struct wl_buffer* ib = make_buffer(8, 8, WL_SHM_FORMAT_ARGB8888, NULL);
+    wl_surface_attach(icon, ib, 0, 0);
+    wl_surface_commit(icon);
+    wl_display_flush(dpy);
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = seen.shm_count > shm_before); usleep(10000); }
+    CHECK(got && seen.shm_surface == seen.drag_icon && seen.shm_keep_alpha, "the icon's buffer composited with alpha");
+
+    /* The target picks: copy of copy|move. */
+    wl_data_offer_set_actions(dnd_offer, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY,
+                              WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    wl_data_offer_accept(dnd_offer, 0, "text/plain");
+    wl_display_roundtrip(dpy);
+    CHECK(offer_action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY && src_action == offer_action,
+          "both sides told the action (%u / %u)", offer_action, src_action);
+    CHECK(src_target == 1, "the source heard target");
+
+    on_server(task_dnd_motion, NULL);
+    CHECK(wait_for(&dnd_motion, 500), "motion is data_device motion");
+    on_server(task_dnd_release, NULL);
+    CHECK(wait_for(&dnd_dropped, 500), "the release is the drop");
+    CHECK(wait_for(&src_drop_performed, 500), "source heard dnd_drop_performed");
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) { LOCKED(got = !seen.drag_active && !seen.tdrag_active); usleep(10000); }
+    CHECK(got, "the shell heard the drag and the toplevel drag end");
+    CHECK(wait_for(&ptr_entered, 500), "wl_pointer is back on the surface under it");
+
+    /* The data itself, then finish. */
+    int fds[2];
+    CHECK(pipe2(fds, O_CLOEXEC) == 0, "pipe");
+    wl_data_offer_receive(dnd_offer, "text/plain", fds[1]);
+    close(fds[1]);
+    wl_display_flush(dpy);
+    char buf[16] = "";
+    got = 0;
+    for (int i = 0; i < 50 && !got; i++) {
+        wl_display_dispatch_pending(dpy); wl_display_flush(dpy);
+        got = src_send_count > 0;
+        if (!got) { wait_for(&src_send_count, 10); }
+    }
+    ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+    close(fds[0]);
+    CHECK(n == 7 && strcmp(buf, "dragged") == 0, "received \"%s\" from the source", buf);
+    wl_data_offer_finish(dnd_offer);
+    CHECK(wait_for(&src_finished, 500), "source heard dnd_finished");
+    wl_data_offer_destroy(dnd_offer);
+    xdg_toplevel_drag_v1_destroy(td);
+    wl_data_source_destroy(src);
+    wl_surface_destroy(icon);
+    wl_display_roundtrip(dpy);
+    wl_buffer_destroy(ib);
+
+    /* A drag released over nothing is cancelled. */
+    src = wl_data_device_manager_create_data_source(dd_mgr);
+    wl_data_source_add_listener(src, &src_listener, NULL);
+    wl_data_source_offer(src, "text/plain");
+    wl_data_device_start_drag(dd, src, tl_surface, NULL, 0);
+    wl_display_roundtrip(dpy);
+    on_server(task_dnd_release_nowhere, NULL);
+    CHECK(wait_for(&src_cancelled, 500), "released nowhere: cancelled");
+    wl_data_source_destroy(src);
+    wl_data_device_release(dd);
+    wl_pointer_release(ptr);
+    wl_display_roundtrip(dpy);
+}
+
 /* The packer: B,G,R,A rows with a stride -> tight R,G,B,A, alpha forced or kept. */
 static void test_pack_rgba(void) {
     uint8_t src[2 * 12] = {
@@ -1238,6 +1772,14 @@ int main(void) {
     wayland_server_on_system_bell(server, cb_bell, NULL);
     wayland_server_on_shortcuts_inhibit(server, cb_inhibit, NULL);
     wayland_server_on_session_lock(server, cb_lock, NULL);
+    wayland_server_on_workspace_request(server, cb_workspace, NULL);
+    wayland_server_on_surface_blur(server, cb_blur, NULL);
+    wayland_server_on_virtual_pointer(server, cb_vpointer, NULL);
+    wayland_server_on_virtual_key(server, cb_vkey, NULL);
+    wayland_server_on_pointer_warp(server, cb_warp, NULL);
+    wayland_server_on_drag_icon(server, cb_drag_icon, NULL);
+    wayland_server_on_toplevel_drag(server, cb_tdrag, NULL);
+    wayland_server_on_output_config(server, cb_outcfg, NULL);
     pthread_create(&server_thread, NULL, server_main, NULL);
 
     dpy = wl_display_connect(wayland_server_get_socket_name(server));
@@ -1264,6 +1806,12 @@ int main(void) {
         test_ext_data_control();
         test_xdg_foreign();
         test_output_management();
+        test_workspaces();
+        test_background_effect();
+        test_transient_seat();
+        test_virtual_input();
+        test_pointer_warp();
+        test_dnd();
         test_image_copy_capture();
         test_security_context();
         test_session_lock();

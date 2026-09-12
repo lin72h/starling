@@ -40,6 +40,13 @@ gen ext-image-copy-capture-v1                   "$SYS/staging/ext-image-copy-cap
 gen security-context-v1                         "$SYS/staging/security-context/security-context-v1.xml"
 gen wlr-output-management-unstable-v1           "$REPO/shell/protocols/wlr-output-management-unstable-v1.xml"
 gen ext-session-lock-v1                         "$SYS/staging/ext-session-lock/ext-session-lock-v1.xml"
+gen ext-workspace-v1                            "$SYS/staging/ext-workspace/ext-workspace-v1.xml"
+gen ext-background-effect-v1                    "$SYS/staging/ext-background-effect/ext-background-effect-v1.xml"
+gen ext-transient-seat-v1                       "$SYS/staging/ext-transient-seat/ext-transient-seat-v1.xml"
+gen pointer-warp-v1                             "$SYS/staging/pointer-warp/pointer-warp-v1.xml"
+gen xdg-toplevel-drag-v1                        "$SYS/staging/xdg-toplevel-drag/xdg-toplevel-drag-v1.xml"
+gen wlr-virtual-pointer-unstable-v1             "$REPO/shell/protocols/wlr-virtual-pointer-unstable-v1.xml"
+gen virtual-keyboard-unstable-v1                "$REPO/shell/protocols/virtual-keyboard-unstable-v1.xml"
 
 cc -O1 -std=gnu11 -Wall -Wno-unused-function -Wno-unused-parameter \
     -I"$SRV/include" -I"$SRV" -I"$OUT" -I/usr/include/libdrm -D_GNU_SOURCE \
