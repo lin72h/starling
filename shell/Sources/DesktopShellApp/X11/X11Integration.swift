@@ -248,6 +248,7 @@ class X11Integration {
                     // events are never delivered to Chrome's WSI swapchain thread.
                     x11_server_dispatch(s)
                     x11_server_vblank_tick(s)
+                    x.capturePollTick()
                     // Also process any texture marks from dispatched PresentPixmaps
                     if x.flushPendingTextureMarks() {
                         PlatformDispatcher.instance.scheduleFrame()
@@ -609,42 +610,28 @@ class X11Integration {
         lastGetImageNs = DispatchTime.now().uptimeNanoseconds
         fl_drm_view_arm_capture(view)
         // Arming alone presents nothing on a quiet desktop: the mirror is
-        // refilled by presents, the composite gate lets one through only
-        // when something changed, and the frame pump that forces one runs
-        // every 250 ms — slower than the deadline below. So force a frame
-        // now through the shell's frame-tick pipe (a rebuild is a change):
-        // the next vsync presents, the mirror refreshes, the reply is fresh.
-        // Without this the first capture after an idle stretch timed out
-        // and answered with whatever the mirror last held.
-        let tick = _DesktopShellState._frameTickFd
-        if tick >= 0 { var one: UInt8 = 1; _ = write(tick, &one, 1) }
+        // refilled by presents, and the composite gate lets one through only
+        // when something changed. Force a change now. We are on the platform
+        // thread here — the thread the framework's frames run on — so the
+        // shell's state can be touched directly. (An earlier version wrote
+        // the frame-tick pipe and polled from the GCD main queue: that put
+        // setState and X server bookkeeping on a second thread, racing the
+        // frames, and the stress pass crashed the shell in swift_retain.)
+        _shellState?.forceFrameNow()
         capturePollDeadlineNs = DispatchTime.now().uptimeNanoseconds + 300_000_000
-        if !capturePolling {
-            capturePolling = true
-            scheduleCapturePoll()
-        }
+        capturePolling = true
     }
 
-    /// The main-queue hop for the capture poll. Only ever touched on the
-    /// main thread; the wrapper is what lets it cross the Sendable check.
-    private struct PollHandle: @unchecked Sendable { let target: X11Integration }
-
-    private func scheduleCapturePoll() {
-        let handle = PollHandle(target: self)
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(8)) {
-            handle.target.capturePollTick()
-        }
-    }
-
-    private func capturePollTick() {
-        guard let server = server else { capturePolling = false; return }
+    /// Called from the X server's vblank tick (platform thread, ~60 Hz while
+    /// clients exist): answer parked GetImages once a frame presented after
+    /// the arm has been mirrored, or at the deadline.
+    fileprivate func capturePollTick() {
+        guard capturePolling, let server = server else { return }
         let fresh = fl_drm_view_capture_frames_left() < 4
         let late = DispatchTime.now().uptimeNanoseconds >= capturePollDeadlineNs
         if fresh || late {
             capturePolling = false
             x11_server_complete_pending_captures(server)
-        } else {
-            scheduleCapturePoll()
         }
     }
 

@@ -410,6 +410,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _frameTickEventFd: Int32 = -1
     nonisolated(unsafe) static var _frameTickFd: Int32 = -1
     private var _frameTick: Int = 0
+
+    /// A rebuild, now: the one thing that always passes the composite gate.
+    /// Platform thread only — this is a plain setState.
+    func forceFrameNow() { setState { _frameTick += 1 } }
     private var _frameTickTimer: DispatchSourceTimer?
     /// Whether the frame pump is running at its full rate.
     ///
