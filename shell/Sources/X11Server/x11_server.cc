@@ -2075,6 +2075,12 @@ void x11_server_dispatch(X11Server* server) {
             }
             close(server->clients[i].fd);
             server->clients[i].fd = -1;
+            /* A capture this client was still waiting for must not be
+             * answered into a slot a later client may reuse. */
+            server->pending_captures.erase(
+                std::remove_if(server->pending_captures.begin(), server->pending_captures.end(),
+                               [i](const X11Server::PendingCapture& pc) { return pc.client == i; }),
+                server->pending_captures.end());
             /* And if that was the last one, the timer goes quiet again. */
             x11_update_vblank_timer(server);
 
@@ -2102,6 +2108,14 @@ void x11_server_dispatch(X11Server* server) {
                     if (is_toplevel && !is_override && server->config.on_window_destroyed) {
                         server->config.on_window_destroyed(server->config.userdata, wid);
                     }
+                    /* An override-redirect toplevel is a popup on the shell's
+                     * side: it too must go, or a killed client's menus (and a
+                     * benchmark's popups) stay on screen forever — wmbench's
+                     * leftover check found six of them. */
+                    if (is_toplevel && is_override && server->config.on_popup_unmapped) {
+                        server->config.on_popup_unmapped(server->config.userdata, wid);
+                    }
+                    stack_remove(server, wid);
                     if (server->focus_window_id == wid) {
                         server->focus_window_id = 0;
                         server->focus_client_idx = -1;
