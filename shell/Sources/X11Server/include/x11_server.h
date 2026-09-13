@@ -33,6 +33,8 @@ typedef enum X11WindowRequest {
     X11_WIN_REQ_FULLSCREEN,     /* _NET_WM_STATE add FULLSCREEN */
     X11_WIN_REQ_UNFULLSCREEN,
     X11_WIN_REQ_CLOSE,          /* _NET_CLOSE_WINDOW */
+    X11_WIN_REQ_ABOVE,          /* _NET_WM_STATE_ABOVE set: keep above others */
+    X11_WIN_REQ_UNABOVE,
 } X11WindowRequest;
 
 typedef struct X11ServerConfig {

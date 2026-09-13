@@ -608,7 +608,17 @@ class X11Integration {
         guard let view = drmView else { return }
         lastGetImageNs = DispatchTime.now().uptimeNanoseconds
         fl_drm_view_arm_capture(view)
-        capturePollDeadlineNs = DispatchTime.now().uptimeNanoseconds + 200_000_000
+        // Arming alone presents nothing on a quiet desktop: the mirror is
+        // refilled by presents, the composite gate lets one through only
+        // when something changed, and the frame pump that forces one runs
+        // every 250 ms — slower than the deadline below. So force a frame
+        // now through the shell's frame-tick pipe (a rebuild is a change):
+        // the next vsync presents, the mirror refreshes, the reply is fresh.
+        // Without this the first capture after an idle stretch timed out
+        // and answered with whatever the mirror last held.
+        let tick = _DesktopShellState._frameTickFd
+        if tick >= 0 { var one: UInt8 = 1; _ = write(tick, &one, 1) }
+        capturePollDeadlineNs = DispatchTime.now().uptimeNanoseconds + 300_000_000
         if !capturePolling {
             capturePolling = true
             scheduleCapturePoll()

@@ -2598,6 +2598,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// Raise order among free-standing X11 popups (see x11.onWindowRequest).
     var _popupZ: [String: Int] = [:]
     var _popupRaiseSerial: Int = 0
+    var _popupAbove: Set<String> = []
 
     func setTopBarRevealed(_ on: Bool) {
         guard _topBarRevealed != on else { return }
@@ -3704,6 +3705,14 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     self._popupRaiseSerial += 1
                     let z = self._popupRaiseSerial
                     self.setState { self._popupZ[popupId] = z }
+                } else if request == 10 || request == 11 {
+                    // _NET_WM_STATE_ABOVE on a free-standing window: a
+                    // notification popup, a benchmark's watched pattern —
+                    // it stays above its peers however often they raise.
+                    self.setState {
+                        if request == 10 { self._popupAbove.insert(popupId) }
+                        else { self._popupAbove.remove(popupId) }
+                    }
                 }
                 return
             }
@@ -4150,6 +4159,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
             let da = depth(a), db = depth(b)
             if da != db { return da < db }
+            let aa = _popupAbove.contains(a.key), ab = _popupAbove.contains(b.key)
+            if aa != ab { return !aa }   // keep-above sorts last (topmost)
             return (_popupZ[a.key] ?? 0) < (_popupZ[b.key] ?? 0)
         }
         for (popupId, popup) in sortedPopups {

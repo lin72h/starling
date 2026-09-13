@@ -352,6 +352,7 @@ struct X11Window {
     int      iconic = 0;
     int      maximized = 0;
     int      fullscreen = 0;
+    int      above = 0;           /* _NET_WM_STATE_ABOVE: keep above its peers */
     uint32_t popup_parent = 0;
 
     /* Core-X drawing state. shadow_dirty: core requests painted into the
@@ -359,7 +360,7 @@ struct X11Window {
      * at the end of the client's request batch, not per rectangle. The
      * background is what ClearArea and the first map paint. */
     int      shadow_dirty = 0;
-    int      dirty_ticks = 0;     /* vblank ticks the dirty shadow was held back */
+    int      dirty_ticks = 0;
     /* SHAPE bounding region, window-relative (x,y,w,h quads). shaped=1 with
      * no rects is a fully clipped window, as the extension defines it. */
     int      shaped = 0;
@@ -1263,13 +1264,14 @@ static void send_property_notify(X11Server* server, X11Window* win, uint32_t ato
 /* Rebuild _NET_WM_STATE from the window's flags + whether it holds focus. */
 static void update_net_wm_state(X11Server* server, X11Window* win) {
     if (!win || win->parent_id != server->root_window_id) return;
-    uint32_t atoms[6]; int n = 0;
+    uint32_t atoms[7]; int n = 0;
     if (win->fullscreen) atoms[n++] = intern_atom(server, "_NET_WM_STATE_FULLSCREEN", 0);
     if (win->maximized) {
         atoms[n++] = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_VERT", 0);
         atoms[n++] = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_HORZ", 0);
     }
     if (win->iconic) atoms[n++] = intern_atom(server, "_NET_WM_STATE_HIDDEN", 0);
+    if (win->above) atoms[n++] = intern_atom(server, "_NET_WM_STATE_ABOVE", 0);
     if (server->focus_window_id == win->id && !win->iconic)
         atoms[n++] = intern_atom(server, "_NET_WM_STATE_FOCUSED", 0);
     uint32_t state_atom = intern_atom(server, "_NET_WM_STATE", 0);
@@ -2663,6 +2665,7 @@ static void handle_request(X11Server* server, int client_idx,
                     server->config.on_popup_mapped(
                         server->config.userdata, wid, parent,
                         rel_x, rel_y, win->width, win->height);
+                    if (win->above) forward_window_request(server, win, X11_WIN_REQ_ABOVE);
                 }
             }
 
@@ -2952,6 +2955,19 @@ static void handle_request(X11Server* server, int client_idx,
                 }
             }
 
+            /* A client-set _NET_WM_STATE (before mapping, as EWMH allows):
+             * the only bit honoured is ABOVE — keep-above is a wish the
+             * shell can grant a free-standing window. */
+            if (property == intern_atom(server, "_NET_WM_STATE", 1) && format == 32) {
+                uint32_t a_above = intern_atom(server, "_NET_WM_STATE_ABOVE", 1);
+                int above = 0;
+                for (int i = 0; i + 4 <= byte_len; i += 4)
+                    if (*reinterpret_cast<const uint32_t*>(prop_data + i) == a_above) above = 1;
+                if (above != win->above) {
+                    win->above = above;
+                    if (win->mapped) forward_window_request(server, win, above ? X11_WIN_REQ_ABOVE : X11_WIN_REQ_UNABOVE);
+                }
+            }
             /* PropertyNotify to the window's selecting client. Chromium's
              * UI thread learns the X server timestamp by writing a dummy
              * property and BLOCKING on the PropertyNotify echo — without
@@ -3500,16 +3516,26 @@ static void handle_request(X11Server* server, int client_idx,
                 uint32_t a_mh = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_HORZ", 1);
                 uint32_t a_mv = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_VERT", 1);
                 uint32_t a_hidden = intern_atom(server, "_NET_WM_STATE_HIDDEN", 1);
-                bool want_fs = false, want_max = false, want_hidden = false;
+                uint32_t a_above = intern_atom(server, "_NET_WM_STATE_ABOVE", 1);
+                bool want_fs = false, want_max = false, want_hidden = false, want_above = false;
                 for (int i = 1; i <= 2; i++) {
                     if (d[i] == 0) continue;
                     if (d[i] == a_fs) want_fs = true;
                     else if (d[i] == a_mh || d[i] == a_mv) want_max = true;
                     else if (d[i] == a_hidden) want_hidden = true;
+                    else if (d[i] == a_above) want_above = true;
                 }
                 auto on = [&](int cur) {
                     return action == 1 ? 1 : action == 0 ? 0 : !cur;
                 };
+                if (want_above) {
+                    int on_ = on(target->above);
+                    if (on_ != target->above) {
+                        target->above = on_;
+                        forward_window_request(server, target, on_ ? X11_WIN_REQ_ABOVE : X11_WIN_REQ_UNABOVE);
+                        update_net_wm_state(server, target);
+                    }
+                }
                 if (want_fs) forward_window_request(server, target,
                     on(target->fullscreen) ? X11_WIN_REQ_FULLSCREEN : X11_WIN_REQ_UNFULLSCREEN);
                 if (want_max) forward_window_request(server, target,
