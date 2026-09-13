@@ -5317,6 +5317,76 @@ static void send_xi2_device_event(X11Server* server, X11Window* win,
      * it never asked for is the same duplicate-delivery bug from the other side. */
 }
 
+/* ── XI2 keyboard delivery ─────────────────────────────────────────────────
+ * GDK3 and Qt select XI_KeyPress/XI_KeyRelease via XISelectEvents and IGNORE
+ * core KeyPress, so keyboard reaches them ONLY through this path. Pointer
+ * already had an XI2 path (send_xi2_device_event), which is why mouse worked
+ * in GTK while typing did nothing. deviceid/sourceid = 3 (virtual core
+ * keyboard); detail = X keycode; the modifier mask goes in XIModifierInfo. */
+static void fill_and_send_xi2_key(X11Server* server, int ci, uint16_t evtype,
+                                  uint32_t keycode, uint32_t event_win,
+                                  uint32_t child_win, uint16_t mods) {
+    uint8_t ev[84];
+    std::memset(ev, 0, sizeof(ev));
+    ev[0] = 35; ev[1] = 131;
+    *reinterpret_cast<uint16_t*>(ev + 2) = server->clients[ci].sequence;
+    *reinterpret_cast<uint32_t*>(ev + 4) = (84 - 32) / 4;
+    *reinterpret_cast<uint16_t*>(ev + 8) = evtype;
+    *reinterpret_cast<uint16_t*>(ev + 10) = 3;   /* deviceid = virtual core keyboard */
+    *reinterpret_cast<uint32_t*>(ev + 12) = x11_timestamp();
+    *reinterpret_cast<uint32_t*>(ev + 16) = keycode;
+    *reinterpret_cast<uint32_t*>(ev + 20) = server->root_window_id;
+    *reinterpret_cast<uint32_t*>(ev + 24) = event_win;
+    *reinterpret_cast<uint32_t*>(ev + 28) = child_win;
+    *reinterpret_cast<uint16_t*>(ev + 48) = 0;   /* buttons_len */
+    *reinterpret_cast<uint16_t*>(ev + 52) = 3;   /* sourceid = keyboard */
+    /* XIModifierInfo (base, latched, locked, effective) at offset 60. */
+    *reinterpret_cast<uint32_t*>(ev + 60) = mods;   /* base */
+    *reinterpret_cast<uint32_t*>(ev + 72) = mods;   /* effective */
+    send_to_client(server, ci, ev, 84);
+}
+
+/* A keyboard XI2 selection: all/all-master devices or the virtual core kbd. */
+static bool xi2_matches_keyboard(uint16_t sub_devid) {
+    return sub_devid == 0 || sub_devid == 1 || sub_devid == 3;
+}
+
+/* True when `client` selected this XI2 key event on `win`. Used to suppress the
+ * duplicate core event for XI2 clients. */
+static bool client_selected_xi2_key(const X11Window* win, int client, uint16_t evtype) {
+    if (!win || client < 0) return false;
+    for (const auto& s : win->xi2_subs) {
+        if (s.client != client) continue;
+        if (!xi2_matches_keyboard(s.deviceid)) continue;
+        if (s.event_mask & (1u << evtype)) return true;
+    }
+    return false;
+}
+
+/* Deliver an XI2 key event to every subscriber on the focused window and on the
+ * root (GDK/Chromium select on either). */
+static void send_xi2_key_event(X11Server* server, X11Window* win, uint16_t evtype,
+                               uint32_t keycode, uint16_t mods) {
+    for (auto& s : win->xi2_subs) {
+        int ci = s.client;
+        if (ci < 0 || ci >= server->client_count || server->clients[ci].fd < 0) continue;
+        if (!xi2_matches_keyboard(s.deviceid)) continue;
+        if (!(s.event_mask & (1u << evtype))) continue;
+        fill_and_send_xi2_key(server, ci, evtype, keycode, win->id, 0, mods);
+    }
+    X11Window* root = find_window(server, server->root_window_id);
+    if (root && root != win) {
+        for (auto& s : root->xi2_subs) {
+            int ci = s.client;
+            if (ci < 0 || ci >= server->client_count || server->clients[ci].fd < 0) continue;
+            if (!xi2_matches_keyboard(s.deviceid)) continue;
+            if (!(s.event_mask & (1u << evtype))) continue;
+            fill_and_send_xi2_key(server, ci, evtype, keycode,
+                                  server->root_window_id, win->id, mods);
+        }
+    }
+}
+
 static int motion_log_count = 0;
 
 extern "C" {
@@ -5502,17 +5572,29 @@ void x11_server_key_event(X11Server* server, uint32_t keycode, int pressed) {
         else         server->key_mod_state &= ~mod_bit;
     }
 
-    uint8_t event[32] = {};
-    event[0] = pressed ? X11_KEY_PRESS_EVENT : X11_KEY_RELEASE_EVENT;
-    event[1] = x11_keycode;
-    *reinterpret_cast<uint16_t*>(event + 2) =
-        server->clients[server->focus_client_idx].sequence;
-    *reinterpret_cast<uint32_t*>(event + 4) = x11_timestamp();
-    *reinterpret_cast<uint32_t*>(event + 8) = server->root_window_id;
-    *reinterpret_cast<uint32_t*>(event + 12) = win->id;
-    *reinterpret_cast<uint16_t*>(event + 28) = state_before;  /* modifier mask */
-    event[30] = 1;
-    send_to_client(server, server->focus_client_idx, event, 32);
+    /* XI2 keyboard delivery (GDK3/Qt) + core delivery (raw Xlib). A client that
+     * selected the XI2 key event must NOT also get the core one, or it sees
+     * every keystroke twice. */
+    uint16_t xi2_evtype = pressed ? 2 : 3;   /* XI_KeyPress / XI_KeyRelease */
+    send_xi2_key_event(server, win, xi2_evtype, x11_keycode, state_before);
+
+    X11Window* root = find_window(server, server->root_window_id);
+    bool focus_uses_xi2 =
+        client_selected_xi2_key(win, server->focus_client_idx, xi2_evtype) ||
+        client_selected_xi2_key(root, server->focus_client_idx, xi2_evtype);
+    if (!focus_uses_xi2) {
+        uint8_t event[32] = {};
+        event[0] = pressed ? X11_KEY_PRESS_EVENT : X11_KEY_RELEASE_EVENT;
+        event[1] = x11_keycode;
+        *reinterpret_cast<uint16_t*>(event + 2) =
+            server->clients[server->focus_client_idx].sequence;
+        *reinterpret_cast<uint32_t*>(event + 4) = x11_timestamp();
+        *reinterpret_cast<uint32_t*>(event + 8) = server->root_window_id;
+        *reinterpret_cast<uint32_t*>(event + 12) = win->id;
+        *reinterpret_cast<uint16_t*>(event + 28) = state_before;  /* modifier mask */
+        event[30] = 1;
+        send_to_client(server, server->focus_client_idx, event, 32);
+    }
 }
 
 void x11_server_enter_notify(X11Server* server, uint32_t window_id, int x, int y) {
