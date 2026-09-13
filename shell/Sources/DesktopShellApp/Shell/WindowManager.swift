@@ -17,11 +17,23 @@ class WindowInfo {
     /// an installed app — it matches the `StartupWMClass` the app's `.desktop`
     /// entry declares, which `app-install` records into the app registry.
     var wmClass: String? = nil
-    var rect: Rect
+    /// Geometry and WM-state observers. An X11 client is told where the
+    /// shell really put its window and what state it is in (a Wayland client
+    /// never asks); the X11 path sets these, nothing else needs them.
+    var onRectChanged: ((Rect) -> Void)? = nil
+    var onStateChanged: (() -> Void)? = nil
+    var rect: Rect {
+        didSet {
+            if oldValue.left != rect.left || oldValue.top != rect.top ||
+               oldValue.width != rect.width || oldValue.height != rect.height {
+                onRectChanged?(rect)
+            }
+        }
+    }
     var zIndex: Int
-    var isMinimized: Bool
-    var isMaximized: Bool
-    var isFullscreen: Bool
+    var isMinimized: Bool { didSet { if oldValue != isMinimized { onStateChanged?() } } }
+    var isMaximized: Bool { didSet { if oldValue != isMaximized { onStateChanged?() } } }
+    var isFullscreen: Bool { didSet { if oldValue != isFullscreen { onStateChanged?() } } }
     var savedRect: Rect?
     /// The floating rect remembered when tiling first captured this window;
     /// restored when the user switches back to the floating layout.
@@ -243,7 +255,13 @@ final class AgentInfo {
 /// All mutations should be called from the shell's setState block.
 class WindowManagerState {
     var windows: [WindowInfo] = []
-    var focusedWindowId: String? = nil
+    /// Fired when keyboard focus moves between windows (nil = none). The X11
+    /// path uses it to keep the X server's focus, _NET_ACTIVE_WINDOW and
+    /// _NET_WM_STATE_FOCUSED in step with the shell's.
+    var onFocusChanged: ((String?) -> Void)? = nil
+    var focusedWindowId: String? = nil {
+        didSet { if oldValue != focusedWindowId { onFocusChanged?(focusedWindowId) } }
+    }
     private var nextZIndex: Int = 1
     private var nextWindowId: Int = 1
 

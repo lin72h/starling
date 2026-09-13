@@ -47,6 +47,16 @@ class X11Integration {
     var onNewPopup: ((_ windowId: UInt32, _ textureId: Int, _ parentWindowId: UInt32,
                        _ x: Int, _ y: Int, _ width: Int, _ height: Int) -> String)?
     var onPopupDestroyed: ((_ popupId: String) -> Void)?
+    /// A client moved/resized its own window (ConfigureWindow, or a pager's
+    /// _NET_MOVERESIZE_WINDOW). Root-absolute device px for a managed window
+    /// or a free-standing override-redirect one; parent-relative for a menu
+    /// anchored to a toplevel — the same space onNewWindow/onNewPopup used.
+    var onWindowConfigured: ((_ windowId: UInt32, _ x: Int, _ y: Int,
+                              _ width: Int, _ height: Int) -> Void)?
+    /// A window-manager request from a client: see X11WindowRequest in the
+    /// server header (1 activate, 2 raise, 3 minimize, 4 restore, 5 maximize,
+    /// 6 unmaximize, 7 fullscreen, 8 unfullscreen, 9 close).
+    var onWindowRequest: ((_ windowId: UInt32, _ request: Int32) -> Void)?
     /// A popup's presented buffer changed size (menus map small, then grow).
     var onPopupBufferResized: ((_ popupId: String, _ physWidth: Int, _ physHeight: Int) -> Void)?
     var onTitleChanged: ((_ windowId: String, _ title: String) -> Void)?
@@ -138,6 +148,18 @@ class X11Integration {
             let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
             guard let title = title else { return }
             this.handleTitleChanged(windowId, title: String(cString: title))
+        }
+
+        // Declared in the header since the beginning and never registered —
+        // so XMoveWindow/XResizeWindow reached the server and stopped there,
+        // and every X client that placed its own window was silently ignored.
+        config.on_window_configured = { (userdata, windowId, x, y, w, h) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.onWindowConfigured?(windowId, Int(x), Int(y), Int(w), Int(h))
+        }
+        config.on_window_request = { (userdata, windowId, request) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.onWindowRequest?(windowId, request)
         }
 
         // GetImage / screen capture (Zoom screen share): arm the compositor's
@@ -344,6 +366,16 @@ class X11Integration {
         return windowIds[windowId]
     }
 
+    /// The shell popup id of an override-redirect X11 window, if it is one.
+    func popupId(forX11Window windowId: UInt32) -> String? {
+        return popupIds[windowId]
+    }
+
+    /// Reverse of shellWindowId(forX11Window:).
+    func x11WindowId(forShellWindowId shellWindowId: String) -> UInt32? {
+        return windowIds.first(where: { $0.value == shellWindowId })?.key
+    }
+
     private func handleWindowDestroyed(_ windowId: UInt32) {
         windowPids.removeValue(forKey: windowId)
         // print("[X11Integration] Window destroyed: 0x\(String(windowId, radix: 16))")
@@ -543,10 +575,26 @@ class X11Integration {
         x11_server_key_event(server, keycode, pressed ? 1 : 0)
     }
 
-    /// Set focus to a specific X11 window.
+    /// Set focus to a specific X11 window (0 = none).
     func setFocus(windowId: UInt32) {
         guard let server = server else { return }
         x11_server_set_focus(server, windowId)
+    }
+
+    /// Where the shell composites the window's content, root-absolute device
+    /// px. Keeps the server's TranslateCoordinates/GetGeometry answers — and
+    /// the ConfigureNotify a client gets — truthful about where it really is.
+    func setWindowPosition(windowId: UInt32, x: Int, y: Int) {
+        guard let server = server else { return }
+        x11_server_set_window_position(server, windowId, Int32(x), Int32(y))
+    }
+
+    /// The WM state the shell applied; the server records it in WM_STATE and
+    /// _NET_WM_STATE and sends the ICCCM Unmap/MapNotify on iconify/restore.
+    func setWindowState(windowId: UInt32, minimized: Bool, maximized: Bool, fullscreen: Bool) {
+        guard let server = server else { return }
+        x11_server_set_window_state(server, windowId, minimized ? 1 : 0,
+                                    maximized ? 1 : 0, fullscreen ? 1 : 0)
     }
 
     /// Release the current buffer for a window so the client can reuse it.

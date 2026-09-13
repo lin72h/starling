@@ -3576,9 +3576,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let screenLogH = (PlatformDispatcher.instance.implicitView?.physicalSize.height ?? 2160.0) / dpi
             let winLogW = max(80.0, Double(width) / dpi)
             let winLogH = max(60.0, Double(height) / dpi) + DesktopTheme.kTitleBarHeight
+            // x/y are where the client wants its CONTENT; the frame's title
+            // bar goes above that, so the frame starts one bar higher.
             let winLogX = (x != 0) ? Double(x) / dpi
                                    : max(0.0, (screenLogW - winLogW) / 2.0)
-            let winLogY = (y != 0) ? Double(y) / dpi
+            let winLogY = (y != 0) ? Double(y) / dpi - DesktopTheme.kTitleBarHeight
                                    : max(0.0, (screenLogH - winLogH) / 2.0)
             let fullRect = Rect.fromLTWH(winLogX, winLogY, winLogW, winLogH)
             self.setState {
@@ -3629,7 +3631,122 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // (The old code configured every window to fullscreen for the
             // Chrome-kiosk flow; interactive resizes still flow through
             // onContentResize/onResizeComplete above.)
+
+            // The shell is this window's WM, and an X client can ASK where it
+            // is (XTranslateCoordinates) and what state it is in
+            // (_NET_WM_STATE) — so every move, minimise, maximise and
+            // fullscreen the shell applies is pushed back to the server.
+            if let win = self.windowManager.windows.first(where: { $0.id == shellWindowId }) {
+                let push: (WindowInfo) -> Void = { w in
+                    let d = currentShellDpi
+                    // Fullscreen draws the content over the whole rect (the
+                    // bar overlays on demand); otherwise it sits below the bar.
+                    let top = w.isFullscreen ? w.rect.top
+                                             : w.rect.top + DesktopTheme.kTitleBarHeight
+                    x11.setWindowPosition(windowId: windowId,
+                                          x: Int((w.rect.left * d).rounded()),
+                                          y: Int((top * d).rounded()))
+                    x11.setWindowState(windowId: windowId, minimized: w.isMinimized,
+                                       maximized: w.isMaximized, fullscreen: w.isFullscreen)
+                }
+                win.onRectChanged = { [weak win] _ in if let w = win { push(w) } }
+                win.onStateChanged = { [weak win] in if let w = win { push(w) } }
+                push(win)
+            }
             return shellWindowId
+        }
+
+        // A client moved or resized its own window, or a pager asked the WM
+        // to. Honoured as asked: a WM that ignores XMoveResizeWindow leaves
+        // every "place my window here" client (and every window benchmark)
+        // stuck where the shell first put it.
+        x11.onWindowConfigured = { [weak self] (windowId: UInt32, x: Int, y: Int,
+                                                width: Int, height: Int) in
+            guard let self = self else { return }
+            let dpi = currentShellDpi
+            if let shellId = x11.shellWindowId(forX11Window: windowId),
+               let win = self.windowManager.windows.first(where: { $0.id == shellId }) {
+                let bar = win.isFullscreen ? 0.0 : DesktopTheme.kTitleBarHeight
+                let rect = Rect.fromLTWH(Double(x) / dpi, Double(y) / dpi - bar,
+                                         max(80.0, Double(width) / dpi),
+                                         max(60.0, Double(height) / dpi) + bar)
+                self.setState { win.rect = rect }
+            } else if let popupId = x11.popupId(forX11Window: windowId),
+                      var p = self.popups[popupId] {
+                p.x = Double(x) / dpi; p.y = Double(y) / dpi
+                p.width = Double(width) / dpi; p.height = Double(height) / dpi
+                self.setState { self.popups[popupId] = p }
+            }
+        }
+
+        // The window-manager requests an X client can make (EWMH/ICCCM
+        // client messages, XRaiseWindow, XIconifyWindow), answered with the
+        // same operations the title bar and dock use. The server learns the
+        // outcome from the push-back above.
+        x11.onWindowRequest = { [weak self] (windowId: UInt32, request: Int32) in
+            guard let self = self,
+                  let shellId = x11.shellWindowId(forX11Window: windowId),
+                  let win = self.windowManager.windows.first(where: { $0.id == shellId })
+            else { return }
+            let dpi = currentShellDpi
+            let sendContentSize: (Rect, Bool) -> Void = { rect, fullscreen in
+                let bar = fullscreen ? 0.0 : DesktopTheme.kTitleBarHeight
+                x11.sendResize(windowId: windowId,
+                               width: Int(rect.width * dpi),
+                               height: Int((rect.height - bar) * dpi))
+            }
+            switch request {
+            case 1: // activate: unminimise, raise, focus
+                self.setState {
+                    if win.isMinimized { self.windowManager.restoreWindow(shellId) }
+                    else { self.windowManager.bringToFront(shellId) }
+                }
+            case 2: // raise
+                self.setState { self.windowManager.bringToFront(shellId) }
+            case 3: // minimise
+                guard !win.isMinimized else { return }
+                self.setState { self.windowManager.minimizeWindow(shellId) }
+            case 4: // restore from iconic
+                guard win.isMinimized else { return }
+                self.setState { self.windowManager.restoreWindow(shellId) }
+            case 5, 6: // maximise / unmaximise (the manager's op is a toggle)
+                let wantMax = (request == 5)
+                guard win.isMaximized != wantMax else { return }
+                self.setState {
+                    self.windowManager.maximizeWindow(
+                        shellId, screenWidth: self.screenWidth, screenHeight: self.screenHeight)
+                }
+                sendContentSize(win.rect, false)
+            case 7: // fullscreen — same shape as the Wayland handler
+                guard !win.isFullscreen else { return }
+                var target: Rect? = nil
+                self.setState { target = self._fullscreenWithZoom(shellId) }
+                if let t = target { sendContentSize(t, true) }
+            case 8: // leave fullscreen
+                guard win.isFullscreen else { return }
+                var restored: Rect? = nil
+                self.setState { restored = self._fullscreenWithZoom(shellId) }
+                if let r = restored { sendContentSize(r, false) }
+            case 9: // close (WM_DELETE_WINDOW to the client)
+                win.onWindowClose?()
+            default:
+                break
+            }
+        }
+
+        // Focus the X server follows the shell's, not only the pointer's:
+        // _NET_ACTIVE_WINDOW and _NET_WM_STATE_FOCUSED are what a client
+        // reads to know it was activated.
+        self.windowManager.onFocusChanged = { [weak self] newId in
+            guard let self = self else { return }
+            if let id = newId, let xid = x11.x11WindowId(forShellWindowId: id) {
+                x11.setFocus(windowId: xid)
+            } else if newId == nil || !(newId!.hasPrefix("x11-")) {
+                // Focus left the X world: no X window holds it.
+                if let cur = self.windowManager.focusedWindowId,
+                   x11.x11WindowId(forShellWindowId: cur) != nil { return }
+                x11.setFocus(windowId: 0)
+            }
         }
 
         x11.onWindowDestroyed = { [weak self] (windowId: String) in
@@ -4055,21 +4172,27 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 immediateParentAbsX = absX - popup.x
             }
 
-            // Constraint adjustment: keep popups within screen bounds.
-            if absX + popup.width > screenWidth {
-                if !isFirstParent {
-                    // Nested popup (submenu): flip to left side of parent popup.
-                    absX = immediateParentAbsX - popup.width
-                } else {
-                    // Direct child of toplevel: slide left to fit.
-                    absX = screenWidth - popup.width
+            // Constraint adjustment: keep popups within screen bounds — a
+            // MENU's; a free-standing override-redirect X11 window (parent
+            // 0) is placed by its client, root-absolute, and may hang off
+            // an edge on purpose (a bar, a benchmark's offscreen check).
+            let rootAnchored = popupId.hasPrefix("x11popup-") && popup.parentSurfaceId == 0
+            if !rootAnchored {
+                if absX + popup.width > screenWidth {
+                    if !isFirstParent {
+                        // Nested popup (submenu): flip to left side of parent popup.
+                        absX = immediateParentAbsX - popup.width
+                    } else {
+                        // Direct child of toplevel: slide left to fit.
+                        absX = screenWidth - popup.width
+                    }
                 }
+                if absX < 0 { absX = 0 }
+                if absY + popup.height > screenHeight {
+                    absY = screenHeight - popup.height
+                }
+                if absY < 0 { absY = 0 }
             }
-            if absX < 0 { absX = 0 }
-            if absY + popup.height > screenHeight {
-                absY = screenHeight - popup.height
-            }
-            if absY < 0 { absY = 0 }
 
             let isX11Popup = popupId.hasPrefix("x11popup-")
             let texture: Widget = TextureWidget(textureId: popup.textureId, filterQuality: .none)

@@ -341,6 +341,28 @@ struct X11Window {
     uint32_t owner_client = 0;  /* index into clients[] */
     std::vector<X11Property> properties;
 
+    /* WM bookkeeping. shell_managed: the shell holds a window for this id
+     * (set on the first on_window_mapped, cleared by a client unmap/destroy),
+     * so a re-map after an iconify is a RESTORE and not a second window.
+     * iconic/maximized/fullscreen mirror what the shell applied. popup_parent
+     * is the toplevel an override-redirect window was anchored to at map
+     * time (0 = none: placed root-absolute), so a later ConfigureWindow can
+     * be handed to the shell in the same coordinate space. */
+    int      shell_managed = 0;
+    int      iconic = 0;
+    int      maximized = 0;
+    int      fullscreen = 0;
+    uint32_t popup_parent = 0;
+
+    /* Core-X drawing state. shadow_dirty: core requests painted into the
+     * shadow and the shell has not been handed the result yet — flushed once
+     * at the end of the client's request batch, not per rectangle. The
+     * background is what ClearArea and the first map paint. */
+    int      shadow_dirty = 0;
+    int      has_bg_pixel = 0;
+    uint32_t bg_pixel = 0;
+    uint32_t bg_pixmap = 0;
+
     /* Present event registrations — Chrome uses multiple eids */
     std::vector<PresentReg> present_regs;
 
@@ -459,6 +481,20 @@ struct RenderGlyphSet {
     std::map<uint32_t, RenderGlyph> glyphs;
 };
 
+/* A core-X graphics context: the part of it the drawing requests below read.
+ * Pixel values are the root visual's (TrueColor 0xRRGGBB). Clip is one
+ * rectangle, GC-origin relative, as XSetClipRectangles hands it over. */
+struct X11GC {
+    uint32_t id = 0;
+    uint32_t fg = 0;
+    uint32_t bg = 0xffffff;
+    uint8_t  function = 3;      /* GXcopy */
+    uint16_t line_width = 0;
+    int      has_clip = 0;
+    int      clip_x = 0, clip_y = 0;
+    int      clip_w = 0, clip_h = 0;
+};
+
 struct X11Server {
     int listen_fd;      /* abstract namespace socket */
     int listen_fd2;     /* filesystem socket (fallback) */
@@ -469,6 +505,16 @@ struct X11Server {
 
     std::vector<X11Window> windows;
     std::vector<X11Pixmap> pixmaps;
+    std::vector<X11GC> gcs;                    /* core-X graphics contexts */
+    /* Selection owners (atom -> window). SetSelectionOwner records, and the
+     * server itself owns _NET_WM_CM_S0 through the WM check window: this
+     * desktop always composites, and a client asking (xcompmgr detection,
+     * wmbench's cmcheck, GTK's is_composited) must hear yes. */
+    std::map<uint32_t, uint32_t> selection_owners;
+    /* The EWMH _NET_SUPPORTING_WM_CHECK window: a server-owned, never-mapped
+     * 1x1 child of the root carrying _NET_WM_NAME/_NET_WM_PID. Its presence
+     * is how every toolkit and tool decides a window manager is running. */
+    uint32_t wm_check_window_id = 0;
     std::vector<RenderPicture> pictures;      /* RENDER Picture objects */
     std::vector<RenderGlyphSet> glyphsets;    /* RENDER glyph sets (text) */
     std::vector<X11Fence> fences;
@@ -849,6 +895,130 @@ static uint8_t* picture_shadow(X11Server* server, uint32_t drawable,
     return nullptr;
 }
 
+/* ── Core-X drawing ───────────────────────────────────────────────────────
+ * PolyFillRectangle, FillPoly, PolyLine and friends, painted into the same
+ * RGBA shadows RENDER and PutImage use. This is how plain Xlib programs
+ * draw (xclock, xeyes, wmbench's checks, every Motif/Athena app): without it
+ * they map a window and never show a pixel. Pixel values are the root
+ * visual's 0xRRGGBB; alpha is written opaque, as blit_zpixmap does. */
+static X11GC* find_gc(X11Server* server, uint32_t id) {
+    for (auto& g : server->gcs) if (g.id == id) return &g;
+    return nullptr;
+}
+
+struct CoreClip { int x0, y0, x1, y1; };   /* exclusive on the far side */
+
+/* The drawable's own bounds, cut down by the GC clip (drawable-relative,
+ * shifted by the child-window offset the shadow target applied). */
+static CoreClip core_clip_for(const X11GC* gc, int W, int H, int ox, int oy) {
+    CoreClip c = { 0, 0, W, H };
+    if (gc && gc->has_clip) {
+        int cx0 = gc->clip_x + ox, cy0 = gc->clip_y + oy;
+        int cx1 = cx0 + gc->clip_w, cy1 = cy0 + gc->clip_h;
+        if (cx0 > c.x0) c.x0 = cx0;
+        if (cy0 > c.y0) c.y0 = cy0;
+        if (cx1 < c.x1) c.x1 = cx1;
+        if (cy1 < c.y1) c.y1 = cy1;
+    }
+    return c;
+}
+
+static inline void core_px(uint8_t* buf, int W, const CoreClip& c, int x, int y, uint32_t pixel) {
+    if (x < c.x0 || x >= c.x1 || y < c.y0 || y >= c.y1) return;
+    uint8_t* d = buf + (static_cast<size_t>(y) * W + x) * 4;
+    d[0] = static_cast<uint8_t>((pixel >> 16) & 0xff);
+    d[1] = static_cast<uint8_t>((pixel >> 8) & 0xff);
+    d[2] = static_cast<uint8_t>(pixel & 0xff);
+    d[3] = 0xff;
+}
+
+static void core_fill_rect(uint8_t* buf, int W, const CoreClip& c,
+                           int x, int y, int w, int h, uint32_t pixel) {
+    int x0 = x > c.x0 ? x : c.x0, y0 = y > c.y0 ? y : c.y0;
+    int x1 = (x + w) < c.x1 ? (x + w) : c.x1, y1 = (y + h) < c.y1 ? (y + h) : c.y1;
+    if (x0 >= x1 || y0 >= y1) return;
+    uint8_t r = static_cast<uint8_t>((pixel >> 16) & 0xff);
+    uint8_t g = static_cast<uint8_t>((pixel >> 8) & 0xff);
+    uint8_t b = static_cast<uint8_t>(pixel & 0xff);
+    for (int yy = y0; yy < y1; yy++) {
+        uint8_t* d = buf + (static_cast<size_t>(yy) * W + x0) * 4;
+        for (int xx = x0; xx < x1; xx++, d += 4) { d[0] = r; d[1] = g; d[2] = b; d[3] = 0xff; }
+    }
+}
+
+/* Thin (width 0/1) Bresenham line, both endpoints inclusive. */
+static void core_line(uint8_t* buf, int W, const CoreClip& c,
+                      int x0, int y0, int x1, int y1, uint32_t pixel) {
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x0 < x1 ? 1 : -1;
+    int dy = y1 > y0 ? y0 - y1 : y1 - y0, sy = y0 < y1 ? 1 : -1;   /* dy <= 0 */
+    int err = dx + dy;
+    for (int guard = 0; guard < 1 << 16; guard++) {
+        core_px(buf, W, c, x0, y0, pixel);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Even-odd scanline polygon fill (X's default fill rule). */
+static void core_fill_poly(uint8_t* buf, int W, const CoreClip& c,
+                           const int* px, const int* py, int n, uint32_t pixel) {
+    if (n < 3) return;
+    int ymin = py[0], ymax = py[0];
+    for (int i = 1; i < n; i++) { if (py[i] < ymin) ymin = py[i]; if (py[i] > ymax) ymax = py[i]; }
+    if (ymin < c.y0) ymin = c.y0;
+    if (ymax >= c.y1) ymax = c.y1 - 1;
+    std::vector<int> xs;
+    for (int y = ymin; y <= ymax; y++) {
+        xs.clear();
+        double sy = y + 0.5;
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+            double yi = py[i], yj = py[j];
+            if ((yi <= sy) == (yj <= sy)) continue;    /* edge does not cross */
+            double t = (sy - yi) / (yj - yi);
+            xs.push_back(static_cast<int>(px[i] + t * (px[j] - px[i]) + 0.5));
+        }
+        std::sort(xs.begin(), xs.end());
+        for (size_t k = 0; k + 1 < xs.size(); k += 2)
+            core_fill_rect(buf, W, c, xs[k], y, xs[k + 1] - xs[k], 1, pixel);
+    }
+}
+
+/* Paint (part of) a window's background: its pixel, or its pixmap tiled
+ * from the window origin. None leaves the contents alone, as X does. */
+static void paint_window_background(X11Server* server, X11Window* win,
+                                    int x, int y, int w, int h) {
+    ensure_shadow(win);
+    if (win->shadow.empty()) return;
+    CoreClip c = { 0, 0, win->shadow_w, win->shadow_h };
+    if (win->bg_pixmap > 1) {
+        X11Pixmap* pm = find_pixmap(server, win->bg_pixmap);
+        if (!pm || pm->shadow.empty() || !pm->width || !pm->height) return;
+        int x1 = x + w < c.x1 ? x + w : c.x1, y1 = y + h < c.y1 ? y + h : c.y1;
+        for (int yy = (y > 0 ? y : 0); yy < y1; yy++) {
+            const uint8_t* srow = pm->shadow.data() + static_cast<size_t>(yy % pm->height) * pm->width * 4;
+            uint8_t* drow = win->shadow.data() + static_cast<size_t>(yy) * win->shadow_w * 4;
+            for (int xx = (x > 0 ? x : 0); xx < x1; xx++)
+                std::memcpy(drow + static_cast<size_t>(xx) * 4,
+                            srow + static_cast<size_t>(xx % pm->width) * 4, 4);
+        }
+        win->shadow_dirty = 1;
+    } else if (win->has_bg_pixel) {
+        core_fill_rect(win->shadow.data(), win->shadow_w, c, x, y, w, h, win->bg_pixel);
+        win->shadow_dirty = 1;
+    }
+}
+
+/* One upload per request batch: every window core drawing touched. */
+static void flush_dirty_shadows(X11Server* server) {
+    for (auto& w : server->windows) {
+        if (!w.shadow_dirty) continue;
+        w.shadow_dirty = 0;
+        flush_shadow(server, &w);
+    }
+}
+
 /* Source colour of a picture: the solid fill's colour, else opaque black. */
 static uint32_t picture_source_color(X11Server* server, uint32_t src_id) {
     RenderPicture* p = find_picture(server, src_id);
@@ -1015,6 +1185,95 @@ static void send_resize_events(X11Server* server, X11Window* win,
 /* ========================================================================== */
 /* Lifecycle                                                                   */
 /* ========================================================================== */
+
+static uint32_t x11_timestamp();
+
+/* ── WM state bookkeeping ─────────────────────────────────────────────────
+ * The shell is the window manager; these keep the X-visible record of what
+ * it did (properties + the notify events ICCCM promises) in one place. */
+static void send_property_notify(X11Server* server, X11Window* win, uint32_t atom,
+                                 int deleted) {
+    int oc = static_cast<int>(win->owner_client);
+    if (!(win->event_mask & 0x400000)) return;       /* PropertyChangeMask */
+    if (oc < 0 || oc >= server->client_count || server->clients[oc].fd < 0) return;
+    uint8_t ev[32] = {};
+    ev[0] = 28; /* PropertyNotify */
+    *reinterpret_cast<uint16_t*>(ev + 2) = server->clients[oc].sequence;
+    *reinterpret_cast<uint32_t*>(ev + 4) = win->id;
+    *reinterpret_cast<uint32_t*>(ev + 8) = atom;
+    *reinterpret_cast<uint32_t*>(ev + 12) = x11_timestamp();
+    ev[16] = deleted ? 1 : 0;
+    send_to_client(server, oc, ev, 32);
+}
+
+/* Rebuild _NET_WM_STATE from the window's flags + whether it holds focus. */
+static void update_net_wm_state(X11Server* server, X11Window* win) {
+    if (!win || win->parent_id != server->root_window_id) return;
+    uint32_t atoms[6]; int n = 0;
+    if (win->fullscreen) atoms[n++] = intern_atom(server, "_NET_WM_STATE_FULLSCREEN", 0);
+    if (win->maximized) {
+        atoms[n++] = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_VERT", 0);
+        atoms[n++] = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_HORZ", 0);
+    }
+    if (win->iconic) atoms[n++] = intern_atom(server, "_NET_WM_STATE_HIDDEN", 0);
+    if (server->focus_window_id == win->id && !win->iconic)
+        atoms[n++] = intern_atom(server, "_NET_WM_STATE_FOCUSED", 0);
+    uint32_t state_atom = intern_atom(server, "_NET_WM_STATE", 0);
+    auto& p = set_property(win, state_atom);
+    p.type = 4; /* ATOM */
+    p.format = 32;
+    p.length = static_cast<uint32_t>(n);
+    p.data.assign(reinterpret_cast<uint8_t*>(atoms),
+                  reinterpret_cast<uint8_t*>(atoms) + n * 4);
+    send_property_notify(server, win, state_atom, 0);
+}
+
+/* ICCCM WM_STATE: 1 = NormalState, 3 = IconicState. */
+static void set_wm_state(X11Server* server, X11Window* win, uint32_t state) {
+    uint32_t wm_state_atom = intern_atom(server, "WM_STATE", 0);
+    auto& p = set_property(win, wm_state_atom);
+    p.type = wm_state_atom;
+    p.format = 32;
+    p.length = 2;
+    uint32_t d[2] = { state, 0 };
+    p.data.assign(reinterpret_cast<uint8_t*>(d), reinterpret_cast<uint8_t*>(d) + 8);
+    send_property_notify(server, win, wm_state_atom, 0);
+}
+
+/* The Map/UnmapNotify a client with StructureNotifyMask sees when the WM
+ * iconifies or restores it. The window stays mapped server-side (the shell
+ * keeps its texture); this is the client's ICCCM view only. */
+static void send_structure_map_notify(X11Server* server, X11Window* win, int mapped) {
+    int oc = static_cast<int>(win->owner_client);
+    if (!(win->event_mask & 0x20000)) return;        /* StructureNotifyMask */
+    if (oc < 0 || oc >= server->client_count || server->clients[oc].fd < 0) return;
+    uint8_t ev[32] = {};
+    ev[0] = mapped ? X11_MAP_NOTIFY_EVENT : 18 /* UnmapNotify */;
+    *reinterpret_cast<uint16_t*>(ev + 2) = server->clients[oc].sequence;
+    *reinterpret_cast<uint32_t*>(ev + 4) = win->id;
+    *reinterpret_cast<uint32_t*>(ev + 8) = win->id;
+    ev[12] = mapped ? static_cast<uint8_t>(win->override_redirect) : 0;
+    send_to_client(server, oc, ev, 32);
+}
+
+/* _NET_ACTIVE_WINDOW on the root. */
+static void set_root_active_window(X11Server* server, uint32_t wid) {
+    X11Window* root = find_window(server, server->root_window_id);
+    if (!root) return;
+    uint32_t net_active = intern_atom(server, "_NET_ACTIVE_WINDOW", 0);
+    auto& ap = set_property(root, net_active);
+    ap.type = 33; /* WINDOW */
+    ap.format = 32;
+    ap.length = 1;
+    ap.data.assign(reinterpret_cast<uint8_t*>(&wid), reinterpret_cast<uint8_t*>(&wid) + 4);
+    send_property_notify(server, root, net_active, 0);
+}
+
+static void forward_window_request(X11Server* server, X11Window* win, int req) {
+    if (!server->config.on_window_request) return;
+    fprintf(stderr, "[X11Server] WM request %d for 0x%x\n", req, win->id);
+    server->config.on_window_request(server->config.userdata, win->id, req);
+}
 
 extern "C" {
 
@@ -1335,6 +1594,53 @@ X11Server* x11_server_create(int display_num, const X11ServerConfig* config) {
     fprintf(stderr, "[X11Server] Listening on :%d (abstract + %s)\n",
             display_num, socket_path);
 
+    /* _NET_SUPPORTING_WM_CHECK: the EWMH "a window manager is here" marker.
+     * A server-owned, never-mapped 1x1 child of the root, named on both ends
+     * as the spec requires. Earlier revisions deliberately left this out
+     * (a root that claimed to be its own WM misrouted Chromium) — the WM
+     * requests it implies are now actually answered, so it is honest. */
+    {
+        X11Window chk;
+        chk.id = 0x00000002;
+        chk.parent_id = server->root_window_id;
+        chk.x = -1; chk.y = -1;
+        chk.width = 1; chk.height = 1;
+        chk.mapped = 0;
+        chk.override_redirect = 1;
+        chk.owner_client = static_cast<uint32_t>(-1);
+        server->windows.push_back(std::move(chk));
+        server->wm_check_window_id = 0x00000002;
+
+        X11Window* w = find_window(server, 0x00000002);
+        X11Window* root = find_window(server, server->root_window_id);
+        uint32_t a_check = intern_atom(server, "_NET_SUPPORTING_WM_CHECK", 0);
+        uint32_t a_name = intern_atom(server, "_NET_WM_NAME", 0);
+        uint32_t a_pid = intern_atom(server, "_NET_WM_PID", 0);
+        uint32_t a_utf8 = intern_atom(server, "UTF8_STRING", 0);
+        uint32_t a_window = 33, a_cardinal = 6;
+        uint32_t self_id = 0x00000002;
+        if (w && root) {
+            for (X11Window* t : { w, root }) {
+                auto& p = set_property(t, a_check);
+                p.type = a_window; p.format = 32; p.length = 1;
+                p.data.assign(reinterpret_cast<uint8_t*>(&self_id),
+                              reinterpret_cast<uint8_t*>(&self_id) + 4);
+            }
+            const char* nm = "Starling";
+            auto& pn = set_property(w, a_name);
+            pn.type = a_utf8; pn.format = 8; pn.length = static_cast<uint32_t>(strlen(nm));
+            pn.data.assign(reinterpret_cast<const uint8_t*>(nm),
+                           reinterpret_cast<const uint8_t*>(nm) + strlen(nm));
+            uint32_t pid = static_cast<uint32_t>(getpid());
+            auto& pp = set_property(w, a_pid);
+            pp.type = a_cardinal; pp.format = 32; pp.length = 1;
+            pp.data.assign(reinterpret_cast<uint8_t*>(&pid),
+                           reinterpret_cast<uint8_t*>(&pid) + 4);
+        }
+        /* We always composite: own the compositing-manager selection. */
+        server->selection_owners[intern_atom(server, "_NET_WM_CM_S0", 0)] = self_id;
+    }
+
     /* Additional EWMH properties on root */
     {
         X11Window* root = find_window(server, server->root_window_id);
@@ -1363,6 +1669,10 @@ X11Server* x11_server_create(int display_num, const X11ServerConfig* config) {
                 intern_atom(server, "_NET_CURRENT_DESKTOP", 0),
                 intern_atom(server, "_NET_FRAME_EXTENTS", 0),
                 intern_atom(server, "_NET_WM_MOVERESIZE", 0),
+                intern_atom(server, "_NET_SUPPORTING_WM_CHECK", 0),
+                intern_atom(server, "_NET_MOVERESIZE_WINDOW", 0),
+                intern_atom(server, "_NET_CLOSE_WINDOW", 0),
+                intern_atom(server, "_NET_WM_PID", 0),
             };
             int n_supported = static_cast<int>(sizeof(supported_atoms) / sizeof(supported_atoms[0]));
             {
@@ -2045,6 +2355,9 @@ static void handle_client_data(X11Server* server, int client_idx) {
                 static_cast<size_t>(client->buf_len - byte_length));
         client->buf_len -= byte_length;
     }
+    /* Core drawing marks shadows dirty rather than uploading per request; a
+     * frame of many small fills is one texture upload, here, per batch. */
+    flush_dirty_shadows(server);
 }
 
 /* ========================================================================== */
@@ -2155,6 +2468,8 @@ static void handle_request(X11Server* server, int client_idx,
             uint32_t val = *reinterpret_cast<const uint32_t*>(data + voff);
             voff += 4;
             switch (bit) {
+            case 0: win.bg_pixmap = val; break;              /* 0 None, 1 ParentRelative */
+            case 1: win.has_bg_pixel = 1; win.bg_pixel = val; break;
             case 9: win.override_redirect = val ? 1 : 0; break;
             case 11: win.event_mask = val; break;
             default: break;
@@ -2184,6 +2499,12 @@ static void handle_request(X11Server* server, int client_idx,
             if (was_mapped) break;
 
             if (is_toplevel && !is_override &&
+                win->width > 1 && win->height > 1 && win->shell_managed) {
+                /* The shell already holds this window. A map while iconified
+                 * is the ICCCM way to de-iconify (XMapWindow); any other
+                 * re-map is a no-op beyond the MapNotify below. */
+                if (win->iconic) forward_window_request(server, win, X11_WIN_REQ_RESTORE);
+            } else if (is_toplevel && !is_override &&
                 win->width > 1 && win->height > 1) {
                 if (server->config.on_window_mapped) {
                     fprintf(stderr, "[X11Server] Calling on_window_mapped for 0x%x %dx%d...\n",
@@ -2192,6 +2513,7 @@ static void handle_request(X11Server* server, int client_idx,
                         server->config.userdata, wid,
                         win->x, win->y, win->width, win->height);
                     fprintf(stderr, "[X11Server] on_window_mapped returned\n");
+                    win->shell_managed = 1;
                 }
                 x11_server_set_focus(server, wid);
 
@@ -2245,15 +2567,30 @@ static void handle_request(X11Server* server, int client_idx,
                      * actually composites that window. Differencing the two here
                      * makes the anchor correct no matter how the shell places
                      * or scales the parent. */
-                    X11Window* pw = find_window(server, parent);
+                    /* No ordinary toplevel of this client to anchor to: the
+                     * window is a free-standing override-redirect surface (a
+                     * bar, a notification, a benchmark's pattern window). It
+                     * is handed over with parent 0 and ROOT-ABSOLUTE coords,
+                     * and the shell draws it exactly there, unclamped. */
+                    X11Window* pw = parent ? find_window(server, parent) : nullptr;
                     int rel_x = win->x - (pw ? pw->x : 0);
                     int rel_y = win->y - (pw ? pw->y : 0);
+                    win->popup_parent = pw ? parent : 0;
+                    if (!pw) parent = 0;
                     fprintf(stderr, "[X11Server] popup mapped 0x%x parent=0x%x %dx%d rel=%+d%+d\n",
                             wid, parent, win->width, win->height, rel_x, rel_y);
                     server->config.on_popup_mapped(
                         server->config.userdata, wid, parent,
                         rel_x, rel_y, win->width, win->height);
                 }
+            }
+
+            /* A window with a background shows it the moment it is mapped —
+             * a client that never draws (a pattern set as a background
+             * pixmap, a plain coloured window) is otherwise invisible. */
+            if (!was_mapped && (win->has_bg_pixel || win->bg_pixmap > 1) &&
+                win->width > 0 && win->height > 0) {
+                paint_window_background(server, win, 0, 0, win->width, win->height);
             }
 
             /* MapNotify */
@@ -2303,6 +2640,8 @@ static void handle_request(X11Server* server, int client_idx,
             int is_toplevel = (win->parent_id == server->root_window_id);
             int is_override = win->override_redirect;
             win->mapped = 0;
+            win->shell_managed = 0;   /* the shell drops its window on unmap */
+            win->iconic = 0;
             if (was_mapped && is_toplevel && !is_override &&
                 server->config.on_window_unmapped) {
                 server->config.on_window_unmapped(server->config.userdata, wid);
@@ -2353,12 +2692,28 @@ static void handle_request(X11Server* server, int client_idx,
             if (mask & 0x02) { win->y = *reinterpret_cast<const int16_t*>(data + off); off += 4; }
             if (mask & 0x04) { win->width = *reinterpret_cast<const uint16_t*>(data + off); off += 4; }
             if (mask & 0x08) { win->height = *reinterpret_cast<const uint16_t*>(data + off); off += 4; }
+            if (mask & 0x10) { off += 4; }  /* border width */
+            uint32_t sibling = 0; int stack_mode = -1;
+            if (mask & 0x20) { sibling = *reinterpret_cast<const uint32_t*>(data + off); off += 4; }
+            if (mask & 0x40) { stack_mode = static_cast<int>(data[off]); off += 4; }
+            (void)sibling;
 
-            if (server->config.on_window_configured) {
+            if (server->config.on_window_configured && (mask & 0x0F) &&
+                win->parent_id == server->root_window_id) {
+                /* Same coordinate space the window was handed over in: an
+                 * anchored popup is parent-relative, everything else root. */
+                int cx = win->x, cy = win->y;
+                if (win->override_redirect && win->popup_parent) {
+                    X11Window* pw = find_window(server, win->popup_parent);
+                    if (pw) { cx -= pw->x; cy -= pw->y; }
+                }
                 server->config.on_window_configured(
                     server->config.userdata, wid,
-                    win->x, win->y, win->width, win->height);
+                    cx, cy, win->width, win->height);
             }
+            /* XRaiseWindow is ConfigureWindow with stack-mode Above (0). */
+            if (stack_mode == 0 && win->shell_managed && !win->override_redirect)
+                forward_window_request(server, win, X11_WIN_REQ_RAISE);
 
             if (mask & 0x0C) {  /* width or height changed — full resize flow */
                 fprintf(stderr, "[X11Server] ConfigureWindow: 0x%x -> %dx%d\n",
@@ -2393,7 +2748,7 @@ static void handle_request(X11Server* server, int client_idx,
         *reinterpret_cast<uint32_t*>(reply + 8) = 0x22;
         *reinterpret_cast<uint16_t*>(reply + 12) = 1;
         reply[24] = 0; reply[25] = 1;
-        reply[26] = (win && win->mapped) ? 2 : 0;
+        reply[26] = (win && win->mapped && !win->iconic) ? 2 : 0;
         reply[27] = win ? static_cast<uint8_t>(win->override_redirect) : 0;
         *reinterpret_cast<uint32_t*>(reply + 28) = 0x20;
         *reinterpret_cast<uint32_t*>(reply + 32) = win ? win->event_mask : 0;
@@ -2585,6 +2940,8 @@ static void handle_request(X11Server* server, int client_idx,
                 uint32_t val = *reinterpret_cast<const uint32_t*>(data + voff);
                 voff += 4;
                 switch (bit) {
+                case 0: win->bg_pixmap = val; win->has_bg_pixel = 0; break;
+                case 1: win->has_bg_pixel = 1; win->bg_pixel = val; win->bg_pixmap = 0; break;
                 case 9: win->override_redirect = val ? 1 : 0; break;
                 case 11: win->event_mask = val; break;
                 default: break;
@@ -2596,30 +2953,19 @@ static void handle_request(X11Server* server, int client_idx,
 
     case X11_WARP_POINTER:
     case X11_DELETE_PROPERTY:
-    case X11_CREATE_GC:
-    case X11_CHANGE_GC:
-    case X11_FREE_GC:
     case X11_CREATE_COLORMAP:
     case X11_FREE_COLORMAP:
-    case X11_SET_SELECTION_OWNER:
     case X11_GRAB_BUTTON:
     case X11_UNGRAB_BUTTON:
     case X11_GRAB_KEY:
     case X11_UNGRAB_KEY:
     case X11_GRAB_SERVER:
     case X11_UNGRAB_SERVER:
-    case X11_SEND_EVENT:
     case X11_CONVERT_SELECTION:
     case X11_KILL_CLIENT:
     case X11_NO_OPERATION:
     case X11_BELL:
-    case X11_SET_CLIP_RECTANGLES:
-    /* Measured against Zoom and Qt menus: these are never sent — the toolkits
-     * we care about paint through PutImage/CopyArea or DRI3, so leaving them
-     * unimplemented costs nothing. Do not assume a blank window means these
-     * are the gap; check the log before implementing them. */
-    case X11_CLEAR_AREA:
-    case X11_POLY_FILL_RECT:
+    /* Core fonts are not implemented, so text requests draw nothing. */
     case X11_IMAGE_TEXT8:
     case X11_OPEN_FONT:
     case X11_CLOSE_FONT:
@@ -2973,10 +3319,154 @@ static void handle_request(X11Server* server, int client_idx,
     }
 
     case X11_GET_SELECTION_OWNER: {
+        uint32_t sel = *reinterpret_cast<const uint32_t*>(data + 4);
         uint8_t reply[32] = {};
         reply[0] = 1;
         *reinterpret_cast<uint16_t*>(reply + 2) = seq;
+        auto it = server->selection_owners.find(sel);
+        *reinterpret_cast<uint32_t*>(reply + 8) =
+            (it != server->selection_owners.end()) ? it->second : 0;
         send_to_client(server, client_idx, reply, 32);
+        break;
+    }
+
+    case X11_SET_SELECTION_OWNER: {
+        /* owner(4)@4 selection(4)@8 time(4)@12. Record it, and tell the
+         * previous owner (SelectionClear) so it stops answering. */
+        uint32_t owner = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t sel = *reinterpret_cast<const uint32_t*>(data + 8);
+        auto it = server->selection_owners.find(sel);
+        uint32_t prev = (it != server->selection_owners.end()) ? it->second : 0;
+        if (prev && prev != owner) {
+            X11Window* pw = find_window(server, prev);
+            int oc = pw ? static_cast<int>(pw->owner_client) : -1;
+            if (oc >= 0 && oc < server->client_count && server->clients[oc].fd >= 0) {
+                uint8_t ev[32] = {};
+                ev[0] = 29; /* SelectionClear */
+                *reinterpret_cast<uint16_t*>(ev + 2) = server->clients[oc].sequence;
+                *reinterpret_cast<uint32_t*>(ev + 4) = x11_timestamp();
+                *reinterpret_cast<uint32_t*>(ev + 8) = prev;
+                *reinterpret_cast<uint32_t*>(ev + 12) = sel;
+                send_to_client(server, oc, ev, 32);
+            }
+        }
+        if (owner == 0) server->selection_owners.erase(sel);
+        else server->selection_owners[sel] = owner;
+        break;
+    }
+
+    case X11_SEND_EVENT: {
+        /* propagate(1)@1 destination(4)@4 event-mask(4)@8 event(32)@12.
+         * Two jobs. A ClientMessage aimed at the root with the WM's atoms is
+         * a window-manager request (EWMH/ICCCM), answered by forwarding it
+         * to the shell. Anything else is delivered to the destination
+         * window's client with the send_event bit set, as the protocol says
+         * — that is how XDND, WM_PROTOCOLS replies and toolkit self-messages
+         * travel. */
+        if (len < 44) break;
+        uint32_t dest = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t emask = *reinterpret_cast<const uint32_t*>(data + 8);
+        const uint8_t* ev = data + 12;
+        uint8_t etype = ev[0] & 0x7f;
+        if (dest == 0) dest = server->focus_window_id;      /* InputFocus */
+        uint32_t target_wid = *reinterpret_cast<const uint32_t*>(ev + 4);
+        uint32_t mtype = *reinterpret_cast<const uint32_t*>(ev + 8);
+        const uint32_t* d = reinterpret_cast<const uint32_t*>(ev + 12);
+        X11Window* target = find_window(server, target_wid);
+        bool handled = false;
+        if (etype == X11_CLIENT_MESSAGE && dest == server->root_window_id && target &&
+            target->parent_id == server->root_window_id) {
+            uint32_t a_state = intern_atom(server, "_NET_WM_STATE", 1);
+            uint32_t a_active = intern_atom(server, "_NET_ACTIVE_WINDOW", 1);
+            uint32_t a_moveresize = intern_atom(server, "_NET_MOVERESIZE_WINDOW", 1);
+            uint32_t a_change_state = intern_atom(server, "WM_CHANGE_STATE", 1);
+            uint32_t a_close = intern_atom(server, "_NET_CLOSE_WINDOW", 1);
+            if (mtype == a_state && a_state) {
+                uint32_t action = d[0];   /* 0 remove, 1 add, 2 toggle */
+                uint32_t a_fs = intern_atom(server, "_NET_WM_STATE_FULLSCREEN", 1);
+                uint32_t a_mh = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_HORZ", 1);
+                uint32_t a_mv = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_VERT", 1);
+                uint32_t a_hidden = intern_atom(server, "_NET_WM_STATE_HIDDEN", 1);
+                bool want_fs = false, want_max = false, want_hidden = false;
+                for (int i = 1; i <= 2; i++) {
+                    if (d[i] == 0) continue;
+                    if (d[i] == a_fs) want_fs = true;
+                    else if (d[i] == a_mh || d[i] == a_mv) want_max = true;
+                    else if (d[i] == a_hidden) want_hidden = true;
+                }
+                auto on = [&](int cur) {
+                    return action == 1 ? 1 : action == 0 ? 0 : !cur;
+                };
+                if (want_fs) forward_window_request(server, target,
+                    on(target->fullscreen) ? X11_WIN_REQ_FULLSCREEN : X11_WIN_REQ_UNFULLSCREEN);
+                if (want_max) forward_window_request(server, target,
+                    on(target->maximized) ? X11_WIN_REQ_MAXIMIZE : X11_WIN_REQ_UNMAXIMIZE);
+                if (want_hidden) forward_window_request(server, target,
+                    on(target->iconic) ? X11_WIN_REQ_MINIMIZE : X11_WIN_REQ_RESTORE);
+                handled = true;
+            } else if (mtype == a_active && a_active) {
+                forward_window_request(server, target, X11_WIN_REQ_ACTIVATE);
+                handled = true;
+            } else if (mtype == a_change_state && a_change_state) {
+                if (d[0] == 3) forward_window_request(server, target, X11_WIN_REQ_MINIMIZE);
+                else if (d[0] == 1) forward_window_request(server, target, X11_WIN_REQ_RESTORE);
+                handled = true;
+            } else if (mtype == a_close && a_close) {
+                forward_window_request(server, target, X11_WIN_REQ_CLOSE);
+                handled = true;
+            } else if (mtype == a_moveresize && a_moveresize) {
+                /* data[0] = gravity | flags<<8 (x=1<<8,y=1<<9,w=1<<10,h=1<<11) */
+                uint32_t flags = (d[0] >> 8) & 0xF;
+                if (flags & 1) target->x = static_cast<int16_t>(static_cast<int32_t>(d[1]));
+                if (flags & 2) target->y = static_cast<int16_t>(static_cast<int32_t>(d[2]));
+                if (flags & 4) target->width = static_cast<uint16_t>(d[3]);
+                if (flags & 8) target->height = static_cast<uint16_t>(d[4]);
+                fprintf(stderr, "[X11Server] _NET_MOVERESIZE_WINDOW 0x%x flags=%x -> %d,%d %dx%d\n",
+                        target_wid, flags, target->x, target->y, target->width, target->height);
+                if (server->config.on_window_configured && flags) {
+                    int cx = target->x, cy = target->y;
+                    if (target->override_redirect && target->popup_parent) {
+                        X11Window* pw = find_window(server, target->popup_parent);
+                        if (pw) { cx -= pw->x; cy -= pw->y; }
+                    }
+                    server->config.on_window_configured(server->config.userdata, target_wid,
+                                                        cx, cy, target->width, target->height);
+                }
+                if (flags & 0xC) send_resize_events(server, target, target->width, target->height);
+                else if (target->event_mask & 0x20000) {
+                    uint8_t cn[32] = {};
+                    cn[0] = X11_CONFIGURE_NOTIFY;
+                    int oc = static_cast<int>(target->owner_client);
+                    if (oc >= 0 && oc < server->client_count) {
+                        *reinterpret_cast<uint16_t*>(cn + 2) = server->clients[oc].sequence;
+                        *reinterpret_cast<uint32_t*>(cn + 4) = target_wid;
+                        *reinterpret_cast<uint32_t*>(cn + 8) = target_wid;
+                        *reinterpret_cast<int16_t*>(cn + 16) = target->x;
+                        *reinterpret_cast<int16_t*>(cn + 18) = target->y;
+                        *reinterpret_cast<uint16_t*>(cn + 20) = target->width;
+                        *reinterpret_cast<uint16_t*>(cn + 22) = target->height;
+                        cn[26] = static_cast<uint8_t>(target->override_redirect);
+                        send_to_client(server, oc, cn, 32);
+                    }
+                }
+                handled = true;
+            }
+        }
+        if (!handled) {
+            /* Plain delivery to the destination window's client. */
+            X11Window* dw = find_window(server, dest);
+            if (dw) {
+                int oc = static_cast<int>(dw->owner_client);
+                if (oc >= 0 && oc < server->client_count && server->clients[oc].fd >= 0 &&
+                    (emask == 0 || (dw->event_mask & emask) || oc == client_idx)) {
+                    uint8_t out[32];
+                    std::memcpy(out, ev, 32);
+                    out[0] = static_cast<uint8_t>(etype | 0x80);   /* send_event */
+                    *reinterpret_cast<uint16_t*>(out + 2) = server->clients[oc].sequence;
+                    send_to_client(server, oc, out, 32);
+                }
+            }
+        }
         break;
     }
 
@@ -3056,60 +3546,221 @@ static void handle_request(X11Server* server, int client_idx,
         break;
     }
 
+    case X11_CREATE_GC:
+    case X11_CHANGE_GC: {
+        /* CreateGC: cid@4 drawable@8 mask@12 values@16.
+         * ChangeGC: gc@4 mask@8 values@12. Values follow mask-bit order. */
+        bool create = (opcode == X11_CREATE_GC);
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t mask = *reinterpret_cast<const uint32_t*>(data + (create ? 12 : 8));
+        int voff = create ? 16 : 12;
+        X11GC* gc = find_gc(server, gid);
+        if (!gc) {
+            server->gcs.emplace_back();
+            gc = &server->gcs.back();
+            gc->id = gid;
+        }
+        for (int bit = 0; bit < 23 && voff + 4 <= len; bit++) {
+            if (!(mask & (1u << bit))) continue;
+            uint32_t val = *reinterpret_cast<const uint32_t*>(data + voff);
+            voff += 4;
+            switch (bit) {
+            case 0: gc->function = static_cast<uint8_t>(val); break;
+            case 2: gc->fg = val; break;
+            case 3: gc->bg = val; break;
+            case 4: gc->line_width = static_cast<uint16_t>(val); break;
+            case 17: gc->clip_x = static_cast<int16_t>(val); break;
+            case 18: gc->clip_y = static_cast<int16_t>(val); break;
+            case 19: if (val == 0) gc->has_clip = 0; break;   /* clip-mask None */
+            default: break;
+            }
+        }
+        break;
+    }
+    case X11_FREE_GC: {
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 4);
+        for (auto it = server->gcs.begin(); it != server->gcs.end(); ++it)
+            if (it->id == gid) { server->gcs.erase(it); break; }
+        break;
+    }
+    case X11_SET_CLIP_RECTANGLES: {
+        /* ordering@1 gc@4 clip-x@8 clip-y@10 rects@12 (x,y,w,h). One clip
+         * rectangle is kept — the bounding box of what was sent; zero
+         * rectangles clip everything, as the protocol says. */
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 4);
+        X11GC* gc = find_gc(server, gid);
+        if (!gc) break;
+        gc->clip_x = *reinterpret_cast<const int16_t*>(data + 8);
+        gc->clip_y = *reinterpret_cast<const int16_t*>(data + 10);
+        int n = (len - 12) / 8;
+        gc->has_clip = 1;
+        if (n <= 0) { gc->clip_w = 0; gc->clip_h = 0; break; }
+        int x0 = 32767, y0 = 32767, x1 = -32768, y1 = -32768;
+        for (int i = 0; i < n; i++) {
+            const uint8_t* r = data + 12 + i * 8;
+            int rx = *reinterpret_cast<const int16_t*>(r), ry = *reinterpret_cast<const int16_t*>(r + 2);
+            int rw = *reinterpret_cast<const uint16_t*>(r + 4), rh = *reinterpret_cast<const uint16_t*>(r + 6);
+            if (rx < x0) x0 = rx;
+            if (ry < y0) y0 = ry;
+            if (rx + rw > x1) x1 = rx + rw;
+            if (ry + rh > y1) y1 = ry + rh;
+        }
+        gc->clip_x += x0; gc->clip_y += y0;
+        gc->clip_w = x1 - x0; gc->clip_h = y1 - y0;
+        break;
+    }
+    case X11_CLEAR_AREA: {
+        /* exposures@1 window@4 x@8 y@10 w@12 h@14 (0 = to the edge). */
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 4);
+        int x = *reinterpret_cast<const int16_t*>(data + 8);
+        int y = *reinterpret_cast<const int16_t*>(data + 10);
+        int w = *reinterpret_cast<const uint16_t*>(data + 12);
+        int h = *reinterpret_cast<const uint16_t*>(data + 14);
+        int off_x = 0, off_y = 0;
+        X11Window* target = find_window(server, wid);
+        X11Window* win = shadow_target(server, wid, &off_x, &off_y);
+        if (!target || !win) break;
+        if (w == 0) w = target->width - x;
+        if (h == 0) h = target->height - y;
+        /* The background is the CLEARED window's, painted into the toplevel
+         * shadow at the child's offset. */
+        if (target->has_bg_pixel || target->bg_pixmap > 1) {
+            int keep_pixel = win->has_bg_pixel; uint32_t keep_val = win->bg_pixel; uint32_t keep_pm = win->bg_pixmap;
+            win->has_bg_pixel = target->has_bg_pixel; win->bg_pixel = target->bg_pixel; win->bg_pixmap = target->bg_pixmap;
+            paint_window_background(server, win, x + off_x, y + off_y, w, h);
+            win->has_bg_pixel = keep_pixel; win->bg_pixel = keep_val; win->bg_pixmap = keep_pm;
+        }
+        break;
+    }
+    case X11_POLY_FILL_RECT:
+    case 67: { /* PolyRectangle (outline) */
+        uint32_t drawable = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 8);
+        X11GC* gc = find_gc(server, gid);
+        int W = 0, H = 0, ox = 0, oy = 0; X11Window* win = nullptr; X11Pixmap* pix = nullptr;
+        uint8_t* buf = picture_shadow(server, drawable, &W, &H, &ox, &oy, &win, &pix);
+        if (!buf || !gc) break;
+        CoreClip c = core_clip_for(gc, W, H, ox, oy);
+        int n = (len - 12) / 8;
+        for (int i = 0; i < n; i++) {
+            const uint8_t* r = data + 12 + i * 8;
+            int rx = *reinterpret_cast<const int16_t*>(r) + ox, ry = *reinterpret_cast<const int16_t*>(r + 2) + oy;
+            int rw = *reinterpret_cast<const uint16_t*>(r + 4), rh = *reinterpret_cast<const uint16_t*>(r + 6);
+            if (opcode == X11_POLY_FILL_RECT) {
+                core_fill_rect(buf, W, c, rx, ry, rw, rh, gc->fg);
+            } else {
+                core_line(buf, W, c, rx, ry, rx + rw, ry, gc->fg);
+                core_line(buf, W, c, rx + rw, ry, rx + rw, ry + rh, gc->fg);
+                core_line(buf, W, c, rx + rw, ry + rh, rx, ry + rh, gc->fg);
+                core_line(buf, W, c, rx, ry + rh, rx, ry, gc->fg);
+            }
+        }
+        if (win) win->shadow_dirty = 1;
+        break;
+    }
+    case 69: { /* FillPoly: drawable@4 gc@8 shape@12 coord-mode@13 points@16 */
+        uint32_t drawable = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 8);
+        int relative = data[13];
+        X11GC* gc = find_gc(server, gid);
+        int W = 0, H = 0, ox = 0, oy = 0; X11Window* win = nullptr; X11Pixmap* pix = nullptr;
+        uint8_t* buf = picture_shadow(server, drawable, &W, &H, &ox, &oy, &win, &pix);
+        if (!buf || !gc) break;
+        int n = (len - 16) / 4;
+        if (n < 3 || n > 4096) break;
+        std::vector<int> px(n), py(n);
+        int cx = ox, cy = oy;
+        for (int i = 0; i < n; i++) {
+            int x = *reinterpret_cast<const int16_t*>(data + 16 + i * 4);
+            int y = *reinterpret_cast<const int16_t*>(data + 18 + i * 4);
+            if (relative && i > 0) { cx += x; cy += y; } else { cx = x + ox; cy = y + oy; }
+            px[i] = cx; py[i] = cy;
+        }
+        core_fill_poly(buf, W, core_clip_for(gc, W, H, ox, oy), px.data(), py.data(), n, gc->fg);
+        if (win) win->shadow_dirty = 1;
+        break;
+    }
+    case 64:   /* PolyPoint:   coord-mode@1 drawable@4 gc@8 points@12 */
+    case 65:   /* PolyLine:    coord-mode@1 drawable@4 gc@8 points@12 */
+    case 66: { /* PolySegment: drawable@4 gc@8 segments@12 (x1,y1,x2,y2) */
+        uint32_t drawable = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 8);
+        int relative = (opcode != 66) ? data[1] : 0;
+        X11GC* gc = find_gc(server, gid);
+        int W = 0, H = 0, ox = 0, oy = 0; X11Window* win = nullptr; X11Pixmap* pix = nullptr;
+        uint8_t* buf = picture_shadow(server, drawable, &W, &H, &ox, &oy, &win, &pix);
+        if (!buf || !gc) break;
+        CoreClip c = core_clip_for(gc, W, H, ox, oy);
+        if (opcode == 66) {
+            int n = (len - 12) / 8;
+            for (int i = 0; i < n; i++) {
+                const int16_t* sgm = reinterpret_cast<const int16_t*>(data + 12 + i * 8);
+                core_line(buf, W, c, sgm[0] + ox, sgm[1] + oy, sgm[2] + ox, sgm[3] + oy, gc->fg);
+            }
+        } else {
+            int n = (len - 12) / 4;
+            int cx = ox, cy = oy, lx = 0, ly = 0;
+            for (int i = 0; i < n; i++) {
+                int x = *reinterpret_cast<const int16_t*>(data + 12 + i * 4);
+                int y = *reinterpret_cast<const int16_t*>(data + 14 + i * 4);
+                if (relative && i > 0) { cx += x; cy += y; } else { cx = x + ox; cy = y + oy; }
+                if (opcode == 64) core_px(buf, W, c, cx, cy, gc->fg);
+                else if (i > 0) core_line(buf, W, c, lx, ly, cx, cy, gc->fg);
+                lx = cx; ly = cy;
+            }
+        }
+        if (win) win->shadow_dirty = 1;
+        break;
+    }
+
     case X11_COPY_AREA: {
         /* CopyArea: src(4)@4 dst(4)@8 gc(4)@12 src-x(2)@16 src-y(2)@18
-         * dst-x(2)@20 dst-y(2)@22 w(2)@24 h(2)@26. Supported flows: CPU
-         * pixmap shadow → window shadow (Qt backingstore flush) and pixmap →
-         * pixmap. Window→window scrolls are not needed by observed clients. */
+         * dst-x(2)@20 dst-y(2)@22 w(2)@24 h(2)@26. Any drawable to any
+         * drawable through the shadows: pixmap → window (Qt's backing
+         * store, a benchmark's canvas), window → pixmap (a snapshot),
+         * window → window (a scroll — overlap-safe via a copy). */
         uint32_t src_id = *reinterpret_cast<const uint32_t*>(data + 4);
         uint32_t dst_id = *reinterpret_cast<const uint32_t*>(data + 8);
+        uint32_t gid = *reinterpret_cast<const uint32_t*>(data + 12);
         int16_t  sx = *reinterpret_cast<const int16_t*>(data + 16);
         int16_t  sy = *reinterpret_cast<const int16_t*>(data + 18);
         int16_t  dx = *reinterpret_cast<const int16_t*>(data + 20);
         int16_t  dy = *reinterpret_cast<const int16_t*>(data + 22);
         uint16_t cw = *reinterpret_cast<const uint16_t*>(data + 24);
         uint16_t ch = *reinterpret_cast<const uint16_t*>(data + 26);
-        X11Pixmap* src_pm = find_pixmap(server, src_id);
-        if (!src_pm || src_pm->shadow.empty() || cw == 0 || ch == 0) break;
-
-        if (X11Pixmap* dst_pm = find_pixmap(server, dst_id)) {
-            if (dst_pm->width == 0 || dst_pm->height == 0) break;
-            if (dst_pm->shadow.empty())
-                dst_pm->shadow.assign(static_cast<size_t>(dst_pm->width) * dst_pm->height * 4, 0);
-            for (int row = 0; row < ch; row++) {
-                int syy = sy + row, dyy = dy + row;
-                if (syy < 0 || syy >= src_pm->height || dyy < 0 || dyy >= dst_pm->height) continue;
-                for (int col = 0; col < cw; col++) {
-                    int sxx = sx + col, dxx = dx + col;
-                    if (sxx < 0 || sxx >= src_pm->width || dxx < 0 || dxx >= dst_pm->width) continue;
-                    std::memcpy(dst_pm->shadow.data() + (static_cast<size_t>(dyy) * dst_pm->width + dxx) * 4,
-                                src_pm->shadow.data() + (static_cast<size_t>(syy) * src_pm->width + sxx) * 4, 4);
-                }
-            }
-            break;
-        }
-
-        int off_x = 0, off_y = 0;
-        X11Window* win = shadow_target(server, dst_id, &off_x, &off_y);
-        if (!win) break;
-        ensure_shadow(win);
-        if (win->shadow.empty()) break;
+        if (cw == 0 || ch == 0) break;
+        int SW = 0, SH = 0, sox = 0, soy = 0; X11Window* swin = nullptr; X11Pixmap* spix = nullptr;
+        uint8_t* sbuf = picture_shadow(server, src_id, &SW, &SH, &sox, &soy, &swin, &spix);
+        if (!sbuf) break;
+        /* Lift the source rect first: src and dst may be the same buffer. */
+        std::vector<uint8_t> tmp(static_cast<size_t>(cw) * ch * 4, 0);
         for (int row = 0; row < ch; row++) {
-            int syy = sy + row, dyy = dy + off_y + row;
-            if (syy < 0 || syy >= src_pm->height || dyy < 0 || dyy >= win->shadow_h) continue;
-            const uint8_t* s = src_pm->shadow.data() + static_cast<size_t>(syy) * src_pm->width * 4;
-            uint8_t* d = win->shadow.data() + static_cast<size_t>(dyy) * win->shadow_w * 4;
+            int syy = sy + soy + row;
+            if (syy < 0 || syy >= SH) continue;
             for (int col = 0; col < cw; col++) {
-                int sxx = sx + col, dxx = dx + off_x + col;
-                if (sxx < 0 || sxx >= src_pm->width || dxx < 0 || dxx >= win->shadow_w) continue;
-                std::memcpy(d + static_cast<size_t>(dxx) * 4,
-                            s + static_cast<size_t>(sxx) * 4, 4);
+                int sxx = sx + sox + col;
+                if (sxx < 0 || sxx >= SW) continue;
+                std::memcpy(tmp.data() + (static_cast<size_t>(row) * cw + col) * 4,
+                            sbuf + (static_cast<size_t>(syy) * SW + sxx) * 4, 4);
             }
         }
-        flush_shadow(server, win);
+        int DW = 0, DH = 0, dox = 0, doy = 0; X11Window* dwin = nullptr; X11Pixmap* dpix = nullptr;
+        uint8_t* dbuf = picture_shadow(server, dst_id, &DW, &DH, &dox, &doy, &dwin, &dpix);
+        if (!dbuf) break;
+        CoreClip c = core_clip_for(find_gc(server, gid), DW, DH, dox, doy);
+        for (int row = 0; row < ch; row++) {
+            int dyy = dy + doy + row;
+            if (dyy < c.y0 || dyy >= c.y1) continue;
+            for (int col = 0; col < cw; col++) {
+                int dxx = dx + dox + col;
+                if (dxx < c.x0 || dxx >= c.x1) continue;
+                std::memcpy(dbuf + (static_cast<size_t>(dyy) * DW + dxx) * 4,
+                            tmp.data() + (static_cast<size_t>(row) * cw + col) * 4, 4);
+            }
+        }
+        if (dwin) dwin->shadow_dirty = 1;
         break;
     }
-
     case 73: {
         /* GetImage — screen capture (Zoom screen share, xwd, ffmpeg x11grab).
          * Only ZPixmap (format 2) is served; the root/screen visual is
@@ -5192,6 +5843,57 @@ void x11_server_set_focus(X11Server* server, uint32_t window_id) {
             send_xi2_crossing_event(server, win, 9, 0, 0);
         }
     }
+
+    /* The EWMH record of the change: _NET_WM_STATE_FOCUSED on both ends and
+     * _NET_ACTIVE_WINDOW on the root. */
+    if (X11Window* ow = old_focus ? find_window(server, old_focus) : nullptr)
+        update_net_wm_state(server, ow);
+    if (X11Window* nw = window_id ? find_window(server, window_id) : nullptr)
+        update_net_wm_state(server, nw);
+    set_root_active_window(server, window_id);
+}
+
+void x11_server_set_window_position(X11Server* server, uint32_t window_id,
+                                    int x, int y) {
+    if (!server) return;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return;
+    if (win->x == x && win->y == y) return;
+    win->x = static_cast<int16_t>(x);
+    win->y = static_cast<int16_t>(y);
+    int oc = static_cast<int>(win->owner_client);
+    if (!(win->event_mask & 0x20000)) return;
+    if (oc < 0 || oc >= server->client_count || server->clients[oc].fd < 0) return;
+    uint8_t ev[32] = {};
+    ev[0] = X11_CONFIGURE_NOTIFY;
+    *reinterpret_cast<uint16_t*>(ev + 2) = server->clients[oc].sequence;
+    *reinterpret_cast<uint32_t*>(ev + 4) = window_id;
+    *reinterpret_cast<uint32_t*>(ev + 8) = window_id;
+    *reinterpret_cast<int16_t*>(ev + 16) = win->x;
+    *reinterpret_cast<int16_t*>(ev + 18) = win->y;
+    *reinterpret_cast<uint16_t*>(ev + 20) = win->width;
+    *reinterpret_cast<uint16_t*>(ev + 22) = win->height;
+    *reinterpret_cast<uint16_t*>(ev + 24) = win->border_width;
+    ev[26] = static_cast<uint8_t>(win->override_redirect);
+    send_to_client(server, oc, ev, 32);
+}
+
+void x11_server_set_window_state(X11Server* server, uint32_t window_id,
+                                 int minimized, int maximized, int fullscreen) {
+    if (!server) return;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return;
+    int was_iconic = win->iconic;
+    win->iconic = minimized ? 1 : 0;
+    win->maximized = maximized ? 1 : 0;
+    win->fullscreen = fullscreen ? 1 : 0;
+    if (was_iconic != win->iconic) {
+        set_wm_state(server, win, win->iconic ? 3 : 1);
+        send_structure_map_notify(server, win, win->iconic ? 0 : 1);
+        if (win->iconic && server->focus_window_id == window_id)
+            x11_server_set_focus(server, 0);
+    }
+    update_net_wm_state(server, win);
 }
 
 } /* extern "C" */

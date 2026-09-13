@@ -15,6 +15,26 @@ typedef struct X11Server X11Server;
  * Configuration
  * -------------------------------------------------------------------------- */
 
+/* Window-manager requests an X client sends the WM (ICCCM/EWMH client
+ * messages to the root, plus a raise via ConfigureWindow). The server has no
+ * window policy of its own — the shell IS the window manager — so each is
+ * forwarded through on_window_request and the shell answers with the same
+ * operations its title bar buttons and dock use. The server's own state
+ * bookkeeping (WM_STATE, _NET_WM_STATE, Map/UnmapNotify) is driven by the
+ * shell pushing the RESULT back through x11_server_set_window_state, so a
+ * request the shell declines leaves the client's view unchanged. */
+typedef enum X11WindowRequest {
+    X11_WIN_REQ_ACTIVATE = 1,   /* _NET_ACTIVE_WINDOW: unminimise, raise, focus */
+    X11_WIN_REQ_RAISE,          /* XRaiseWindow (ConfigureWindow stack Above) */
+    X11_WIN_REQ_MINIMIZE,       /* WM_CHANGE_STATE IconicState (XIconifyWindow) */
+    X11_WIN_REQ_RESTORE,        /* XMapWindow on an iconified window */
+    X11_WIN_REQ_MAXIMIZE,       /* _NET_WM_STATE add MAXIMIZED_HORZ/VERT */
+    X11_WIN_REQ_UNMAXIMIZE,
+    X11_WIN_REQ_FULLSCREEN,     /* _NET_WM_STATE add FULLSCREEN */
+    X11_WIN_REQ_UNFULLSCREEN,
+    X11_WIN_REQ_CLOSE,          /* _NET_CLOSE_WINDOW */
+} X11WindowRequest;
+
 typedef struct X11ServerConfig {
     int      display_width;
     int      display_height;
@@ -75,6 +95,10 @@ typedef struct X11ServerConfig {
     /* Window title changed. */
     void (*on_title_changed)(void* userdata, uint32_t window_id,
                               const char* title);
+    /* A window-manager request from a client (see X11WindowRequest). The
+     * shell applies it with its own window operations; the server learns the
+     * outcome from x11_server_set_window_state / _position. */
+    void (*on_window_request)(void* userdata, uint32_t window_id, int request);
 
     /* GetImage / screen capture: fill dst with the screen rect [x,y,w,h] as
      * X ZPixmap depth-32 BGRX, top-down (dst_len bytes, must be >= w*h*4).
@@ -130,6 +154,22 @@ int x11_server_has_clients(X11Server* server);
 
 /* Set focus to a window (sends FocusIn/FocusOut events). */
 void x11_server_set_focus(X11Server* server, uint32_t window_id);
+
+/* Where the shell composites the window's CONTENT, root-absolute device px.
+ * A real WM reparents a client into a frame and the client's root position is
+ * wherever the frame put it; here the shell draws the frame, so it tells the
+ * server where the content landed and the server answers TranslateCoordinates
+ * / GetGeometry with that and sends ConfigureNotify. Size is NOT taken from
+ * here (it goes through x11_server_configure_window, which runs the full
+ * resize flow); only x/y move. */
+void x11_server_set_window_position(X11Server* server, uint32_t window_id,
+                                    int x, int y);
+
+/* The window's WM state as the shell has applied it. Updates WM_STATE and
+ * _NET_WM_STATE (PropertyNotify), and on a minimise/restore transition sends
+ * the ICCCM UnmapNotify/MapNotify a client waits on. */
+void x11_server_set_window_state(X11Server* server, uint32_t window_id,
+                                 int minimized, int maximized, int fullscreen);
 
 /* Send pointer motion to the focused window. */
 void x11_server_pointer_motion(X11Server* server, int x, int y);
