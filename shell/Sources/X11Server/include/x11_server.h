@@ -99,6 +99,10 @@ typedef struct X11ServerConfig {
      * shell applies it with its own window operations; the server learns the
      * outcome from x11_server_set_window_state / _position. */
     void (*on_window_request)(void* userdata, uint32_t window_id, int request);
+    /* The window's SHAPE bounding region was set (1) or removed (0). Pixels
+     * outside the region are already delivered transparent; the shell drops
+     * its own backdrop under such a window so what is behind shows through. */
+    void (*on_window_shaped)(void* userdata, uint32_t window_id, int shaped);
 
     /* GetImage / screen capture: fill dst with the screen rect [x,y,w,h] as
      * X ZPixmap depth-32 BGRX, top-down (dst_len bytes, must be >= w*h*4).
@@ -106,6 +110,14 @@ typedef struct X11ServerConfig {
      * NULL, GetImage returns a black frame. */
     int (*capture_screen)(void* userdata, int x, int y, int width, int height,
                            uint8_t* dst, int dst_len);
+    /* GetImage must answer with the screen as of the REQUEST: a client that
+     * draws, syncs and grabs expects its drawing in the grab. The mirror
+     * capture_screen reads is refreshed by presents, so the server parks the
+     * request and calls this to arm a fresh capture; the shell calls
+     * x11_server_complete_pending_captures once a frame presented after the
+     * arm has been mirrored (or after a short deadline). Optional: when NULL,
+     * GetImage answers at once from whatever the mirror holds. */
+    int (*capture_arm)(void* userdata);
 } X11ServerConfig;
 
 /* --------------------------------------------------------------------------
@@ -164,6 +176,9 @@ void x11_server_set_focus(X11Server* server, uint32_t window_id);
  * resize flow); only x/y move. */
 void x11_server_set_window_position(X11Server* server, uint32_t window_id,
                                     int x, int y);
+
+/* Answer every parked GetImage from the mirror (see capture_arm). */
+void x11_server_complete_pending_captures(X11Server* server);
 
 /* The window's WM state as the shell has applied it. Updates WM_STATE and
  * _NET_WM_STATE (PropertyNotify), and on a minimise/restore transition sends

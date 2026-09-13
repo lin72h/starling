@@ -139,6 +139,10 @@ FL_DRM_EXPORT int fl_drm_view_read_capture(int x, int y, int w, int h,
 // Non-zero while a GetImage client is actively capturing — the shell's
 // frame-tick pump forces presents while this holds so the mirror refreshes.
 FL_DRM_EXPORT int fl_drm_view_capture_active(void);
+// Frames still to be mirrored from the last fl_drm_view_arm_capture (4 right
+// after arming, one less per present). Below 4 = a frame presented AFTER the
+// arm has been mirrored — what a parked GetImage waits for.
+FL_DRM_EXPORT int fl_drm_view_capture_frames_left(void);
 
 // ─── Screen recording ────────────────────────────────────────────────────────
 // The shell's screen recorder. Every presented primary-output frame is

@@ -22,6 +22,10 @@ class WindowInfo {
     /// never asks); the X11 path sets these, nothing else needs them.
     var onRectChanged: ((Rect) -> Void)? = nil
     var onStateChanged: (() -> Void)? = nil
+    /// An X11 window with a SHAPE bounding region: its texture carries the
+    /// shape as alpha, and the renderer draws no backdrop or border under it
+    /// so what is behind shows through the cut-away parts.
+    var isShaped: Bool = false
     var rect: Rect {
         didSet {
             if oldValue.left != rect.left || oldValue.top != rect.top ||

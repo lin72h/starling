@@ -359,6 +359,11 @@ struct X11Window {
      * at the end of the client's request batch, not per rectangle. The
      * background is what ClearArea and the first map paint. */
     int      shadow_dirty = 0;
+    int      dirty_ticks = 0;     /* vblank ticks the dirty shadow was held back */
+    /* SHAPE bounding region, window-relative (x,y,w,h quads). shaped=1 with
+     * no rects is a fully clipped window, as the extension defines it. */
+    int      shaped = 0;
+    std::vector<int16_t> shape_rects;
     int      has_bg_pixel = 0;
     uint32_t bg_pixel = 0;
     uint32_t bg_pixmap = 0;
@@ -506,6 +511,12 @@ struct X11Server {
     std::vector<X11Window> windows;
     std::vector<X11Pixmap> pixmaps;
     std::vector<X11GC> gcs;                    /* core-X graphics contexts */
+    /* GetImage requests waiting for a frame presented after they arrived. */
+    struct PendingCapture { int client; uint16_t seq; int x, y, w, h; };
+    std::vector<PendingCapture> pending_captures;
+    /* Managed toplevels, bottom to top, as the shell stacks them: what
+     * QueryTree on the root reports, and what a pager reads back. */
+    std::vector<uint32_t> stack_order;
     /* Selection owners (atom -> window). SetSelectionOwner records, and the
      * server itself owns _NET_WM_CM_S0 through the WM check window: this
      * desktop always composites, and a client asking (xcompmgr detection,
@@ -769,10 +780,40 @@ static void blit_zpixmap(X11Window* win, const uint8_t* src,
     }
 }
 
+/* A shaped window: everything outside its bounding region is delivered with
+ * alpha 0, so the compositor shows what is behind. Re-applied at every
+ * upload because every drawing path writes alpha 0xff. */
+static void apply_shape_alpha(X11Window* win) {
+    if (!win->shaped || win->shadow.empty()) return;
+    const int W = win->shadow_w, H = win->shadow_h;
+    const size_t n = win->shape_rects.size() / 4;
+    /* The compositor treats textures as PREMULTIPLIED: a pixel with alpha 0
+     * but red left in it ADDS red to what is behind (a shaped red window over
+     * green read back yellow). Outside the shape every byte goes to 0. */
+    std::vector<uint8_t> inside(static_cast<size_t>(W), 0);
+    for (int y = 0; y < H; y++) {
+        uint8_t* row = win->shadow.data() + static_cast<size_t>(y) * W * 4;
+        std::fill(inside.begin(), inside.end(), 0);
+        for (size_t i = 0; i < n; i++) {
+            int rx = win->shape_rects[i * 4], ry = win->shape_rects[i * 4 + 1];
+            int rw = win->shape_rects[i * 4 + 2], rh = win->shape_rects[i * 4 + 3];
+            if (y < ry || y >= ry + rh) continue;
+            int x0 = rx > 0 ? rx : 0, x1 = (rx + rw) < W ? (rx + rw) : W;
+            for (int x = x0; x < x1; x++) inside[static_cast<size_t>(x)] = 1;
+        }
+        for (int x = 0; x < W; x++) {
+            uint8_t* p = row + static_cast<size_t>(x) * 4;
+            if (inside[static_cast<size_t>(x)]) p[3] = 0xff;
+            else { p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 0; }
+        }
+    }
+}
+
 /* Hand the shadow to the shell for texture upload. */
 static void flush_shadow(X11Server* server, X11Window* win) {
     if (!win->mapped || win->shadow.empty()) return;
     if (!server->config.on_present_image) return;
+    apply_shape_alpha(win);
     server->config.on_present_image(server->config.userdata, win->id,
                                     win->shadow.data(),
                                     win->shadow_w, win->shadow_h);
@@ -1010,11 +1051,24 @@ static void paint_window_background(X11Server* server, X11Window* win,
     }
 }
 
-/* One upload per request batch: every window core drawing touched. */
+/* Upload every shadow core drawing touched. Called from the vblank tick. A
+ * window whose client still has bytes queued is skipped for up to two
+ * ticks: the frame is probably still arriving, and uploading now would
+ * composite it half-drawn. */
 static void flush_dirty_shadows(X11Server* server) {
     for (auto& w : server->windows) {
         if (!w.shadow_dirty) continue;
+        int oc = static_cast<int>(w.owner_client);
+        if (oc >= 0 && oc < server->client_count && server->clients[oc].fd >= 0 &&
+            w.dirty_ticks < 2) {
+            struct pollfd pfd = { server->clients[oc].fd, POLLIN, 0 };
+            if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                w.dirty_ticks++;
+                continue;
+            }
+        }
         w.shadow_dirty = 0;
+        w.dirty_ticks = 0;
         flush_shadow(server, &w);
     }
 }
@@ -1269,7 +1323,18 @@ static void set_root_active_window(X11Server* server, uint32_t wid) {
     send_property_notify(server, root, net_active, 0);
 }
 
+static void stack_remove(X11Server* server, uint32_t wid) {
+    auto& st = server->stack_order;
+    st.erase(std::remove(st.begin(), st.end(), wid), st.end());
+}
+static void stack_raise(X11Server* server, uint32_t wid) {
+    stack_remove(server, wid);
+    server->stack_order.push_back(wid);
+}
+
 static void forward_window_request(X11Server* server, X11Window* win, int req) {
+    /* This shell raises what it activates; keep the X-visible stack in step. */
+    if (req == X11_WIN_REQ_RAISE || req == X11_WIN_REQ_ACTIVATE) stack_raise(server, win->id);
     if (!server->config.on_window_request) return;
     fprintf(stderr, "[X11Server] WM request %d for 0x%x\n", req, win->id);
     server->config.on_window_request(server->config.userdata, win->id, req);
@@ -2356,7 +2421,10 @@ static void handle_client_data(X11Server* server, int client_idx) {
         client->buf_len -= byte_length;
     }
     /* Core drawing marks shadows dirty rather than uploading per request; a
-     * frame of many small fills is one texture upload, here, per batch. */
+     * frame of many small fills is one texture upload, here, per batch.
+     * (Uploading on the vblank tick instead was tried against wmbench's
+     * stress pass and did not reduce its torn captures — the tear is not
+     * a batch boundary. See x11-server notes.) */
     flush_dirty_shadows(server);
 }
 
@@ -2495,8 +2563,15 @@ static void handle_request(X11Server* server, int client_idx,
             int is_override = win->override_redirect;
             fprintf(stderr, "[X11Server] MapWindow: id=0x%x parent=0x%x toplevel=%d override=%d %dx%d was_mapped=%d\n",
                     wid, win->parent_id, is_toplevel, is_override, win->width, win->height, was_mapped);
-            /* X11 spec: mapping an already-mapped window is a no-op */
-            if (was_mapped) break;
+            /* X11 spec: mapping an already-mapped window is a no-op — except
+             * an ICONIFIED one, which the server still holds as mapped (the
+             * shell keeps its texture) but the client sees as unmapped: its
+             * XMapWindow is the ICCCM de-iconify and must go through. */
+            if (was_mapped && !win->iconic) break;
+            if (was_mapped && win->iconic) {
+                forward_window_request(server, win, X11_WIN_REQ_RESTORE);
+                break;
+            }
 
             if (is_toplevel && !is_override &&
                 win->width > 1 && win->height > 1 && win->shell_managed) {
@@ -2514,6 +2589,11 @@ static void handle_request(X11Server* server, int client_idx,
                         win->x, win->y, win->width, win->height);
                     fprintf(stderr, "[X11Server] on_window_mapped returned\n");
                     win->shell_managed = 1;
+                    stack_raise(server, wid);
+                    /* A shape set before the map (the usual order) was
+                     * announced to a shell that had no window for it yet. */
+                    if (win->shaped && server->config.on_window_shaped)
+                        server->config.on_window_shaped(server->config.userdata, wid, 1);
                 }
                 x11_server_set_focus(server, wid);
 
@@ -2577,6 +2657,7 @@ static void handle_request(X11Server* server, int client_idx,
                     int rel_y = win->y - (pw ? pw->y : 0);
                     win->popup_parent = pw ? parent : 0;
                     if (!pw) parent = 0;
+                    stack_raise(server, wid);
                     fprintf(stderr, "[X11Server] popup mapped 0x%x parent=0x%x %dx%d rel=%+d%+d\n",
                             wid, parent, win->width, win->height, rel_x, rel_y);
                     server->config.on_popup_mapped(
@@ -2642,6 +2723,7 @@ static void handle_request(X11Server* server, int client_idx,
             win->mapped = 0;
             win->shell_managed = 0;   /* the shell drops its window on unmap */
             win->iconic = 0;
+            stack_remove(server, wid);
             if (was_mapped && is_toplevel && !is_override &&
                 server->config.on_window_unmapped) {
                 server->config.on_window_unmapped(server->config.userdata, wid);
@@ -2674,6 +2756,7 @@ static void handle_request(X11Server* server, int client_idx,
                     server->focus_window_id = 0;
                     server->focus_client_idx = -1;
                 }
+                stack_remove(server, wid);
                 server->windows.erase(it);
                 break;
             }
@@ -2712,7 +2795,7 @@ static void handle_request(X11Server* server, int client_idx,
                     cx, cy, win->width, win->height);
             }
             /* XRaiseWindow is ConfigureWindow with stack-mode Above (0). */
-            if (stack_mode == 0 && win->shell_managed && !win->override_redirect)
+            if (stack_mode == 0 && (win->shell_managed || (win->override_redirect && win->mapped)))
                 forward_window_request(server, win, X11_WIN_REQ_RAISE);
 
             if (mask & 0x0C) {  /* width or height changed — full resize flow */
@@ -2800,10 +2883,35 @@ static void handle_request(X11Server* server, int client_idx,
         *reinterpret_cast<uint16_t*>(&reply[16]) = static_cast<uint16_t>(child_count);
 
         int off2 = 32;
-        for (auto& w : server->windows) {
-            if (w.parent_id == wid) {
-                *reinterpret_cast<uint32_t*>(&reply[off2]) = w.id;
-                off2 += 4;
+        if (wid == server->root_window_id) {
+            /* Bottom to top: whatever is not on the managed stack (unmapped,
+             * the WM check window), then the managed stack as the shell
+             * orders it, then override-redirect surfaces, which the shell
+             * draws above every window. */
+            auto emit = [&](uint32_t id) {
+                *reinterpret_cast<uint32_t*>(&reply[off2]) = id; off2 += 4;
+            };
+            std::vector<uint32_t> done;
+            for (auto& w : server->windows) {
+                if (w.parent_id != wid) continue;
+                bool stacked = std::find(server->stack_order.begin(), server->stack_order.end(), w.id)
+                               != server->stack_order.end();
+                if (!stacked) { emit(w.id); done.push_back(w.id); }
+            }
+            for (uint32_t id : server->stack_order) {
+                if (find_window(server, id)) { emit(id); done.push_back(id); }
+            }
+            for (auto& w : server->windows) {
+                if (w.parent_id != wid) continue;
+                if (std::find(done.begin(), done.end(), w.id) != done.end()) continue;
+                emit(w.id);
+            }
+        } else {
+            for (auto& w : server->windows) {
+                if (w.parent_id == wid) {
+                    *reinterpret_cast<uint32_t*>(&reply[off2]) = w.id;
+                    off2 += 4;
+                }
             }
         }
         send_to_client(server, client_idx, reply.data(), reply_len);
@@ -3381,7 +3489,12 @@ static void handle_request(X11Server* server, int client_idx,
             uint32_t a_moveresize = intern_atom(server, "_NET_MOVERESIZE_WINDOW", 1);
             uint32_t a_change_state = intern_atom(server, "WM_CHANGE_STATE", 1);
             uint32_t a_close = intern_atom(server, "_NET_CLOSE_WINDOW", 1);
-            if (mtype == a_state && a_state) {
+            uint32_t a_restack = intern_atom(server, "_NET_RESTACK_WINDOW", 1);
+            if (mtype == a_restack && a_restack) {
+                /* data[1] sibling (None = whole stack), data[2] detail: 0 Above */
+                if (d[2] == 0) forward_window_request(server, target, X11_WIN_REQ_RAISE);
+                handled = true;
+            } else if (mtype == a_state && a_state) {
                 uint32_t action = d[0];   /* 0 remove, 1 add, 2 toggle */
                 uint32_t a_fs = intern_atom(server, "_NET_WM_STATE_FULLSCREEN", 1);
                 uint32_t a_mh = intern_atom(server, "_NET_WM_STATE_MAXIMIZED_HORZ", 1);
@@ -3713,6 +3826,28 @@ static void handle_request(X11Server* server, int client_idx,
         break;
     }
 
+    case 108: { /* GetScreenSaver — xset q round-trips on it too */
+        uint8_t reply[32] = {};
+        reply[0] = 1;
+        *reinterpret_cast<uint16_t*>(reply + 2) = seq;
+        *reinterpret_cast<uint16_t*>(reply + 8) = 0;   /* timeout: no saver */
+        *reinterpret_cast<uint16_t*>(reply + 10) = 0;  /* interval */
+        reply[12] = 1;  /* prefer blanking */
+        reply[13] = 1;  /* allow exposures */
+        send_to_client(server, client_idx, reply, 32);
+        break;
+    }
+    case 106: { /* GetPointerControl — xset q waits on this reply forever */
+        uint8_t reply[32] = {};
+        reply[0] = 1;
+        *reinterpret_cast<uint16_t*>(reply + 2) = seq;
+        *reinterpret_cast<uint16_t*>(reply + 8) = 2;   /* acceleration numerator */
+        *reinterpret_cast<uint16_t*>(reply + 10) = 1;  /* denominator */
+        *reinterpret_cast<uint16_t*>(reply + 12) = 4;  /* threshold */
+        send_to_client(server, client_idx, reply, 32);
+        break;
+    }
+
     case X11_COPY_AREA: {
         /* CopyArea: src(4)@4 dst(4)@8 gc(4)@12 src-x(2)@16 src-y(2)@18
          * dst-x(2)@20 dst-y(2)@22 w(2)@24 h(2)@26. Any drawable to any
@@ -3779,6 +3914,24 @@ static void handle_request(X11Server* server, int client_idx,
             reply[0] = 1;
             *reinterpret_cast<uint16_t*>(reply + 2) = seq;
             send_to_client(server, client_idx, reply, 32);
+            break;
+        }
+        if (server->config.capture_arm && server->config.capture_screen) {
+            /* Everything this client drew before asking is complete by
+             * definition (it flushed, then asked): upload its windows now
+             * rather than on the tick, or the frame the answer waits for
+             * may not carry its last drawing yet. Other clients keep their
+             * tick-coalesced uploads — a stranger's half-arrived frame is
+             * not this client's to reveal. */
+            for (auto& w : server->windows) {
+                if (!w.shadow_dirty || static_cast<int>(w.owner_client) != client_idx) continue;
+                w.shadow_dirty = 0; w.dirty_ticks = 0;
+                flush_shadow(server, &w);
+            }
+            /* Answer with the frame presented AFTER this request: park it,
+             * arm the mirror, and let the shell complete it. */
+            server->pending_captures.push_back({client_idx, seq, rx, ry, rw, rh});
+            server->config.capture_arm(server->config.userdata);
             break;
         }
         size_t img_bytes = static_cast<size_t>(rw) * rh * 4;
@@ -4841,31 +4994,129 @@ static void handle_xfixes(X11Server* server, int client_idx, uint8_t minor,
     }
 }
 
+static void shape_changed(X11Server* server, X11Window* win, int was_shaped) {
+    if (server->config.on_window_shaped && was_shaped != win->shaped)
+        server->config.on_window_shaped(server->config.userdata, win->id, win->shaped);
+    win->shadow_dirty = 1;
+    if (!win->shadow.empty()) flush_shadow(server, win);
+    win->shadow_dirty = 0;
+}
+
 static void handle_shape(X11Server* server, int client_idx, uint8_t minor,
                          const uint8_t* data, int len, uint16_t seq) {
+    /* SHAPE 1.1. Only the BOUNDING kind (0) changes what is drawn; the clip
+     * and input kinds are accepted and ignored. Ops: 0 Set, 1 Union; the
+     * others (Intersect/Subtract/Invert) are treated as Set. */
     if (minor == 0) {
         uint8_t reply[32] = {};
         reply[0] = 1; *reinterpret_cast<uint16_t*>(reply + 2) = seq;
         *reinterpret_cast<uint16_t*>(reply + 8) = 1;
         *reinterpret_cast<uint16_t*>(reply + 10) = 1;
         send_to_client(server, client_idx, reply, 32);
-    } else if (minor >= 1 && minor <= 3) {
-        /* void */
+    } else if (minor == 1) {
+        /* Rectangles (xShapeRectanglesReq, 16 bytes): op@4 kind@5 ordering@6
+         * dest@8 x-off@12 y-off@14, rectangles from 16. */
+        uint8_t op = data[4];
+        uint8_t kind = data[5];
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 8);
+        int xoff = *reinterpret_cast<const int16_t*>(data + 12);
+        int yoff = *reinterpret_cast<const int16_t*>(data + 14);
+        X11Window* win = find_window(server, wid);
+        if (!win || kind != 0) return;
+        int was = win->shaped;
+        if (op != 1) win->shape_rects.clear();
+        int n = (len - 16) / 8;
+        for (int i = 0; i < n; i++) {
+            const int16_t* r = reinterpret_cast<const int16_t*>(data + 16 + i * 8);
+            win->shape_rects.push_back(static_cast<int16_t>(r[0] + xoff));
+            win->shape_rects.push_back(static_cast<int16_t>(r[1] + yoff));
+            win->shape_rects.push_back(r[2]);
+            win->shape_rects.push_back(r[3]);
+        }
+        win->shaped = 1;
+        fprintf(stderr, "[X11Server] SHAPE set on 0x%x: %d rects\n", wid, n);
+        shape_changed(server, win, was);
+    } else if (minor == 2) {
+        /* Mask (xShapeMaskReq): op@4 kind@5 dest@8 x@12 y@14 src-pixmap@16.
+         * Only "None" (remove the shape) is honoured — depth-1 pixmaps are
+         * not kept. */
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 8);
+        uint8_t kind = data[5];
+        uint32_t src = *reinterpret_cast<const uint32_t*>(data + 16);
+        X11Window* win = find_window(server, wid);
+        if (!win || kind != 0 || src != 0) return;
+        int was = win->shaped;
+        win->shaped = 0; win->shape_rects.clear();
+        shape_changed(server, win, was);
+    } else if (minor == 3) {
+        /* Combine from another window — not needed by observed clients. */
     } else if (minor == 4) {
-        /* void */
+        /* Offset (xShapeOffsetReq): kind@4 dest@8 x@12 y@14 */
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 8);
+        int dx = *reinterpret_cast<const int16_t*>(data + 12);
+        int dy = *reinterpret_cast<const int16_t*>(data + 14);
+        X11Window* win = find_window(server, wid);
+        if (!win || data[4] != 0 || !win->shaped) return;
+        for (size_t i = 0; i + 3 < win->shape_rects.size(); i += 4) {
+            win->shape_rects[i] = static_cast<int16_t>(win->shape_rects[i] + dx);
+            win->shape_rects[i + 1] = static_cast<int16_t>(win->shape_rects[i + 1] + dy);
+        }
+        shape_changed(server, win, win->shaped);
     } else if (minor == 5) {
+        /* QueryExtents: dest@4 → bounding shaped@8 clip shaped@9,
+         * bounding x@12 y@14 w@16 h@18, clip x@20 y@22 w@24 h@26 */
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 4);
+        X11Window* win = find_window(server, wid);
         uint8_t reply[32] = {};
         reply[0] = 1; *reinterpret_cast<uint16_t*>(reply + 2) = seq;
+        if (win) {
+            int bx = 0, by = 0, bw = win->width, bh = win->height;
+            if (win->shaped) {
+                reply[8] = 1;
+                int x0 = 32767, y0 = 32767, x1 = -32768, y1 = -32768;
+                for (size_t i = 0; i + 3 < win->shape_rects.size(); i += 4) {
+                    int rx = win->shape_rects[i], ry = win->shape_rects[i + 1];
+                    int rw = win->shape_rects[i + 2], rh = win->shape_rects[i + 3];
+                    if (rx < x0) x0 = rx;
+                    if (ry < y0) y0 = ry;
+                    if (rx + rw > x1) x1 = rx + rw;
+                    if (ry + rh > y1) y1 = ry + rh;
+                }
+                if (x1 > x0 && y1 > y0) { bx = x0; by = y0; bw = x1 - x0; bh = y1 - y0; }
+                else { bw = 0; bh = 0; }
+            }
+            *reinterpret_cast<int16_t*>(reply + 12) = static_cast<int16_t>(bx);
+            *reinterpret_cast<int16_t*>(reply + 14) = static_cast<int16_t>(by);
+            *reinterpret_cast<uint16_t*>(reply + 16) = static_cast<uint16_t>(bw);
+            *reinterpret_cast<uint16_t*>(reply + 18) = static_cast<uint16_t>(bh);
+            *reinterpret_cast<uint16_t*>(reply + 24) = win->width;
+            *reinterpret_cast<uint16_t*>(reply + 26) = win->height;
+        }
         send_to_client(server, client_idx, reply, 32);
     } else if (minor == 6) {
-        /* void */
-    } else if (minor == 7 || minor == 8) {
+        /* SelectInput: ShapeNotify events are not sent. */
+    } else if (minor == 7) {
         uint8_t reply[32] = {};
         reply[0] = 1; *reinterpret_cast<uint16_t*>(reply + 2) = seq;
         send_to_client(server, client_idx, reply, 32);
+    } else if (minor == 8) {
+        /* GetRectangles: window@4 kind@8 → ordering@1 nrects@8 rects@32 */
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 4);
+        X11Window* win = find_window(server, wid);
+        std::vector<int16_t> rects;
+        if (win && data[8] == 0 && win->shaped) rects = win->shape_rects;
+        else if (win) rects = { 0, 0, static_cast<int16_t>(win->width), static_cast<int16_t>(win->height) };
+        uint32_t n = static_cast<uint32_t>(rects.size() / 4);
+        std::vector<uint8_t> reply(32 + n * 8, 0);
+        reply[0] = 1; *reinterpret_cast<uint16_t*>(&reply[2]) = seq;
+        *reinterpret_cast<uint32_t*>(&reply[4]) = n * 2;
+        *reinterpret_cast<uint32_t*>(&reply[8]) = n;
+        for (uint32_t i = 0; i < n; i++)
+            for (int k = 0; k < 4; k++)
+                *reinterpret_cast<int16_t*>(&reply[32 + i * 8 + k * 2]) = rects[i * 4 + k];
+        send_to_client(server, client_idx, reply.data(), static_cast<int>(reply.size()));
     }
 }
-
 static void handle_shm(X11Server* server, int client_idx, uint8_t minor,
                        const uint8_t* data, int len, uint16_t seq) {
     switch (minor) {
@@ -5844,6 +6095,8 @@ void x11_server_set_focus(X11Server* server, uint32_t window_id) {
         }
     }
 
+    if (X11Window* fw = window_id ? find_window(server, window_id) : nullptr)
+        if (fw->shell_managed) stack_raise(server, window_id);
     /* The EWMH record of the change: _NET_WM_STATE_FOCUSED on both ends and
      * _NET_ACTIVE_WINDOW on the root. */
     if (X11Window* ow = old_focus ? find_window(server, old_focus) : nullptr)
@@ -5851,6 +6104,27 @@ void x11_server_set_focus(X11Server* server, uint32_t window_id) {
     if (X11Window* nw = window_id ? find_window(server, window_id) : nullptr)
         update_net_wm_state(server, nw);
     set_root_active_window(server, window_id);
+}
+
+void x11_server_complete_pending_captures(X11Server* server) {
+    if (!server || server->pending_captures.empty()) return;
+    std::vector<X11Server::PendingCapture> batch;
+    batch.swap(server->pending_captures);
+    for (const auto& pc : batch) {
+        if (pc.client < 0 || pc.client >= server->client_count ||
+            server->clients[pc.client].fd < 0) continue;
+        size_t img_bytes = static_cast<size_t>(pc.w) * pc.h * 4;
+        std::vector<uint8_t> reply(32 + img_bytes, 0);
+        reply[0] = 1;
+        reply[1] = 32;
+        *reinterpret_cast<uint16_t*>(&reply[2]) = pc.seq;
+        *reinterpret_cast<uint32_t*>(&reply[4]) = static_cast<uint32_t>(img_bytes / 4);
+        *reinterpret_cast<uint32_t*>(&reply[8]) = 0x22;
+        int ok = server->config.capture_screen(server->config.userdata, pc.x, pc.y, pc.w, pc.h,
+                                               reply.data() + 32, static_cast<int>(img_bytes));
+        if (!ok) for (size_t i = 0; i < img_bytes; i += 4) reply[32 + i + 3] = 0xff;
+        send_to_client(server, pc.client, reply.data(), static_cast<int>(reply.size()));
+    }
 }
 
 void x11_server_set_window_position(X11Server* server, uint32_t window_id,
@@ -6557,6 +6831,9 @@ void x11_server_vblank_tick(X11Server* server) {
     if (!server) return;
     uint64_t expirations;
     read(server->vblank_timer_fd, &expirations, sizeof(expirations));
+    /* Anything core drawing left dirty (a window whose client had bytes
+     * queued when its batch ended) is uploaded here at the latest. */
+    flush_dirty_shadows(server);
 
     /* Trigger ALL shm_fences — DRI3 buffers become available. */
     for (auto& f : server->fences) {

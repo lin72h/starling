@@ -2595,6 +2595,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// traffic lights, and no way back.
     var topBarRevealed: Bool { _topBarRevealed }
 
+    /// Raise order among free-standing X11 popups (see x11.onWindowRequest).
+    var _popupZ: [String: Int] = [:]
+    var _popupRaiseSerial: Int = 0
+
     func setTopBarRevealed(_ on: Bool) {
         guard _topBarRevealed != on else { return }
         setState { _topBarRevealed = on }
@@ -3637,6 +3641,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // (_NET_WM_STATE) — so every move, minimise, maximise and
             // fullscreen the shell applies is pushed back to the server.
             if let win = self.windowManager.windows.first(where: { $0.id == shellWindowId }) {
+                // No open zoom for an X11 window: X promises the window is
+                // where it asked the moment MapNotify arrives, and a client
+                // that reads its position and draws straight away (a
+                // benchmark's first capture, an xeyes-style tool) lands in
+                // the middle of the animation otherwise.
+                win.pendingOpenAnimation = false
                 let push: (WindowInfo) -> Void = { w in
                     let d = currentShellDpi
                     // Fullscreen draws the content over the whole rect (the
@@ -3684,8 +3694,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // same operations the title bar and dock use. The server learns the
         // outcome from the push-back above.
         x11.onWindowRequest = { [weak self] (windowId: UInt32, request: Int32) in
-            guard let self = self,
-                  let shellId = x11.shellWindowId(forX11Window: windowId),
+            guard let self = self else { return }
+            // A free-standing override-redirect window (no shell window)
+            // can still be raised: it competes with its siblings in the
+            // popup layer, and a pager's raise must win there too.
+            if x11.shellWindowId(forX11Window: windowId) == nil,
+               let popupId = x11.popupId(forX11Window: windowId) {
+                if request == 1 || request == 2 {
+                    self._popupRaiseSerial += 1
+                    let z = self._popupRaiseSerial
+                    self.setState { self._popupZ[popupId] = z }
+                }
+                return
+            }
+            guard let shellId = x11.shellWindowId(forX11Window: windowId),
                   let win = self.windowManager.windows.first(where: { $0.id == shellId })
             else { return }
             let dpi = currentShellDpi
@@ -3700,6 +3722,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 self.setState {
                     if win.isMinimized { self.windowManager.restoreWindow(shellId) }
                     else { self.windowManager.bringToFront(shellId) }
+                    win.pendingOpenAnimation = false   /* see onNewWindow */
                 }
             case 2: // raise
                 self.setState { self.windowManager.bringToFront(shellId) }
@@ -3708,7 +3731,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 self.setState { self.windowManager.minimizeWindow(shellId) }
             case 4: // restore from iconic
                 guard win.isMinimized else { return }
-                self.setState { self.windowManager.restoreWindow(shellId) }
+                self.setState {
+                    self.windowManager.restoreWindow(shellId)
+                    win.pendingOpenAnimation = false   /* see onNewWindow */
+                }
             case 5, 6: // maximise / unmaximise (the manager's op is a toggle)
                 let wantMax = (request == 5)
                 guard win.isMaximized != wantMax else { return }
@@ -3732,6 +3758,14 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             default:
                 break
             }
+        }
+
+        x11.onWindowShaped = { [weak self] (windowId: UInt32, shaped: Bool) in
+            guard let self = self,
+                  let shellId = x11.shellWindowId(forX11Window: windowId),
+                  let win = self.windowManager.windows.first(where: { $0.id == shellId })
+            else { return }
+            self.setState { win.isShaped = shaped }
         }
 
         // Focus the X server follows the shell's, not only the pointer's:
@@ -4114,7 +4148,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
                 return d
             }
-            return depth(a) < depth(b)
+            let da = depth(a), db = depth(b)
+            if da != db { return da < db }
+            return (_popupZ[a.key] ?? 0) < (_popupZ[b.key] ?? 0)
         }
         for (popupId, popup) in sortedPopups {
             if !popup.mapped { continue }

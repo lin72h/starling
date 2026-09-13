@@ -57,6 +57,10 @@ class X11Integration {
     /// server header (1 activate, 2 raise, 3 minimize, 4 restore, 5 maximize,
     /// 6 unmaximize, 7 fullscreen, 8 unfullscreen, 9 close).
     var onWindowRequest: ((_ windowId: UInt32, _ request: Int32) -> Void)?
+    /// The window's SHAPE bounding region was set or removed. Its pixels
+    /// outside the shape already arrive transparent; the shell must not paint
+    /// a backdrop of its own under them.
+    var onWindowShaped: ((_ windowId: UInt32, _ shaped: Bool) -> Void)?
     /// A popup's presented buffer changed size (menus map small, then grow).
     var onPopupBufferResized: ((_ popupId: String, _ physWidth: Int, _ physHeight: Int) -> Void)?
     var onTitleChanged: ((_ windowId: String, _ title: String) -> Void)?
@@ -93,6 +97,14 @@ class X11Integration {
     // ensures we don't flood Chrome even when sync_waiting clears quickly.
     private var lastResizeTime: [UInt32: UInt64] = [:]
     private var pendingResize: [UInt32: (width: Int, height: Int)] = [:]
+    /// GetImage completion: a parked request waits for a frame presented
+    /// after it (fl_drm_view_capture_frames_left drops below 4), or 200 ms.
+    private var capturePolling = false
+    private var capturePollDeadlineNs: UInt64 = 0
+    /// When a client last asked for the screen. While one is actively
+    /// capturing, every X present re-arms the mirror so it never goes
+    /// stale between requests; otherwise presents cost no readback at all.
+    private var lastGetImageNs: UInt64 = 0
     private let resizeIntervalNs: UInt64 = 33_000_000  // 33ms (~30fps) — matching Wayland (DRI3Open dup→open fix may prevent crash)
 
     /// Start the X11 server on the given display number.
@@ -161,6 +173,10 @@ class X11Integration {
             let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
             this.onWindowRequest?(windowId, request)
         }
+        config.on_window_shaped = { (userdata, windowId, shaped) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.onWindowShaped?(windowId, shaped != 0)
+        }
 
         // GetImage / screen capture (Zoom screen share): arm the compositor's
         // capture mirror and copy the requested rect out as X ZPixmap BGRX.
@@ -169,6 +185,15 @@ class X11Integration {
             guard let view = this.drmView, let dst = dst else { return 0 }
             fl_drm_view_arm_capture(view)
             return Int32(fl_drm_view_read_capture(x, y, w, h, dst, dstLen))
+        }
+        // A GetImage is answered with the frame presented AFTER it arrived —
+        // what X promises, and what a client that draws, syncs and grabs
+        // relies on. The mirror only refreshes on presents while armed, so
+        // arm, then poll until a post-arm frame has been mirrored.
+        config.capture_arm = { (userdata) -> Int32 in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.armCaptureAndPoll()
+            return 1
         }
 
         server = x11_server_create(Int32(displayNum), &config)
@@ -408,6 +433,10 @@ class X11Integration {
         // keep frames scheduled and let the shell size the window to content.
         pendingTextureMarks.append(textureId)
         FrameCallbackScheduler.shared.noteTextureUpdate(textureId)
+        if DispatchTime.now().uptimeNanoseconds - lastGetImageNs < 2_000_000_000,
+           let view = drmView {
+            fl_drm_view_arm_capture(view)
+        }
 
         let lastSize = lastImportedSize[textureId]
         if lastSize == nil || lastSize!.width != width || lastSize!.height != height {
@@ -573,6 +602,40 @@ class X11Integration {
     func sendKeyEvent(keycode: UInt32, pressed: Bool) {
         guard let server = server else { return }
         x11_server_key_event(server, keycode, pressed ? 1 : 0)
+    }
+
+    private func armCaptureAndPoll() {
+        guard let view = drmView else { return }
+        lastGetImageNs = DispatchTime.now().uptimeNanoseconds
+        fl_drm_view_arm_capture(view)
+        capturePollDeadlineNs = DispatchTime.now().uptimeNanoseconds + 200_000_000
+        if !capturePolling {
+            capturePolling = true
+            scheduleCapturePoll()
+        }
+    }
+
+    /// The main-queue hop for the capture poll. Only ever touched on the
+    /// main thread; the wrapper is what lets it cross the Sendable check.
+    private struct PollHandle: @unchecked Sendable { let target: X11Integration }
+
+    private func scheduleCapturePoll() {
+        let handle = PollHandle(target: self)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(8)) {
+            handle.target.capturePollTick()
+        }
+    }
+
+    private func capturePollTick() {
+        guard let server = server else { capturePolling = false; return }
+        let fresh = fl_drm_view_capture_frames_left() < 4
+        let late = DispatchTime.now().uptimeNanoseconds >= capturePollDeadlineNs
+        if fresh || late {
+            capturePolling = false
+            x11_server_complete_pending_captures(server)
+        } else {
+            scheduleCapturePoll()
+        }
     }
 
     /// Set focus to a specific X11 window (0 = none).
