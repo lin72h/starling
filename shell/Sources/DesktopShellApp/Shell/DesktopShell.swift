@@ -410,6 +410,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _frameTickEventFd: Int32 = -1
     nonisolated(unsafe) static var _frameTickFd: Int32 = -1
     private var _frameTick: Int = 0
+
+    /// A rebuild, now: the one thing that always passes the composite gate.
+    /// Platform thread only — this is a plain setState.
+    func forceFrameNow() { setState { _frameTick += 1 } }
     private var _frameTickTimer: DispatchSourceTimer?
     /// Whether the frame pump is running at its full rate.
     ///
@@ -2595,6 +2599,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// traffic lights, and no way back.
     var topBarRevealed: Bool { _topBarRevealed }
 
+    /// Raise order among free-standing X11 popups (see x11.onWindowRequest).
+    var _popupZ: [String: Int] = [:]
+    var _popupRaiseSerial: Int = 0
+    var _popupAbove: Set<String> = []
+
     func setTopBarRevealed(_ on: Bool) {
         guard _topBarRevealed != on else { return }
         setState { _topBarRevealed = on }
@@ -3576,9 +3585,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let screenLogH = (PlatformDispatcher.instance.implicitView?.physicalSize.height ?? 2160.0) / dpi
             let winLogW = max(80.0, Double(width) / dpi)
             let winLogH = max(60.0, Double(height) / dpi) + DesktopTheme.kTitleBarHeight
+            // x/y are where the client wants its CONTENT; the frame's title
+            // bar goes above that, so the frame starts one bar higher.
             let winLogX = (x != 0) ? Double(x) / dpi
                                    : max(0.0, (screenLogW - winLogW) / 2.0)
-            let winLogY = (y != 0) ? Double(y) / dpi
+            let winLogY = (y != 0) ? Double(y) / dpi - DesktopTheme.kTitleBarHeight
                                    : max(0.0, (screenLogH - winLogH) / 2.0)
             let fullRect = Rect.fromLTWH(winLogX, winLogY, winLogW, winLogH)
             self.setState {
@@ -3629,7 +3640,160 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // (The old code configured every window to fullscreen for the
             // Chrome-kiosk flow; interactive resizes still flow through
             // onContentResize/onResizeComplete above.)
+
+            // The shell is this window's WM, and an X client can ASK where it
+            // is (XTranslateCoordinates) and what state it is in
+            // (_NET_WM_STATE) — so every move, minimise, maximise and
+            // fullscreen the shell applies is pushed back to the server.
+            if let win = self.windowManager.windows.first(where: { $0.id == shellWindowId }) {
+                // No open zoom for an X11 window: X promises the window is
+                // where it asked the moment MapNotify arrives, and a client
+                // that reads its position and draws straight away (a
+                // benchmark's first capture, an xeyes-style tool) lands in
+                // the middle of the animation otherwise.
+                win.pendingOpenAnimation = false
+                let push: (WindowInfo) -> Void = { w in
+                    let d = currentShellDpi
+                    // Fullscreen draws the content over the whole rect (the
+                    // bar overlays on demand); otherwise it sits below the bar.
+                    let top = w.isFullscreen ? w.rect.top
+                                             : w.rect.top + DesktopTheme.kTitleBarHeight
+                    x11.setWindowPosition(windowId: windowId,
+                                          x: Int((w.rect.left * d).rounded()),
+                                          y: Int((top * d).rounded()))
+                    x11.setWindowState(windowId: windowId, minimized: w.isMinimized,
+                                       maximized: w.isMaximized, fullscreen: w.isFullscreen)
+                }
+                win.onRectChanged = { [weak win] _ in if let w = win { push(w) } }
+                win.onStateChanged = { [weak win] in if let w = win { push(w) } }
+                push(win)
+            }
             return shellWindowId
+        }
+
+        // A client moved or resized its own window, or a pager asked the WM
+        // to. Honoured as asked: a WM that ignores XMoveResizeWindow leaves
+        // every "place my window here" client (and every window benchmark)
+        // stuck where the shell first put it.
+        x11.onWindowConfigured = { [weak self] (windowId: UInt32, x: Int, y: Int,
+                                                width: Int, height: Int) in
+            guard let self = self else { return }
+            let dpi = currentShellDpi
+            if let shellId = x11.shellWindowId(forX11Window: windowId),
+               let win = self.windowManager.windows.first(where: { $0.id == shellId }) {
+                let bar = win.isFullscreen ? 0.0 : DesktopTheme.kTitleBarHeight
+                let rect = Rect.fromLTWH(Double(x) / dpi, Double(y) / dpi - bar,
+                                         max(80.0, Double(width) / dpi),
+                                         max(60.0, Double(height) / dpi) + bar)
+                self.setState { win.rect = rect }
+            } else if let popupId = x11.popupId(forX11Window: windowId),
+                      var p = self.popups[popupId] {
+                p.x = Double(x) / dpi; p.y = Double(y) / dpi
+                p.width = Double(width) / dpi; p.height = Double(height) / dpi
+                self.setState { self.popups[popupId] = p }
+            }
+        }
+
+        // The window-manager requests an X client can make (EWMH/ICCCM
+        // client messages, XRaiseWindow, XIconifyWindow), answered with the
+        // same operations the title bar and dock use. The server learns the
+        // outcome from the push-back above.
+        x11.onWindowRequest = { [weak self] (windowId: UInt32, request: Int32) in
+            guard let self = self else { return }
+            // A free-standing override-redirect window (no shell window)
+            // can still be raised: it competes with its siblings in the
+            // popup layer, and a pager's raise must win there too.
+            if x11.shellWindowId(forX11Window: windowId) == nil,
+               let popupId = x11.popupId(forX11Window: windowId) {
+                if request == 1 || request == 2 {
+                    self._popupRaiseSerial += 1
+                    let z = self._popupRaiseSerial
+                    self.setState { self._popupZ[popupId] = z }
+                } else if request == 10 || request == 11 {
+                    // _NET_WM_STATE_ABOVE on a free-standing window: a
+                    // notification popup, a benchmark's watched pattern —
+                    // it stays above its peers however often they raise.
+                    self.setState {
+                        if request == 10 { self._popupAbove.insert(popupId) }
+                        else { self._popupAbove.remove(popupId) }
+                    }
+                }
+                return
+            }
+            guard let shellId = x11.shellWindowId(forX11Window: windowId),
+                  let win = self.windowManager.windows.first(where: { $0.id == shellId })
+            else { return }
+            let dpi = currentShellDpi
+            let sendContentSize: (Rect, Bool) -> Void = { rect, fullscreen in
+                let bar = fullscreen ? 0.0 : DesktopTheme.kTitleBarHeight
+                x11.sendResize(windowId: windowId,
+                               width: Int(rect.width * dpi),
+                               height: Int((rect.height - bar) * dpi))
+            }
+            switch request {
+            case 1: // activate: unminimise, raise, focus
+                self.setState {
+                    if win.isMinimized { self.windowManager.restoreWindow(shellId) }
+                    else { self.windowManager.bringToFront(shellId) }
+                    win.pendingOpenAnimation = false   /* see onNewWindow */
+                }
+            case 2: // raise
+                self.setState { self.windowManager.bringToFront(shellId) }
+            case 3: // minimise
+                guard !win.isMinimized else { return }
+                self.setState { self.windowManager.minimizeWindow(shellId) }
+            case 4: // restore from iconic
+                guard win.isMinimized else { return }
+                self.setState {
+                    self.windowManager.restoreWindow(shellId)
+                    win.pendingOpenAnimation = false   /* see onNewWindow */
+                }
+            case 5, 6: // maximise / unmaximise (the manager's op is a toggle)
+                let wantMax = (request == 5)
+                guard win.isMaximized != wantMax else { return }
+                self.setState {
+                    self.windowManager.maximizeWindow(
+                        shellId, screenWidth: self.screenWidth, screenHeight: self.screenHeight)
+                }
+                sendContentSize(win.rect, false)
+            case 7: // fullscreen — same shape as the Wayland handler
+                guard !win.isFullscreen else { return }
+                var target: Rect? = nil
+                self.setState { target = self._fullscreenWithZoom(shellId) }
+                if let t = target { sendContentSize(t, true) }
+            case 8: // leave fullscreen
+                guard win.isFullscreen else { return }
+                var restored: Rect? = nil
+                self.setState { restored = self._fullscreenWithZoom(shellId) }
+                if let r = restored { sendContentSize(r, false) }
+            case 9: // close (WM_DELETE_WINDOW to the client)
+                win.onWindowClose?()
+            default:
+                break
+            }
+        }
+
+        x11.onWindowShaped = { [weak self] (windowId: UInt32, shaped: Bool) in
+            guard let self = self,
+                  let shellId = x11.shellWindowId(forX11Window: windowId),
+                  let win = self.windowManager.windows.first(where: { $0.id == shellId })
+            else { return }
+            self.setState { win.isShaped = shaped }
+        }
+
+        // Focus the X server follows the shell's, not only the pointer's:
+        // _NET_ACTIVE_WINDOW and _NET_WM_STATE_FOCUSED are what a client
+        // reads to know it was activated.
+        self.windowManager.onFocusChanged = { [weak self] newId in
+            guard let self = self else { return }
+            if let id = newId, let xid = x11.x11WindowId(forShellWindowId: id) {
+                x11.setFocus(windowId: xid)
+            } else if newId == nil || !(newId!.hasPrefix("x11-")) {
+                // Focus left the X world: no X window holds it.
+                if let cur = self.windowManager.focusedWindowId,
+                   x11.x11WindowId(forShellWindowId: cur) != nil { return }
+                x11.setFocus(windowId: 0)
+            }
         }
 
         x11.onWindowDestroyed = { [weak self] (windowId: String) in
@@ -3985,6 +4149,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         // [N+1..] Popups (rendered on top of windows, no decorations)
         // Sort by nesting depth so children render on top of parents.
+        // Collected here, appended AFTER the status bar and dock below: a
+        // menu is above the chrome on every desktop (macOS, GNOME), and a
+        // dropdown opened near the bottom must not vanish under the dock. X
+        // says the same for a raised override-redirect window, which covers
+        // panels — wmbench's off-screen check puts one over our clock and
+        // reads the clock's white glyphs as the window's pixels otherwise.
+        var popupChildren: [Widget] = []
         #if os(Linux)
         let sortedPopups = (_missionControlOpen && mcIsOnHost) ? [] : popups.sorted { a, b in
             // Count nesting depth by walking parent chain
@@ -3997,7 +4168,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
                 return d
             }
-            return depth(a) < depth(b)
+            let da = depth(a), db = depth(b)
+            if da != db { return da < db }
+            let aa = _popupAbove.contains(a.key), ab = _popupAbove.contains(b.key)
+            if aa != ab { return !aa }   // keep-above sorts last (topmost)
+            return (_popupZ[a.key] ?? 0) < (_popupZ[b.key] ?? 0)
         }
         for (popupId, popup) in sortedPopups {
             if !popup.mapped { continue }
@@ -4055,21 +4230,27 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 immediateParentAbsX = absX - popup.x
             }
 
-            // Constraint adjustment: keep popups within screen bounds.
-            if absX + popup.width > screenWidth {
-                if !isFirstParent {
-                    // Nested popup (submenu): flip to left side of parent popup.
-                    absX = immediateParentAbsX - popup.width
-                } else {
-                    // Direct child of toplevel: slide left to fit.
-                    absX = screenWidth - popup.width
+            // Constraint adjustment: keep popups within screen bounds — a
+            // MENU's; a free-standing override-redirect X11 window (parent
+            // 0) is placed by its client, root-absolute, and may hang off
+            // an edge on purpose (a bar, a benchmark's offscreen check).
+            let rootAnchored = popupId.hasPrefix("x11popup-") && popup.parentSurfaceId == 0
+            if !rootAnchored {
+                if absX + popup.width > screenWidth {
+                    if !isFirstParent {
+                        // Nested popup (submenu): flip to left side of parent popup.
+                        absX = immediateParentAbsX - popup.width
+                    } else {
+                        // Direct child of toplevel: slide left to fit.
+                        absX = screenWidth - popup.width
+                    }
                 }
+                if absX < 0 { absX = 0 }
+                if absY + popup.height > screenHeight {
+                    absY = screenHeight - popup.height
+                }
+                if absY < 0 { absY = 0 }
             }
-            if absX < 0 { absX = 0 }
-            if absY + popup.height > screenHeight {
-                absY = screenHeight - popup.height
-            }
-            if absY < 0 { absY = 0 }
 
             let isX11Popup = popupId.hasPrefix("x11popup-")
             let texture: Widget = TextureWidget(textureId: popup.textureId, filterQuality: .none)
@@ -4175,7 +4356,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 popupChild = flipped
             }
 
-            children.append(
+            popupChildren.append(
                 Positioned(
                     key: ValueKey(popupId),
                     left: absX,
@@ -4251,6 +4432,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 children.append(over)
             }
         }
+        // Client popups (menus, tooltips, free-standing override-redirect
+        // X windows) sit above the bar and the dock; the shell's own
+        // overlays appended below stay above them.
+        children.append(contentsOf: popupChildren)
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
         // mode, three translucent Listeners sit on top of everything:

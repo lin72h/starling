@@ -217,8 +217,10 @@ class DesktopWindow: StatelessWidget {
         // (wallpaper, other windows) inside the rounded clip. The title bar
         // and any translucency the app leaves in its buffer show it
         // through; opaque content simply covers it. Skipped in fullscreen —
-        // content is edge-to-edge and the blur would be pure cost.
-        if !isFullscreen {
+        // content is edge-to-edge and the blur would be pure cost. A SHAPED
+        // X11 window gets none either: its cut-away parts must show what is
+        // behind, not a frosted tint of it.
+        if !isFullscreen && !windowInfo.isShaped {
             stackChildren.append(
                 Positioned(
                     fill: (),
@@ -238,8 +240,8 @@ class DesktopWindow: StatelessWidget {
         }
         stackChildren.append(windowBody)
 
-        // Border overlay (skip in fullscreen)
-        if !isFullscreen {
+        // Border overlay (skip in fullscreen, and around a shaped window)
+        if !isFullscreen && !windowInfo.isShaped {
             stackChildren.append(
                 Positioned(
                     fill: (),

@@ -47,6 +47,20 @@ class X11Integration {
     var onNewPopup: ((_ windowId: UInt32, _ textureId: Int, _ parentWindowId: UInt32,
                        _ x: Int, _ y: Int, _ width: Int, _ height: Int) -> String)?
     var onPopupDestroyed: ((_ popupId: String) -> Void)?
+    /// A client moved/resized its own window (ConfigureWindow, or a pager's
+    /// _NET_MOVERESIZE_WINDOW). Root-absolute device px for a managed window
+    /// or a free-standing override-redirect one; parent-relative for a menu
+    /// anchored to a toplevel — the same space onNewWindow/onNewPopup used.
+    var onWindowConfigured: ((_ windowId: UInt32, _ x: Int, _ y: Int,
+                              _ width: Int, _ height: Int) -> Void)?
+    /// A window-manager request from a client: see X11WindowRequest in the
+    /// server header (1 activate, 2 raise, 3 minimize, 4 restore, 5 maximize,
+    /// 6 unmaximize, 7 fullscreen, 8 unfullscreen, 9 close).
+    var onWindowRequest: ((_ windowId: UInt32, _ request: Int32) -> Void)?
+    /// The window's SHAPE bounding region was set or removed. Its pixels
+    /// outside the shape already arrive transparent; the shell must not paint
+    /// a backdrop of its own under them.
+    var onWindowShaped: ((_ windowId: UInt32, _ shaped: Bool) -> Void)?
     /// A popup's presented buffer changed size (menus map small, then grow).
     var onPopupBufferResized: ((_ popupId: String, _ physWidth: Int, _ physHeight: Int) -> Void)?
     var onTitleChanged: ((_ windowId: String, _ title: String) -> Void)?
@@ -83,6 +97,14 @@ class X11Integration {
     // ensures we don't flood Chrome even when sync_waiting clears quickly.
     private var lastResizeTime: [UInt32: UInt64] = [:]
     private var pendingResize: [UInt32: (width: Int, height: Int)] = [:]
+    /// GetImage completion: a parked request waits for a frame presented
+    /// after it (fl_drm_view_capture_frames_left drops below 4), or 200 ms.
+    private var capturePolling = false
+    private var capturePollDeadlineNs: UInt64 = 0
+    /// When a client last asked for the screen. While one is actively
+    /// capturing, every X present re-arms the mirror so it never goes
+    /// stale between requests; otherwise presents cost no readback at all.
+    private var lastGetImageNs: UInt64 = 0
     private let resizeIntervalNs: UInt64 = 33_000_000  // 33ms (~30fps) — matching Wayland (DRI3Open dup→open fix may prevent crash)
 
     /// Start the X11 server on the given display number.
@@ -140,6 +162,22 @@ class X11Integration {
             this.handleTitleChanged(windowId, title: String(cString: title))
         }
 
+        // Declared in the header since the beginning and never registered —
+        // so XMoveWindow/XResizeWindow reached the server and stopped there,
+        // and every X client that placed its own window was silently ignored.
+        config.on_window_configured = { (userdata, windowId, x, y, w, h) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.onWindowConfigured?(windowId, Int(x), Int(y), Int(w), Int(h))
+        }
+        config.on_window_request = { (userdata, windowId, request) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.onWindowRequest?(windowId, request)
+        }
+        config.on_window_shaped = { (userdata, windowId, shaped) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.onWindowShaped?(windowId, shaped != 0)
+        }
+
         // GetImage / screen capture (Zoom screen share): arm the compositor's
         // capture mirror and copy the requested rect out as X ZPixmap BGRX.
         config.capture_screen = { (userdata, x, y, w, h, dst, dstLen) -> Int32 in
@@ -147,6 +185,15 @@ class X11Integration {
             guard let view = this.drmView, let dst = dst else { return 0 }
             fl_drm_view_arm_capture(view)
             return Int32(fl_drm_view_read_capture(x, y, w, h, dst, dstLen))
+        }
+        // A GetImage is answered with the frame presented AFTER it arrived —
+        // what X promises, and what a client that draws, syncs and grabs
+        // relies on. The mirror only refreshes on presents while armed, so
+        // arm, then poll until a post-arm frame has been mirrored.
+        config.capture_arm = { (userdata) -> Int32 in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.armCaptureAndPoll()
+            return 1
         }
 
         server = x11_server_create(Int32(displayNum), &config)
@@ -201,6 +248,7 @@ class X11Integration {
                     // events are never delivered to Chrome's WSI swapchain thread.
                     x11_server_dispatch(s)
                     x11_server_vblank_tick(s)
+                    x.capturePollTick()
                     // Also process any texture marks from dispatched PresentPixmaps
                     if x.flushPendingTextureMarks() {
                         PlatformDispatcher.instance.scheduleFrame()
@@ -344,6 +392,16 @@ class X11Integration {
         return windowIds[windowId]
     }
 
+    /// The shell popup id of an override-redirect X11 window, if it is one.
+    func popupId(forX11Window windowId: UInt32) -> String? {
+        return popupIds[windowId]
+    }
+
+    /// Reverse of shellWindowId(forX11Window:).
+    func x11WindowId(forShellWindowId shellWindowId: String) -> UInt32? {
+        return windowIds.first(where: { $0.value == shellWindowId })?.key
+    }
+
     private func handleWindowDestroyed(_ windowId: UInt32) {
         windowPids.removeValue(forKey: windowId)
         // print("[X11Integration] Window destroyed: 0x\(String(windowId, radix: 16))")
@@ -376,6 +434,10 @@ class X11Integration {
         // keep frames scheduled and let the shell size the window to content.
         pendingTextureMarks.append(textureId)
         FrameCallbackScheduler.shared.noteTextureUpdate(textureId)
+        if DispatchTime.now().uptimeNanoseconds - lastGetImageNs < 2_000_000_000,
+           let view = drmView {
+            fl_drm_view_arm_capture(view)
+        }
 
         let lastSize = lastImportedSize[textureId]
         if lastSize == nil || lastSize!.width != width || lastSize!.height != height {
@@ -543,10 +605,56 @@ class X11Integration {
         x11_server_key_event(server, keycode, pressed ? 1 : 0)
     }
 
-    /// Set focus to a specific X11 window.
+    private func armCaptureAndPoll() {
+        guard let view = drmView else { return }
+        lastGetImageNs = DispatchTime.now().uptimeNanoseconds
+        fl_drm_view_arm_capture(view)
+        // Arming alone presents nothing on a quiet desktop: the mirror is
+        // refilled by presents, and the composite gate lets one through only
+        // when something changed. Force a change now. We are on the platform
+        // thread here — the thread the framework's frames run on — so the
+        // shell's state can be touched directly. (An earlier version wrote
+        // the frame-tick pipe and polled from the GCD main queue: that put
+        // setState and X server bookkeeping on a second thread, racing the
+        // frames, and the stress pass crashed the shell in swift_retain.)
+        _shellState?.forceFrameNow()
+        capturePollDeadlineNs = DispatchTime.now().uptimeNanoseconds + 300_000_000
+        capturePolling = true
+    }
+
+    /// Called from the X server's vblank tick (platform thread, ~60 Hz while
+    /// clients exist): answer parked GetImages once a frame presented after
+    /// the arm has been mirrored, or at the deadline.
+    fileprivate func capturePollTick() {
+        guard capturePolling, let server = server else { return }
+        let fresh = fl_drm_view_capture_frames_left() < 4
+        let late = DispatchTime.now().uptimeNanoseconds >= capturePollDeadlineNs
+        if fresh || late {
+            capturePolling = false
+            x11_server_complete_pending_captures(server)
+        }
+    }
+
+    /// Set focus to a specific X11 window (0 = none).
     func setFocus(windowId: UInt32) {
         guard let server = server else { return }
         x11_server_set_focus(server, windowId)
+    }
+
+    /// Where the shell composites the window's content, root-absolute device
+    /// px. Keeps the server's TranslateCoordinates/GetGeometry answers — and
+    /// the ConfigureNotify a client gets — truthful about where it really is.
+    func setWindowPosition(windowId: UInt32, x: Int, y: Int) {
+        guard let server = server else { return }
+        x11_server_set_window_position(server, windowId, Int32(x), Int32(y))
+    }
+
+    /// The WM state the shell applied; the server records it in WM_STATE and
+    /// _NET_WM_STATE and sends the ICCCM Unmap/MapNotify on iconify/restore.
+    func setWindowState(windowId: UInt32, minimized: Bool, maximized: Bool, fullscreen: Bool) {
+        guard let server = server else { return }
+        x11_server_set_window_state(server, windowId, minimized ? 1 : 0,
+                                    maximized ? 1 : 0, fullscreen ? 1 : 0)
     }
 
     /// Release the current buffer for a window so the client can reuse it.
