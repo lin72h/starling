@@ -4604,6 +4604,51 @@ static void handle_glx(X11Server* server, int client_idx, uint8_t minor,
             len > 4 ? data[4] : 0, len > 5 ? data[5] : 0,
             len > 6 ? data[6] : 0, len > 7 ? data[7] : 0);
 
+    /* Indirect rendering is not implemented: the GL protocol behind it is a
+     * whole GL. Accepting the context and then never answering glGetString
+     * hangs the client — VLC's snap wrapper sat in glxinfo forever once its
+     * old Mesa found no usable config. Refuse the context instead, as an X
+     * server built without IGLX does (BadValue): glXCreateContext returns
+     * NULL and the client falls back on its own. is_direct sits at byte 20 of
+     * CreateContext (3) and CreateContextAttribsARB (34), byte 24 of
+     * CreateNewContext (24). */
+    if (minor == 3 || minor == 24 || minor == 34) {
+        int off = (minor == 24) ? 24 : 20;
+        uint8_t is_direct = (len > off) ? data[off] : 1;
+        if (!is_direct) {
+            uint32_t ctx = *reinterpret_cast<const uint32_t*>(data + 4);
+            uint8_t err[32] = {};
+            err[0] = 0; err[1] = 2;  /* BadValue */
+            *reinterpret_cast<uint16_t*>(err + 2) = seq;
+            *reinterpret_cast<uint32_t*>(err + 4) = ctx;
+            *reinterpret_cast<uint16_t*>(err + 8) = minor;
+            err[10] = 128;
+            send_to_client(server, client_idx, err, 32);
+            fprintf(stderr, "[X11Server] GLX: refusing indirect context 0x%x (minor %d)\n",
+                    ctx, minor);
+            return;
+        }
+    }
+    if (minor == 8) {
+        /* IsDirect — every context we accept is direct (see above). */
+        uint8_t reply[32] = {};
+        reply[0] = 1; *reinterpret_cast<uint16_t*>(reply + 2) = seq;
+        reply[8] = 1;
+        send_to_client(server, client_idx, reply, 32);
+        return;
+    }
+    if (minor >= 101) {
+        /* A GL single request: only an indirect context sends these, and we
+         * refuse those — but never leave a reply-bearing request unanswered.
+         * An error satisfies the client's wait; silence hangs it. */
+        uint8_t err[32] = {};
+        err[0] = 0; err[1] = 17;  /* BadImplementation */
+        *reinterpret_cast<uint16_t*>(err + 2) = seq;
+        *reinterpret_cast<uint16_t*>(err + 8) = minor;
+        err[10] = 128;
+        send_to_client(server, client_idx, err, 32);
+        return;
+    }
     if (minor == 7) {
         uint8_t reply[32] = {};
         reply[0] = 1; *reinterpret_cast<uint16_t*>(reply + 2) = seq;
@@ -4680,7 +4725,15 @@ static void handle_glx(X11Server* server, int client_idx, uint8_t minor,
         cfg[32]=24; cfg[33]=8; cfg[34]=0; cfg[35]=0;
         send_to_client(server, client_idx, reply.data(), rlen14);
     } else if (minor == 21) {
-        int np21 = 20;
+        /* No GLX_MAX_PBUFFER_* here. Mesa's DRI loaders match every config
+         * the server advertises against the driver's own list attribute by
+         * attribute, and up to Mesa 20 that comparison includes the pbuffer
+         * maxima — which every DRI driver reports as 0. Advertising 4096
+         * made the software renderer in a core18 snap (VLC) match nothing:
+         * "No matching fbConfigs or visuals found", then a fall-back to
+         * indirect rendering, which nobody implements. Current Mesa ignores
+         * the maxima; leaving them out works for both. */
+        int np21 = 17;
         struct { int depth; int stencil; int alpha; uint32_t visual; int buf_size; } cfgs[] = {
             { 0,  0, 0, 0x21, 24 }, { 24, 0, 0, 0x21, 24 }, { 24, 8, 0, 0x21, 24 },
             { 0,  0, 8, 0x21, 32 }, { 24, 8, 8, 0x21, 32 },
@@ -4716,9 +4769,6 @@ static void handle_glx(X11Server* server, int client_idx, uint8_t minor,
             p[i++]=0x8012; p[i++]=1;
             p[i++]=0x186A0; p[i++]=0;
             p[i++]=0x186A1; p[i++]=0;
-            p[i++]=0x8016; p[i++]=4096;
-            p[i++]=0x8017; p[i++]=4096;
-            p[i++]=0x8018; p[i++]=4096*4096;
         }
         send_to_client(server, client_idx, reply.data(), rl21);
     } else if (minor == 5 || minor == 26) {
