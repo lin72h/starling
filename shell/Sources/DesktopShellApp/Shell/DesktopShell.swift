@@ -4149,6 +4149,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         // [N+1..] Popups (rendered on top of windows, no decorations)
         // Sort by nesting depth so children render on top of parents.
+        // Collected here, appended AFTER the status bar and dock below: a
+        // menu is above the chrome on every desktop (macOS, GNOME), and a
+        // dropdown opened near the bottom must not vanish under the dock. X
+        // says the same for a raised override-redirect window, which covers
+        // panels — wmbench's off-screen check puts one over our clock and
+        // reads the clock's white glyphs as the window's pixels otherwise.
+        var popupChildren: [Widget] = []
         #if os(Linux)
         let sortedPopups = (_missionControlOpen && mcIsOnHost) ? [] : popups.sorted { a, b in
             // Count nesting depth by walking parent chain
@@ -4349,7 +4356,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 popupChild = flipped
             }
 
-            children.append(
+            popupChildren.append(
                 Positioned(
                     key: ValueKey(popupId),
                     left: absX,
@@ -4425,6 +4432,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 children.append(over)
             }
         }
+        // Client popups (menus, tooltips, free-standing override-redirect
+        // X windows) sit above the bar and the dock; the shell's own
+        // overlays appended below stay above them.
+        children.append(contentsOf: popupChildren)
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
         // mode, three translucent Listeners sit on top of everything:
