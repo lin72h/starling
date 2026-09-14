@@ -118,6 +118,24 @@ NAME="$1"; shift
 # generic launch path below forces the private runtime dir a snap cannot use.
 if [ "$NAME" = "--snap" ]; then
     SNAP_APP="${1:?app-run --snap needs a snap name}"; shift
+    # Native Wayland first, X11 as the fallback — both on the shell's own X
+    # server (:1), which a confined snap may reach (abstractions/X allows
+    # /tmp/.X11-unix/*). GTK and Qt walk these lists themselves. The one
+    # case they cannot decide: the snapcraft desktop-launch wrapper forces
+    # Qt onto wayland-egl whenever it sees a Wayland socket, plugin or not
+    # — VLC ships libqxcb.so and no libqwayland*.so, so it died with
+    # "unable to open display". Such a snap gets DISABLE_WAYLAND, the
+    # wrapper's own opt-out, and Qt goes to xcb.
+    SNAP_ROOT="/snap/${SNAP_APP%%.*}/current"
+    SNAP_X11_ONLY=""
+    if ls "$SNAP_ROOT"/usr/lib/*/qt5/plugins/platforms/libqxcb.so >/dev/null 2>&1 \
+       && ! ls "$SNAP_ROOT"/usr/lib/*/qt5/plugins/platforms/libqwayland*.so >/dev/null 2>&1; then
+        SNAP_X11_ONLY=1
+    fi
+    SNAP_GDK="wayland,x11"; SNAP_QT="wayland;xcb"; SNAP_DISABLE_WL=""
+    if [ -n "$SNAP_X11_ONLY" ]; then
+        SNAP_QT="xcb"; SNAP_DISABLE_WL=1
+    fi
     if ! is_starling_os && [ "$(id -u)" -eq 0 ] && [ "${STAY_ROOT:-0}" -eq 0 ]; then
         LOGIN_HOME="$(getent passwd "$LOGIN_USER" | cut -d: -f6)"
         LOGIN_UID="$(id -u "$LOGIN_USER" 2>/dev/null || echo 1000)"
@@ -128,8 +146,9 @@ if [ "$NAME" = "--snap" ]; then
             XDG_RUNTIME_DIR="/run/user/$LOGIN_UID" \
             WAYLAND_DISPLAY="$SOCKET" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$LOGIN_UID/bus" \
-            XDG_SESSION_TYPE=wayland \
-            GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland \
+            XDG_SESSION_TYPE=wayland DISPLAY=:1 \
+            GDK_BACKEND="$SNAP_GDK" QT_QPA_PLATFORM="$SNAP_QT" \
+            ${SNAP_DISABLE_WL:+DISABLE_WAYLAND=1} \
             snap run "$SNAP_APP" "$@"
     fi
     RUID="$(id -u)"
@@ -138,8 +157,9 @@ if [ "$NAME" = "--snap" ]; then
         XDG_RUNTIME_DIR="/run/user/$RUID" \
         WAYLAND_DISPLAY="$SOCKET" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$RUID/bus" \
-        XDG_SESSION_TYPE=wayland \
-        GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland \
+        XDG_SESSION_TYPE=wayland DISPLAY=:1 \
+        GDK_BACKEND="$SNAP_GDK" QT_QPA_PLATFORM="$SNAP_QT" \
+        ${SNAP_DISABLE_WL:+DISABLE_WAYLAND=1} \
         snap run "$SNAP_APP" "$@"
 fi
 
