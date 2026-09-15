@@ -10,18 +10,27 @@ final class AppRegistryTests: XCTestCase {
 
     private var catalogDir = ""
     private var recordsDir = ""
+    private var snapDir = ""
+    private var flatpakDir = ""
 
     override func setUp() {
         super.setUp()
         let base = NSTemporaryDirectory() + "starling-registry-tests-\(getpid())"
         catalogDir = base + "/catalog.d"
         recordsDir = base + "/installed.d"
-        for dir in [catalogDir, recordsDir] {
+        // Discovery scans the box's snap and Flatpak exports unless told
+        // otherwise; an empty directory each keeps installed apps out of
+        // catalog tests.
+        snapDir = base + "/snap.d"
+        flatpakDir = base + "/flatpak.d"
+        for dir in [catalogDir, recordsDir, snapDir, flatpakDir] {
             try? FileManager.default.createDirectory(
                 atPath: dir, withIntermediateDirectories: true)
         }
         setenv("STARLING_CATALOG_DIR", catalogDir, 1)
         setenv("STARLING_APP_RECORDS", recordsDir, 1)
+        setenv("STARLING_SNAP_DESKTOP_DIR", snapDir, 1)
+        setenv("STARLING_FLATPAK_EXPORTS_DIR", flatpakDir, 1)
     }
 
     override func tearDown() {
@@ -29,7 +38,61 @@ final class AppRegistryTests: XCTestCase {
             atPath: (catalogDir as NSString).deletingLastPathComponent)
         unsetenv("STARLING_CATALOG_DIR")
         unsetenv("STARLING_APP_RECORDS")
+        unsetenv("STARLING_SNAP_DESKTOP_DIR")
+        unsetenv("STARLING_FLATPAK_EXPORTS_DIR")
         super.tearDown()
+    }
+
+    private func writeFlatpakEntry(_ file: String, _ body: String) {
+        try? body.write(toFile: flatpakDir + "/" + file + ".desktop",
+                        atomically: true, encoding: .utf8)
+    }
+
+    func testDiscoversInstalledFlatpaks() {
+        writeFlatpakEntry("org.example.Player", """
+            [Desktop Entry]
+            Type=Application
+            Name=Example Player
+            Icon=org.example.Player
+            StartupWMClass=example
+            X-Flatpak=org.example.Player
+            """)
+        // A secondary entry of the same app is an extra action, not an app.
+        writeFlatpakEntry("org.example.Player.url", """
+            [Desktop Entry]
+            Type=Application
+            Name=Example Player (open URL)
+            X-Flatpak=org.example.Player
+            """)
+        // Hidden entries never surface.
+        writeFlatpakEntry("org.example.Hidden", """
+            [Desktop Entry]
+            Type=Application
+            Name=Hidden
+            NoDisplay=true
+            X-Flatpak=org.example.Hidden
+            """)
+        let fp = reloaded().filter { $0.kind == .flatpak }
+        XCTAssertEqual(fp.map { $0.id }, ["flatpak-org.example.Player"])
+        XCTAssertEqual(fp.first?.exec, "org.example.Player")
+        XCTAssertEqual(fp.first?.name, "Example Player")
+        XCTAssertEqual(fp.first?.installed, true)
+        XCTAssertEqual(fp.first?.matches(appId: "example"), true)
+        XCTAssertEqual(fp.first?.matches(appId: "org.example.Player"), true)
+    }
+
+    func testFlatpakWinsOverAnInstalledCatalogTwinOnlyWhenNotInstalled() {
+        // An INSTALLED catalog app with the same name hides the Flatpak, so
+        // the desktop never shows an app twice; an installable-only one does
+        // not (there is nothing on disk to prefer).
+        writeCatalog("player", "[Starling App]\nId=player\nName=Example Player\nKind=host\nBins=/nonexistent/player\n")
+        writeFlatpakEntry("org.example.Player", """
+            [Desktop Entry]
+            Type=Application
+            Name=Example Player
+            X-Flatpak=org.example.Player
+            """)
+        XCTAssertEqual(reloaded().filter { $0.kind == .flatpak }.count, 1)
     }
 
     private func writeCatalog(_ name: String, _ body: String) {

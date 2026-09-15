@@ -121,7 +121,7 @@ def case_blocks(path: Path, selector: str) -> dict[str, str]:
 def install_recipe_names(path: Path) -> set[str]:
     """Labels of app-install.sh that actually install something."""
     installs = ("inst ", "vendor_deb ", "vendor_repo ", "apt-get install",
-                "tar -x", "fetch ")
+                "tar -x", "fetch ", "snap install", "flatpak install")
     return {label for label, body in case_blocks(path, '"$NAME"').items()
             if any(token in body for token in installs)}
 
@@ -163,7 +163,7 @@ def check_catalog() -> None:
     if not glyphs:
         fail(check, "could not read the glyph vocabulary out of the Swift sources")
 
-    kinds = {"first-party", "host", "android", "x11"}
+    kinds = {"first-party", "host", "android", "x11", "snap", "flatpak"}
     install_recipes = install_recipe_names(REPO / "build/app-install.sh")
     run_recipes = set(case_blocks(REPO / "build/app-run.sh", '"$NAME"'))
 

@@ -8329,6 +8329,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
             return
         #elseif os(Linux)
+        case _ where _record(appId)?.kind == .flatpak:
+            // A Flatpak (anything installed from Flathub). app-run's --flatpak
+            // path runs `flatpak run <app-id>` against the real per-user
+            // runtime dir — the sandbox sees only that, like a snap — and
+            // whichever display socket its manifest grants: X11 through
+            // /tmp/.X11-unix, or the Wayland socket the compositor exposes
+            // in that dir. The window returns like any other client's.
+            _spawnLauncher(
+                ProcessInfo.processInfo.environment["STARLING_APP_RUN"]
+                    ?? "/usr/bin/app-run",
+                args: ["--flatpak", _record(appId)?.exec ?? appId])
+            return
         case _ where _record(appId)?.kind == .snap:
             // A snap (the App Center and anything it installs). app-run's
             // --snap path runs `snap run <target>` against the real per-user

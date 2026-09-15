@@ -2,7 +2,7 @@
 Id=appcenter
 Name=App Center
 Kind=snap
-Order=65
+Order=68
 Dock=8
 Glyph=store
 Color=E95420

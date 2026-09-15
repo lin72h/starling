@@ -48,7 +48,7 @@ RECORDS="${STARLING_APP_RECORDS:-/var/lib/starling/installed.d}"
 # offers, launches or displays them — no store tile, no launcher icon, no dock
 # identity. Give one a record in registry/catalog.d (and a launch recipe in
 # app-run.sh) to surface it.
-UNLISTED="mpv vlc libreoffice obs"
+UNLISTED="mpv vlc libreoffice obs snap-store"
 
 # Read one key out of a freedesktop-style key file. Only the FIRST group is
 # read: a `.desktop` entry's `[Desktop Action …]` groups carry their own Icon
@@ -151,11 +151,28 @@ while [ $# -gt 0 ]; do
         # Remove even though the app is running. Escape hatch for a wedged
         # process; the default refusal is there for a reason.
         --force)  FORCE=1; shift ;;
+        # Install (or, with --remove, uninstall) one Flatpak app by id from
+        # Flathub, adding the remote on first use. Flatpaks need no registry
+        # record: the desktop discovers them from Flatpak's own exports.
+        --flatpak) FLATPAK_MODE=1; shift ;;
         *) break ;;
     esac
 done
 NAME="${1:-}"
 [ -n "$NAME" ] || { echo "app-install: missing app name" >&2; exit 2; }
+
+if [ "${FLATPAK_MODE:-0}" -eq 1 ]; then
+    command -v flatpak >/dev/null 2>&1 || {
+        echo "app-install: flatpak is not present; cannot install $NAME" >&2
+        exit 2
+    }
+    if [ -n "$REMOVE" ]; then
+        exec flatpak uninstall -y --noninteractive "$NAME"
+    fi
+    flatpak remote-add --if-not-exists flathub \
+        https://dl.flathub.org/repo/flathub.flatpakrepo
+    exec flatpak install -y --noninteractive flathub "$NAME"
+fi
 
 if [ -n "$RUNNING_ONLY" ]; then
     _live=0

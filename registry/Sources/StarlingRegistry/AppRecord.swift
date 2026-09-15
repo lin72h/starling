@@ -42,6 +42,12 @@ public struct AppRecord: Sendable {
         /// runtime dir (snap confinement cannot see the session's private
         /// one). Discovered from the snapd desktop directory, not the catalog.
         case snap
+        /// A Flatpak (Flathub); `exec` is its app id, run with `flatpak run`
+        /// against the real per-user runtime dir like a snap. Unlike a snap it
+        /// bundles no graphics driver — Flathub ships Mesa as a separate,
+        /// current runtime extension — so it does not rot against new
+        /// hardware. Discovered from Flatpak's exported desktop entries.
+        case flatpak
     }
 
     // ── Catalog: shipped, static ─────────────────────────────────────────

@@ -177,7 +177,9 @@ public final class AppRegistry: @unchecked Sendable {
         // are their own package system. Surface each installed GUI snap from
         // the snapd desktop directory (skipping any a catalog record already
         // covers, e.g. the App Center itself), so an App Center install lights
-        // up the launcher the same way an apt install does.
+        // up the launcher the same way an apt install does. Flatpaks first:
+        // an app held by both ecosystems shows once, as the Flatpak.
+        out.append(contentsOf: Self.discoverFlatpaks(covering: out))
         out.append(contentsOf: Self.discoverSnaps(covering: out))
         out.sort {
             $0.order != $1.order ? $0.order < $1.order : $0.name < $1.name
@@ -366,7 +368,101 @@ public final class AppRegistry: @unchecked Sendable {
     /// "Is it on disk?" — the fallback for apps the store did not install.
     /// The snapd desktop directory: one `<snap>_<app>.desktop` per app of
     /// each installed snap, with an absolute `Icon` path.
-    static let snapDesktopDir = "/var/lib/snapd/desktop/applications"
+    /// `$STARLING_SNAP_DESKTOP_DIR` overrides — the tests point it at an
+    /// empty directory, or every snap on the box leaks into a catalog test.
+    static var snapDesktopDir: String {
+        let env = ProcessInfo.processInfo.environment
+        if let d = env["STARLING_SNAP_DESKTOP_DIR"], !d.isEmpty { return d }
+        return "/var/lib/snapd/desktop/applications"
+    }
+
+    /// Flatpak's exported desktop entries: `<app-id>.desktop` (plus any
+    /// secondary `<app-id>.<x>.desktop`) per installed app, system-wide and
+    /// per-user, each carrying `X-Flatpak=<app-id>` — the id `flatpak run`
+    /// takes. Icons sit beside them under `../icons/hicolor/<size>/apps/`.
+    /// `$STARLING_FLATPAK_EXPORTS_DIR` overrides with one directory (tests).
+    static var flatpakExportsDirs: [String] {
+        let env = ProcessInfo.processInfo.environment
+        if let d = env["STARLING_FLATPAK_EXPORTS_DIR"], !d.isEmpty { return [d] }
+        let home = env["HOME"] ?? NSHomeDirectory()
+        return ["/var/lib/flatpak/exports/share/applications",
+                home + "/.local/share/flatpak/exports/share/applications"]
+    }
+
+    /// Synthesize a record for every installed Flatpak app not already
+    /// described by a catalog record. Same shape as `discoverSnaps`; runs
+    /// BEFORE it, so when both ecosystems hold the same app (VLC from Flathub
+    /// and from the App Center) the Flatpak — the one whose graphics driver
+    /// stays current — is the one the desktop shows.
+    static func discoverFlatpaks(covering existing: [AppRecord]) -> [AppRecord] {
+        let fm = FileManager.default
+        let coveredExec = Set(existing.filter { $0.kind == .flatpak }.map { $0.exec })
+        var out: [AppRecord] = []
+        var order = 950
+        var seenIds = Set<String>()
+        for dir in flatpakExportsDirs {
+            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for file in files.sorted() where file.hasSuffix(".desktop") {
+                guard let kf = KeyFile(path: dir + "/" + file,
+                                       group: "Desktop Entry") else { continue }
+                if (kf.string("Type") ?? "Application") != "Application" { continue }
+                if kf.string("NoDisplay")?.lowercased() == "true" { continue }
+                if kf.string("Hidden")?.lowercased() == "true" { continue }
+                if kf.string("Terminal")?.lowercased() == "true" { continue }
+                guard let name = kf.string("Name"), !name.isEmpty else { continue }
+                guard let appId = kf.string("X-Flatpak"), !appId.isEmpty else { continue }
+                // One record per app: Flatpak names an app's main entry
+                // exactly `<app-id>.desktop`; the rest are extra actions.
+                let base = String(file.dropLast(".desktop".count))
+                if base != appId || seenIds.contains(appId) { continue }
+                seenIds.insert(appId)
+                if coveredExec.contains(appId) { continue }
+
+                let wmClass = kf.string("StartupWMClass") ?? appId
+                // Flathub exports raster icons in several sizes; take the
+                // largest. An absolute path is used as-is if it is not SVG.
+                var iconPath: String? = nil
+                if let icon = kf.string("Icon") {
+                    if icon.hasPrefix("/") {
+                        if fm.fileExists(atPath: icon), !icon.lowercased().hasSuffix(".svg") {
+                            iconPath = icon
+                        }
+                    } else {
+                        let share = (dir as NSString).deletingLastPathComponent
+                        for size in ["256x256", "192x192", "128x128", "96x96", "64x64", "48x48"] {
+                            let p = share + "/icons/hicolor/" + size + "/apps/" + icon + ".png"
+                            if fm.fileExists(atPath: p) { iconPath = p; break }
+                        }
+                        if iconPath == nil {
+                            iconPath = DesktopEntry.resolveIcon(icon, in: DesktopEntry.dataDirs())
+                        }
+                    }
+                }
+                let lname = name.lowercased()
+                if existing.contains(where: {
+                    $0.installed && ($0.matches(appId: wmClass) || $0.matches(appId: appId)
+                                     || $0.name.lowercased() == lname)
+                }) { continue }
+
+                var appIds = [wmClass, appId, "flatpak-\(appId)"]
+                var seen = Set<String>()
+                appIds = appIds.filter { seen.insert($0.lowercased()).inserted }
+
+                order += 1
+                out.append(AppRecord(
+                    id: "flatpak-\(appId)", name: name, kind: .flatpak, order: order,
+                    glyph: "externalApp", color: 0x5E5E6B, dockOrder: nil,
+                    category: "", publisher: "", subtitle: "", sizeLabel: "",
+                    details: "", exec: appId, windowRect: nil,
+                    installRecipe: nil, bins: [],
+                    desktopEntries: [base], wmClasses: [wmClass], titleMatches: [],
+                    renameWindows: false, debURL: nil, debMarker: nil,
+                    desktopFile: dir + "/" + file, iconPath: iconPath,
+                    version: nil, installedAt: nil, installed: true, appIds: appIds))
+            }
+        }
+        return out
+    }
 
     /// Synthesize a record for every installed GUI snap not already described
     /// by a catalog record. `covering` is the catalog-built list, checked so a
@@ -463,6 +559,10 @@ public final class AppRegistry: @unchecked Sendable {
         case .snap:
             return fm.isExecutableFile(atPath: "/snap/bin/\(exec)")
                 || bins.contains { fm.isExecutableFile(atPath: $0) }
+        case .flatpak:
+            return flatpakExportsDirs.contains {
+                fm.fileExists(atPath: $0 + "/" + exec + ".desktop")
+            }
         }
     }
 
@@ -500,7 +600,7 @@ public final class AppRegistry: @unchecked Sendable {
         // never takes this path at all.
         for dir in [Self.catalogDir,
                     Self.nearestExisting(Self.installedDir),
-                    Self.nearestExisting(Self.snapDesktopDir)] {
+                    Self.nearestExisting(Self.snapDesktopDir)] + Self.flatpakExportsDirs.map(Self.nearestExisting) {
             _ = inotify_add_watch(fd, dir, mask)
         }
 
@@ -516,6 +616,9 @@ public final class AppRegistry: @unchecked Sendable {
             // the existing watch, so this is safe to repeat.
             _ = inotify_add_watch(fd, Self.nearestExisting(Self.installedDir), mask)
             _ = inotify_add_watch(fd, Self.nearestExisting(Self.snapDesktopDir), mask)
+            for d in Self.flatpakExportsDirs {
+                _ = inotify_add_watch(fd, Self.nearestExisting(d), mask)
+            }
             self.reload()
             onChange()
         }

@@ -59,3 +59,26 @@ request (2026-09-12).
   on Wayland — an app quirk, not a Starling limit.
 - In-app install via polkit is exercised in the shipped/VM login; a root
   dev shell's session semantics make it unreliable to test on the dev box.
+
+## Flatpak (2026-09-15)
+
+The second sealed-package ecosystem, and the one that does not rot against new
+hardware: a Flatpak bundles no graphics driver — Flathub delivers Mesa as a
+separate runtime extension kept current on its own — so VLC from Flathub
+renders on this laptop's GPU where VideoLAN's core18 snap falls back to
+software (~240% CPU vs ~9% on the same clip).
+
+- `Kind=flatpak`; `exec` is the app id. Discovered from Flatpak's exported
+  desktop entries (system and per-user `exports/share/applications`, main
+  entry `<id>.desktop` with `X-Flatpak=`), icons from the exported hicolor
+  set. Discovery runs before snaps, so an app in both shows once, as the
+  Flatpak. `$STARLING_FLATPAK_EXPORTS_DIR` / `$STARLING_SNAP_DESKTOP_DIR`
+  override the directories; the registry tests point both at empty ones.
+- Launch: `app-run --flatpak <id>` → `flatpak run` against the real per-user
+  runtime dir (X11 via the shared /tmp/.X11-unix, Wayland via the socket the
+  compositor exposes there, audio via PULSE_SERVER), GTK/Qt given both
+  backends. No compositor change was needed.
+- Install: `app-install --flatpak <id>` (and `--remove`) — Flathub remote
+  added on first use. There is no Flathub storefront on the desktop yet;
+  Ubuntu's App Center does not list Flathub.
+- Packaging: `flatpak` in Recommends beside `snapd`.

@@ -163,6 +163,46 @@ if [ "$NAME" = "--snap" ]; then
         snap run "$SNAP_APP" "$@"
 fi
 
+# ── Flatpak apps (Flathub) ───────────────────────────────────────────────
+# A Flatpak is sandboxed by bubblewrap and reaches the desktop only through
+# what its manifest grants: `--socket=x11` shares /tmp/.X11-unix (our X server
+# is X1 there, so DISPLAY=:1 just works), `--socket=wayland` bind-mounts
+# $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY — the socket the compositor exposes in the
+# real per-user dir; the private session dir is invisible to it, exactly as
+# for snaps — and `--socket=pulseaudio` follows PULSE_SERVER. GTK and Qt get
+# both backends and pick whichever socket the sandbox actually has. Unlike a
+# snap a Flatpak never bundles a graphics driver: Flathub ships Mesa as a
+# separate, current runtime extension, which is why VLC from Flathub renders
+# on the GPU where the core18 snap fell back to software. Same root handling
+# as snaps: a root dev shell drops to the login user first.
+if [ "$NAME" = "--flatpak" ]; then
+    FLATPAK_APP="${1:?app-run --flatpak needs an app id}"; shift
+    if ! is_starling_os && [ "$(id -u)" -eq 0 ] && [ "${STAY_ROOT:-0}" -eq 0 ]; then
+        LOGIN_HOME="$(getent passwd "$LOGIN_USER" | cut -d: -f6)"
+        LOGIN_UID="$(id -u "$LOGIN_USER" 2>/dev/null || echo 1000)"
+        exec runuser -u "$LOGIN_USER" -- env -i \
+            HOME="$LOGIN_HOME" USER="$LOGIN_USER" LOGNAME="$LOGIN_USER" \
+            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            LANG="${LANG:-en_US.UTF-8}" \
+            XDG_RUNTIME_DIR="/run/user/$LOGIN_UID" \
+            WAYLAND_DISPLAY="$SOCKET" DISPLAY=:1 \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$LOGIN_UID/bus" \
+            PULSE_SERVER="unix:/run/user/$LOGIN_UID/pulse/native" \
+            XDG_SESSION_TYPE=wayland \
+            GDK_BACKEND="wayland,x11" QT_QPA_PLATFORM="wayland;xcb" \
+            flatpak run "$FLATPAK_APP" "$@"
+    fi
+    RUID="$(id -u)"
+    exec env \
+        XDG_RUNTIME_DIR="/run/user/$RUID" \
+        WAYLAND_DISPLAY="$SOCKET" DISPLAY=:1 \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$RUID/bus" \
+        PULSE_SERVER="unix:/run/user/$RUID/pulse/native" \
+        XDG_SESSION_TYPE=wayland \
+        GDK_BACKEND="wayland,x11" QT_QPA_PLATFORM="wayland;xcb" \
+        flatpak run "$FLATPAK_APP" "$@"
+fi
+
 # ── App registry ─────────────────────────────────────────────────────────
 # Resolve a friendly name to the command line to run in the runtime. The
 # per-app home is keyed on $NAME. Add entries here as apps are installed.
