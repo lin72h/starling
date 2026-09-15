@@ -2601,6 +2601,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     /// Raise order among free-standing X11 popups (see x11.onWindowRequest).
     var _popupZ: [String: Int] = [:]
+    // child x11 subwindow id -> owning shell window id (for unmap cleanup)
+    var _childSurfaceOwner: [UInt32: String] = [:]
     var _popupRaiseSerial: Int = 0
     var _popupAbove: Set<String> = []
 
@@ -3831,6 +3833,42 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             guard let self = self else { return }
             self.setState {
                 self.popups.removeValue(forKey: popupId)
+            }
+        }
+
+        // A nested native subwindow (VLC's reparented video output). Composite
+        // it INSIDE its toplevel's content, not as a decorated window or an
+        // overlay above the chrome. Offsets/sizes stay in physical px on the
+        // WindowInfo; DesktopWindow scales them by the shell DPI at build time.
+        x11.onNewChildSurface = { [weak self] (windowId: UInt32, textureId: Int,
+                                               toplevelWindowId: UInt32,
+                                               offsetX: Int, offsetY: Int,
+                                               width: Int, height: Int) in
+            guard let self = self else { return }
+            guard let shellWinId = x11.shellWindowId(forX11Window: toplevelWindowId),
+                  let win = self.windowManager.windows.first(where: { $0.id == shellWinId })
+            else { return }
+            self.setState {
+                let surface = ChildSurface(
+                    x11WindowId: windowId, textureId: textureId,
+                    offsetXPhys: offsetX, offsetYPhys: offsetY,
+                    widthPhys: width, heightPhys: height)
+                if let i = win.childSurfaces.firstIndex(where: { $0.x11WindowId == windowId }) {
+                    win.childSurfaces[i] = surface
+                } else {
+                    win.childSurfaces.append(surface)
+                }
+                self._childSurfaceOwner[windowId] = shellWinId
+            }
+        }
+
+        x11.onChildSurfaceUnmapped = { [weak self] (windowId: UInt32) in
+            guard let self = self else { return }
+            self.setState {
+                if let owner = self._childSurfaceOwner.removeValue(forKey: windowId),
+                   let win = self.windowManager.windows.first(where: { $0.id == owner }) {
+                    win.childSurfaces.removeAll { $0.x11WindowId == windowId }
+                }
             }
         }
 

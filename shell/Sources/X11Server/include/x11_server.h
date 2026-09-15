@@ -106,6 +106,20 @@ typedef struct X11ServerConfig {
      * its own backdrop under such a window so what is behind shows through. */
     void (*on_window_shaped)(void* userdata, uint32_t window_id, int shaped);
 
+    /* A native subwindow with its own GPU buffer was mapped inside a
+     * top-level: a video output (VLC) reparented under the Qt video widget,
+     * or any nested GLX/DRI3 child. The shell composites window_id's texture
+     * INSIDE toplevel_window_id's content, at (x,y) device px relative to the
+     * top-level's origin, in the window's own z-band — not a decorated window
+     * on root, not an overlay above the chrome. Re-fired with a new offset or
+     * size when the subwindow moves or resizes. window_id feeds the same
+     * present callbacks as any window; the shell makes it a texture. */
+    void (*on_child_surface_mapped)(void* userdata, uint32_t window_id,
+                                     uint32_t toplevel_window_id,
+                                     int x, int y, int width, int height);
+    /* The subwindow was unmapped, destroyed, or reparented back to root. */
+    void (*on_child_surface_unmapped)(void* userdata, uint32_t window_id);
+
     /* GetImage / screen capture: fill dst with the screen rect [x,y,w,h] as
      * X ZPixmap depth-32 BGRX, top-down (dst_len bytes, must be >= w*h*4).
      * Returns 1 on success, 0 if no frame is available yet. Optional — when

@@ -26,6 +26,33 @@ class DesktopWindow: StatelessWidget {
                 child: content
             )
         }
+        // Nested native subwindows (VLC's reparented video output) composite
+        // INSIDE this window's content, at their offset in the content area,
+        // in this window's own z-band — clipped to the content so an oversized
+        // video surface (sized to the clip's native resolution) does not spill
+        // past the frame. Physical px from the server, scaled by the shell DPI.
+        if !windowInfo.childSurfaces.isEmpty {
+            let dpi = currentShellDpi
+            var layers: [Widget] = [Positioned(left: 0, top: 0, right: 0, bottom: 0, child: content)]
+            for cs in windowInfo.childSurfaces {
+                var surf: Widget = TextureWidget(textureId: cs.textureId, filterQuality: .low)
+                if cs.flipY {
+                    surf = Transform(
+                        transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
+                        alignment: Alignment.center,
+                        child: surf
+                    )
+                }
+                layers.append(Positioned(
+                    left: Double(cs.offsetXPhys) / dpi,
+                    top: Double(cs.offsetYPhys) / dpi,
+                    width: Double(cs.widthPhys) / dpi,
+                    height: Double(cs.heightPhys) / dpi,
+                    child: surf
+                ))
+            }
+            content = ClipRect(child: Stack(children: layers))
+        }
         let texture = content
         guard let forward = windowInfo.onPointerEvent else {
             // No pointer forwarding (native Flutter content) — still listen

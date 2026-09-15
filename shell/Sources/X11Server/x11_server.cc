@@ -180,6 +180,7 @@ static constexpr uint8_t X11_CREATE_WINDOW         = 1;
 static constexpr uint8_t X11_CHANGE_WINDOW_ATTRS   = 2;
 static constexpr uint8_t X11_GET_WINDOW_ATTRS      = 3;
 static constexpr uint8_t X11_DESTROY_WINDOW        = 4;
+static constexpr uint8_t X11_REPARENT_WINDOW       = 7;
 static constexpr uint8_t X11_MAP_WINDOW            = 8;
 static constexpr uint8_t X11_UNMAP_WINDOW          = 10;
 static constexpr uint8_t X11_CONFIGURE_WINDOW      = 12;
@@ -349,6 +350,10 @@ struct X11Window {
      * time (0 = none: placed root-absolute), so a later ConfigureWindow can
      * be handed to the shell in the same coordinate space. */
     int      shell_managed = 0;
+    /* A nested native subwindow (its own GPU buffer, e.g. VLC's video
+     * output reparented under the toplevel) announced to the shell as a
+     * child surface composited inside its toplevel ancestor. */
+    int      child_surface_announced = 0;
     int      iconic = 0;
     int      maximized = 0;
     int      fullscreen = 0;
@@ -1312,6 +1317,70 @@ static void send_structure_map_notify(X11Server* server, X11Window* win, int map
     send_to_client(server, oc, ev, 32);
 }
 
+/* Walk a window up to its top-level ancestor (the one parented to root),
+ * summing each window's position along the way. Returns the top-level's id and
+ * writes the accumulated offset of `win`'s origin in that top-level's
+ * coordinate space; 0 if the chain does not reach a root child. */
+static uint32_t child_toplevel_and_offset(X11Server* server, X11Window* win,
+                                          int* offx, int* offy) {
+    int ox = 0, oy = 0;
+    X11Window* w = win;
+    int guard = 0;
+    while (w && w->parent_id != server->root_window_id && guard++ < 64) {
+        ox += w->x; oy += w->y;
+        X11Window* p = find_window(server, w->parent_id);
+        if (!p || p == w) return 0;
+        w = p;
+    }
+    if (!w || w->parent_id != server->root_window_id) return 0;
+    *offx = ox; *offy = oy;
+    return w->id;
+}
+
+/* A native subwindow with GPU content (a reparented video output) becomes a
+ * child surface: the shell composites its texture INSIDE the top-level, at the
+ * accumulated offset, in the window's own z-band — not as a decorated window
+ * on root and not as an overlay above the chrome. Announced lazily on the
+ * first presented buffer, when both the size and the toplevel are settled. */
+static void maybe_announce_child_surface(X11Server* server, uint32_t window) {
+    X11Window* win = find_window(server, window);
+    if (!win || win->child_surface_announced || win->override_redirect) return;
+    if (win->parent_id == server->root_window_id) return;   /* a real toplevel */
+    int offx = 0, offy = 0;
+    uint32_t top = child_toplevel_and_offset(server, win, &offx, &offy);
+    if (top == 0) return;
+    X11Window* tw = find_window(server, top);
+    if (!tw || !tw->shell_managed) return;   /* toplevel not shown yet */
+    win->child_surface_announced = 1;
+    fprintf(stderr, "[X11Server] child surface 0x%x in toplevel 0x%x at +%d+%d %dx%d\n",
+            window, top, offx, offy, win->width, win->height);
+    if (server->config.on_child_surface_mapped)
+        server->config.on_child_surface_mapped(server->config.userdata, window,
+                                               top, offx, offy,
+                                               win->width, win->height);
+}
+
+/* Re-send a child surface's offset/size after it moved or resized inside its
+ * toplevel (Qt resizes the video widget to the window). */
+static void update_child_surface(X11Server* server, X11Window* win) {
+    if (!win || !win->child_surface_announced) return;
+    int offx = 0, offy = 0;
+    uint32_t top = child_toplevel_and_offset(server, win, &offx, &offy);
+    if (top == 0) return;
+    if (server->config.on_child_surface_mapped)
+        server->config.on_child_surface_mapped(server->config.userdata, win->id,
+                                               top, offx, offy,
+                                               win->width, win->height);
+}
+
+/* The subwindow went away (unmapped, destroyed, or reparented back to root). */
+static void drop_child_surface(X11Server* server, X11Window* win) {
+    if (!win || !win->child_surface_announced) return;
+    win->child_surface_announced = 0;
+    if (server->config.on_child_surface_unmapped)
+        server->config.on_child_surface_unmapped(server->config.userdata, win->id);
+}
+
 /* _NET_ACTIVE_WINDOW on the root. */
 static void set_root_active_window(X11Server* server, uint32_t wid) {
     X11Window* root = find_window(server, server->root_window_id);
@@ -2115,6 +2184,8 @@ void x11_server_dispatch(X11Server* server) {
                     if (is_toplevel && is_override && server->config.on_popup_unmapped) {
                         server->config.on_popup_unmapped(server->config.userdata, wid);
                     }
+                    if (it->child_surface_announced && server->config.on_child_surface_unmapped)
+                        server->config.on_child_surface_unmapped(server->config.userdata, wid);
                     stack_remove(server, wid);
                     if (server->focus_window_id == wid) {
                         server->focus_window_id = 0;
@@ -2569,6 +2640,54 @@ static void handle_request(X11Server* server, int client_idx,
         break;
     }
 
+    case X11_REPARENT_WINDOW: {
+        /* Move a window to a new parent. VLC does exactly this to embed its
+         * video: it creates the GL output window on root, reparents it under
+         * the Qt video widget, then maps it. Ignoring this (the old behaviour)
+         * left the video a decorated top-level on the desktop — a second
+         * window. */
+        uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 4);
+        uint32_t newp = *reinterpret_cast<const uint32_t*>(data + 8);
+        int16_t rx = *reinterpret_cast<const int16_t*>(data + 12);
+        int16_t ry = *reinterpret_cast<const int16_t*>(data + 14);
+        X11Window* win = find_window(server, wid);
+        if (win) {
+            uint32_t oldp = win->parent_id;
+            fprintf(stderr, "[X11Server] ReparentWindow: 0x%x  0x%x -> 0x%x  +%d+%d\n",
+                    wid, oldp, newp, rx, ry);
+            /* A currently-shown decorated toplevel reparented off root stops
+             * being a window of its own; drop the shell's frame first (the
+             * usual order is reparent-before-map, so this rarely fires). */
+            if (win->shell_managed && oldp == server->root_window_id &&
+                newp != server->root_window_id) {
+                if (server->config.on_window_unmapped)
+                    server->config.on_window_unmapped(server->config.userdata, wid);
+                win->shell_managed = 0;
+                stack_remove(server, wid);
+            }
+            win->parent_id = newp;
+            win->x = rx; win->y = ry;
+            /* Back to root — it is a top-level again, not a child surface. */
+            if (newp == server->root_window_id) drop_child_surface(server, win);
+            else if (win->child_surface_announced) update_child_surface(server, win);
+            /* ReparentNotify to the window's own client (StructureNotify). */
+            int oc = static_cast<int>(win->owner_client);
+            if ((win->event_mask & 0x20000) && oc >= 0 && oc < server->client_count &&
+                server->clients[oc].fd >= 0) {
+                uint8_t ev[32] = {};
+                ev[0] = 21; /* ReparentNotify */
+                *reinterpret_cast<uint16_t*>(ev + 2) = server->clients[oc].sequence;
+                *reinterpret_cast<uint32_t*>(ev + 4) = wid;
+                *reinterpret_cast<uint32_t*>(ev + 8) = wid;
+                *reinterpret_cast<uint32_t*>(ev + 12) = newp;
+                *reinterpret_cast<int16_t*>(ev + 16) = rx;
+                *reinterpret_cast<int16_t*>(ev + 18) = ry;
+                ev[20] = static_cast<uint8_t>(win->override_redirect);
+                send_to_client(server, oc, ev, 32);
+            }
+        }
+        break;
+    }
     case X11_MAP_WINDOW: {
         uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 4);
         X11Window* win = find_window(server, wid);
@@ -2741,6 +2860,7 @@ static void handle_request(X11Server* server, int client_idx,
             win->shell_managed = 0;   /* the shell drops its window on unmap */
             win->iconic = 0;
             stack_remove(server, wid);
+            drop_child_surface(server, win);
             if (was_mapped && is_toplevel && !is_override &&
                 server->config.on_window_unmapped) {
                 server->config.on_window_unmapped(server->config.userdata, wid);
@@ -2769,6 +2889,7 @@ static void handle_request(X11Server* server, int client_idx,
                 if (is_toplevel && is_override && server->config.on_popup_unmapped) {
                     server->config.on_popup_unmapped(server->config.userdata, wid);
                 }
+                drop_child_surface(server, &(*it));
                 if (server->focus_window_id == wid) {
                     server->focus_window_id = 0;
                     server->focus_client_idx = -1;
@@ -2798,6 +2919,8 @@ static void handle_request(X11Server* server, int client_idx,
             if (mask & 0x40) { stack_mode = static_cast<int>(data[off]); off += 4; }
             (void)sibling;
 
+            if ((mask & 0x0F) && win->child_surface_announced)
+                update_child_surface(server, win);
             if (server->config.on_window_configured && (mask & 0x0F) &&
                 win->parent_id == server->root_window_id) {
                 /* Same coordinate space the window was handed over in: an
@@ -4288,6 +4411,7 @@ static void handle_dri3(X11Server* server, int client_idx, uint8_t minor,
         if (pix && pix->dma_fd < 0) {
             if (pixmap_allocate_storage(server, pix) >= 0 &&
                 pix->window_id != 0 && server->config.on_present_buffer) {
+                maybe_announce_child_surface(server, pix->window_id);
                 server->config.on_present_buffer(server->config.userdata,
                     pix->window_id, pix->dma_fd, pix->width, pix->height,
                     pix->stride, pix->fourcc);
@@ -4423,6 +4547,7 @@ static void handle_present(X11Server* server, int client_idx, uint8_t minor,
         if (pix && pix->dma_fd >= 0) {
             pix->window_id = window;
             pix->last_serial = serial;
+            maybe_announce_child_surface(server, window);
             if (server->config.on_present_buffer) {
                 fprintf(stderr, "[X11Server] Calling on_present_buffer: win=0x%x fd=%d %dx%d stride=%d fourcc=0x%x\n",
                         window, pix->dma_fd, pix->width, pix->height, pix->stride, pix->fourcc);

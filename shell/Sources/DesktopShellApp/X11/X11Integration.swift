@@ -36,6 +36,7 @@ class X11Integration {
     private var windowTextures: [UInt32: Int64] = [:]   // x11_window_id → textureId
     private var windowIds: [UInt32: String] = [:]        // x11_window_id → shell windowId
     private var popupIds: [UInt32: String] = [:]         // x11_window_id → shell popupId
+    private var childSurfaceWindows: Set<UInt32> = []    // x11 windows shown as child surfaces
     private var lastPointerWindowId: UInt32 = 0          // track enter/leave
 
     // Callbacks set by DesktopShell
@@ -61,6 +62,15 @@ class X11Integration {
     /// outside the shape already arrive transparent; the shell must not paint
     /// a backdrop of its own under them.
     var onWindowShaped: ((_ windowId: UInt32, _ shaped: Bool) -> Void)?
+    /// A nested native subwindow (a reparented video output, e.g. VLC) was
+    /// mapped inside a toplevel. The shell composites its texture INSIDE the
+    /// toplevel at (offsetX, offsetY) physical px from the toplevel origin,
+    /// in the window's own z-band. Re-fired when it moves or resizes.
+    var onNewChildSurface: ((_ windowId: UInt32, _ textureId: Int,
+                             _ toplevelWindowId: UInt32,
+                             _ offsetX: Int, _ offsetY: Int,
+                             _ width: Int, _ height: Int) -> Void)?
+    var onChildSurfaceUnmapped: ((_ windowId: UInt32) -> Void)?
     /// A popup's presented buffer changed size (menus map small, then grow).
     var onPopupBufferResized: ((_ popupId: String, _ physWidth: Int, _ physHeight: Int) -> Void)?
     var onTitleChanged: ((_ windowId: String, _ title: String) -> Void)?
@@ -176,6 +186,16 @@ class X11Integration {
         config.on_window_shaped = { (userdata, windowId, shaped) in
             let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
             this.onWindowShaped?(windowId, shaped != 0)
+        }
+        config.on_child_surface_mapped = { (userdata, windowId, toplevelId, x, y, w, h) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.handleChildSurfaceMapped(windowId, toplevelId: toplevelId,
+                                          x: Int(x), y: Int(y),
+                                          width: Int(w), height: Int(h))
+        }
+        config.on_child_surface_unmapped = { (userdata, windowId) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            this.handleChildSurfaceUnmapped(windowId)
         }
 
         // GetImage / screen capture (Zoom screen share): arm the compositor's
@@ -400,6 +420,29 @@ class X11Integration {
     /// Reverse of shellWindowId(forX11Window:).
     func x11WindowId(forShellWindowId shellWindowId: String) -> UInt32? {
         return windowIds.first(where: { $0.value == shellWindowId })?.key
+    }
+
+    /// A nested native subwindow with GPU content (VLC's reparented video
+    /// output). Give it a texture like any window — the present paths key off
+    /// windowTextures — and tell the shell to composite it inside its
+    /// toplevel. Re-entrant: the server re-announces on move/resize, so an
+    /// existing surface just gets a fresh offset/size, not a new texture.
+    private func handleChildSurfaceMapped(_ windowId: UInt32, toplevelId: UInt32,
+                                          x: Int, y: Int, width: Int, height: Int) {
+        if windowTextures[windowId] == nil {
+            windowTextures[windowId] = textureRegistry.registerTexture(engine: engine)
+        }
+        guard let textureId = windowTextures[windowId] else { return }
+        childSurfaceWindows.insert(windowId)
+        onNewChildSurface?(windowId, Int(textureId), toplevelId, x, y, width, height)
+    }
+
+    private func handleChildSurfaceUnmapped(_ windowId: UInt32) {
+        guard childSurfaceWindows.remove(windowId) != nil else { return }
+        onChildSurfaceUnmapped?(windowId)
+        if let textureId = windowTextures.removeValue(forKey: windowId) {
+            textureRegistry.unregisterTexture(engine: engine, id: textureId)
+        }
     }
 
     private func handleWindowDestroyed(_ windowId: UInt32) {

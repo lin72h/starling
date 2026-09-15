@@ -7,8 +7,24 @@ import FlutterSwiftBridge
 // MARK: - WindowInfo
 
 /// Model for a single desktop window.
+/// A nested native subwindow with its own GPU buffer, composited INSIDE a
+/// toplevel window's content area (VLC's reparented video output). Offsets and
+/// sizes are physical px in the toplevel's coordinate space; the window widget
+/// scales them by the shell DPI.
+struct ChildSurface {
+    let x11WindowId: UInt32
+    let textureId: Int
+    var offsetXPhys: Int
+    var offsetYPhys: Int
+    var widthPhys: Int
+    var heightPhys: Int
+    var flipY: Bool = true
+}
+
 class WindowInfo {
     let id: String
+    /// Nested native subwindows composited inside this window's content.
+    var childSurfaces: [ChildSurface] = []
     var title: String
     var appId: String
     /// What the client called itself: `xdg_toplevel.set_app_id` for a Wayland
