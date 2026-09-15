@@ -3936,6 +3936,21 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         // onBufferPresented no longer needed — sync resize tracks via onWindowBufferResized
 
+        // WM_CLASS is the X11 spelling of a Wayland app_id: resolve it the
+        // same way, so an X11 window groups under its catalog app and the
+        // dock shows the app's icon instead of nothing.
+        x11.onAppIdChanged = { [weak self] (windowId: String, appId: String) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId })
+            else { return }
+            guard win.wmClass != appId else { return }
+            self.setState {
+                win.wmClass = appId
+                win.title = Self._displayTitle(win.title, for: win)
+            }
+            self._loadIconTexturesForRunningApps()
+        }
+
         x11.onTitleChanged = { [weak self] (windowId: String, title: String) in
             guard let self = self else { return }
             if let win = self.windowManager.windows.first(where: { $0.id == windowId }) {

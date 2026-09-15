@@ -1317,6 +1317,27 @@ static void send_structure_map_notify(X11Server* server, X11Window* win, int map
     send_to_client(server, oc, ev, 32);
 }
 
+/* WM_CLASS is a STRING property holding "instance\0class\0". Hand the shell
+ * the class (the instance if there is no class): that is what a .desktop
+ * entry's StartupWMClass names, and matching is case-insensitive on the
+ * shell side (VLC sets "vlc", its entry says "VLC"). */
+static void announce_wm_class(X11Server* server, X11Window* win) {
+    if (!win || !server->config.on_app_id_changed) return;
+    uint32_t wm_class = intern_atom(server, "WM_CLASS", 0);
+    for (auto& p : win->properties) {
+        if (p.atom != wm_class || p.data.empty()) continue;
+        std::string instance, cls;
+        size_t i = 0;
+        while (i < p.data.size() && p.data[i]) instance.push_back(static_cast<char>(p.data[i++]));
+        if (i < p.data.size()) i++;                     /* the NUL */
+        while (i < p.data.size() && p.data[i]) cls.push_back(static_cast<char>(p.data[i++]));
+        const std::string& id = cls.empty() ? instance : cls;
+        if (id.empty()) return;
+        server->config.on_app_id_changed(server->config.userdata, win->id, id.c_str());
+        return;
+    }
+}
+
 /* Walk a window up to its top-level ancestor (the one parented to root),
  * summing each window's position along the way. Returns the top-level's id and
  * writes the accumulated offset of `win`'s origin in that top-level's
@@ -2749,6 +2770,8 @@ static void handle_request(X11Server* server, int client_idx,
                             server->config.on_title_changed(server->config.userdata, wid, title);
                         }
                     }
+                    /* And the class, for the dock's icon and grouping. */
+                    announce_wm_class(server, win);
                 }
                 x11_server_set_focus(server, wid);
 
@@ -3099,6 +3122,12 @@ static void handle_request(X11Server* server, int client_idx,
             prop.length = data_len;
             prop.data.assign(prop_data, prop_data + byte_len);
 
+            /* WM_CLASS: the window's app identity. Announced now for a
+             * window the shell already shows; a pre-map set is re-announced
+             * at map time. */
+            for (auto& a : server->atoms)
+                if (a.id == property && a.name == "WM_CLASS" && win->shell_managed)
+                    announce_wm_class(server, win);
             /* Check for title changes */
             for (auto& a : server->atoms) {
                 if (a.id == property &&

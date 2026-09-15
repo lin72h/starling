@@ -74,6 +74,9 @@ class X11Integration {
     /// A popup's presented buffer changed size (menus map small, then grow).
     var onPopupBufferResized: ((_ popupId: String, _ physWidth: Int, _ physHeight: Int) -> Void)?
     var onTitleChanged: ((_ windowId: String, _ title: String) -> Void)?
+    /// The window's WM_CLASS class name — the X11 spelling of a Wayland
+    /// app_id; the shell resolves it against the catalog the same way.
+    var onAppIdChanged: ((_ windowId: String, _ appId: String) -> Void)?
     var onBufferPresented: ((_ windowId: String) -> Void)?
     /// Called when a client's buffer size changes (physical width/height).
     var onWindowBufferResized: ((_ windowId: String, _ physWidth: Int, _ physHeight: Int) -> Void)?
@@ -170,6 +173,11 @@ class X11Integration {
             let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
             guard let title = title else { return }
             this.handleTitleChanged(windowId, title: String(cString: title))
+        }
+        config.on_app_id_changed = { (userdata, windowId, appId) in
+            let this = Unmanaged<X11Integration>.fromOpaque(userdata!).takeUnretainedValue()
+            guard let appId = appId, let shellWindowId = this.windowIds[windowId] else { return }
+            this.onAppIdChanged?(shellWindowId, String(cString: appId))
         }
 
         // Declared in the header since the beginning and never registered —

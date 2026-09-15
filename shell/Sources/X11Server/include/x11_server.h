@@ -97,6 +97,14 @@ typedef struct X11ServerConfig {
     /* Window title changed. */
     void (*on_title_changed)(void* userdata, uint32_t window_id,
                               const char* title);
+    /* The window's WM_CLASS — the X11 spelling of a Wayland app_id. The class
+     * name (instance if the class is empty) is what a .desktop entry's
+     * StartupWMClass names, so the shell resolves it against the app catalog
+     * exactly as it resolves xdg_toplevel.set_app_id, and the dock shows the
+     * app's icon instead of nothing. Sent when the property is set and again
+     * at map time (toolkits set it before mapping). */
+    void (*on_app_id_changed)(void* userdata, uint32_t window_id,
+                               const char* app_id);
     /* A window-manager request from a client (see X11WindowRequest). The
      * shell applies it with its own window operations; the server learns the
      * outcome from x11_server_set_window_state / _position. */
