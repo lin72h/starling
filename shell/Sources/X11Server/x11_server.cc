@@ -194,6 +194,8 @@ static constexpr uint8_t X11_GET_PROPERTY          = 20;
 static constexpr uint8_t X11_DELETE_PROPERTY       = 19;
 static constexpr uint8_t X11_GRAB_POINTER          = 26;
 static constexpr uint8_t X11_UNGRAB_POINTER        = 27;
+static constexpr uint8_t X11_GRAB_KEYBOARD         = 31;
+static constexpr uint8_t X11_UNGRAB_KEYBOARD       = 32;
 static constexpr uint8_t X11_GRAB_BUTTON           = 28;
 static constexpr uint8_t X11_UNGRAB_BUTTON         = 29;
 static constexpr uint8_t X11_GRAB_KEY              = 33;
@@ -3231,6 +3233,24 @@ static void handle_request(X11Server* server, int client_idx,
         break;
     }
 
+    case X11_GRAB_KEYBOARD: {
+        /* XGrabKeyboard has a reply, and Qt opens every menu with one: it
+         * maps the popup, grabs the keyboard, and blocks in
+         * xcb_grab_keyboard_reply. Left unanswered (it was neither handled
+         * nor in the needs-reply table) the whole Qt event loop hung — the
+         * menu never painted and the app ignored every click after. Keys
+         * keep flowing to the focused toplevel; Qt routes them to its active
+         * popup itself, so Success is the honest answer. */
+        uint32_t gw = *reinterpret_cast<const uint32_t*>(data + 4);
+        fprintf(stderr, "[X11Server] GrabKeyboard win=0x%x client=%d -> Success\n", gw, client_idx);
+        uint8_t reply[32] = {};
+        reply[0] = 1; reply[1] = 0;  /* status: Success */
+        *reinterpret_cast<uint16_t*>(reply + 2) = seq;
+        send_to_client(server, client_idx, reply, 32);
+        break;
+    }
+    case X11_UNGRAB_KEYBOARD:
+        break;
     case X11_UNGRAB_POINTER:
         if (server->grab_window) {
             fprintf(stderr, "[X11Server] UngrabPointer (was 0x%x)\n", server->grab_window);
