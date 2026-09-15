@@ -3859,6 +3859,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     win.childSurfaces.append(surface)
                 }
                 self._childSurfaceOwner[windowId] = shellWinId
+                // The window widget is cached and reused by identity while
+                // only its position changes; a child surface is not part of
+                // that key, so drop the entry or the content area is never
+                // rebuilt and the video stays invisible.
+                self._windowChildCache.removeValue(forKey: shellWinId)
             }
         }
 
@@ -3868,6 +3873,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 if let owner = self._childSurfaceOwner.removeValue(forKey: windowId),
                    let win = self.windowManager.windows.first(where: { $0.id == owner }) {
                     win.childSurfaces.removeAll { $0.x11WindowId == windowId }
+                    self._windowChildCache.removeValue(forKey: owner)
                 }
             }
         }
