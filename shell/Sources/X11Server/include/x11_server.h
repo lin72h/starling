@@ -230,6 +230,12 @@ void x11_server_close_window(X11Server* server, uint32_t window_id);
 /* pid of the client owning a window, from peer credentials. 0 if unknown. */
 pid_t x11_server_window_pid(X11Server* server, uint32_t window_id);
 
+/* The window this one is a dialog FOR (WM_TRANSIENT_FOR), or 0. A dialog
+ * placed by its toolkit before the parent was placed lands at the top-left
+ * (it was centred on a parent still at 0,0); the shell centres it over the
+ * parent instead, as every window manager does. */
+uint32_t x11_server_window_transient_for(X11Server* server, uint32_t window_id);
+
 /* Send EnterNotify to a window. */
 void x11_server_enter_notify(X11Server* server, uint32_t window_id,
                               int x, int y);

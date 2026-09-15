@@ -6755,6 +6755,20 @@ pid_t x11_server_window_pid(X11Server* server, uint32_t window_id) {
     return server->clients[owner].pid;
 }
 
+uint32_t x11_server_window_transient_for(X11Server* server, uint32_t window_id) {
+    if (!server) return 0;
+    X11Window* win = find_window(server, window_id);
+    if (!win) return 0;
+    uint32_t atom = intern_atom(server, "WM_TRANSIENT_FOR", 0);
+    for (auto& p : win->properties) {
+        if (p.atom != atom || p.format != 32 || p.data.size() < 4) continue;
+        uint32_t parent = 0;
+        std::memcpy(&parent, p.data.data(), 4);
+        return parent == server->root_window_id ? 0 : parent;
+    }
+    return 0;
+}
+
 void x11_server_pointer_button(X11Server* server, uint32_t button,
                                 int pressed, int x, int y) {
     if (!server || server->focus_window_id == 0 || server->focus_client_idx < 0) return;

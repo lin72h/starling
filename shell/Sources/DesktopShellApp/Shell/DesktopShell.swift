@@ -3589,10 +3589,29 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let winLogH = max(60.0, Double(height) / dpi) + DesktopTheme.kTitleBarHeight
             // x/y are where the client wants its CONTENT; the frame's title
             // bar goes above that, so the frame starts one bar higher.
-            let winLogX = (x != 0) ? Double(x) / dpi
+            var winLogX = (x != 0) ? Double(x) / dpi
                                    : max(0.0, (screenLogW - winLogW) / 2.0)
-            let winLogY = (y != 0) ? Double(y) / dpi - DesktopTheme.kTitleBarHeight
+            var winLogY = (y != 0) ? Double(y) / dpi - DesktopTheme.kTitleBarHeight
                                    : max(0.0, (screenLogH - winLogH) / 2.0)
+            // A dialog is centred over the window it belongs to, whatever
+            // position its toolkit asked for: Qt centres a dialog on its
+            // parent's geometry as IT knows it, and at first-run time (VLC's
+            // privacy prompt) the parent has not been placed yet, so the
+            // request is computed against 0,0 and lands under the status
+            // bar. Every window manager overrides this the same way.
+            var transientForShellId: String? = nil
+            if let parentX11 = x11.transientFor(windowId: windowId),
+               let parentShellId = x11.shellWindowId(forX11Window: parentX11),
+               let parent = self.windowManager.windows.first(where: { $0.id == parentShellId }) {
+                winLogX = parent.rect.left + (parent.rect.width - winLogW) / 2.0
+                winLogY = parent.rect.top + (parent.rect.height - winLogH) / 2.0
+                transientForShellId = parentShellId
+            }
+            // The frame stays in the work area: a title bar under the status
+            // bar cannot be grabbed, and a window off the right or bottom
+            // edge is a window the user cannot see.
+            winLogX = max(0.0, min(winLogX, screenLogW - winLogW))
+            winLogY = max(DesktopTheme.kStatusBarHeight, min(winLogY, screenLogH - winLogH))
             let fullRect = Rect.fromLTWH(winLogX, winLogY, winLogW, winLogH)
             self.setState {
                 shellWindowId = self.windowManager.addWindow(
@@ -3669,6 +3688,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 win.onRectChanged = { [weak win] _ in if let w = win { push(w) } }
                 win.onStateChanged = { [weak win] in if let w = win { push(w) } }
                 push(win)
+                win.transientFor = transientForShellId
+            }
+            // Dialogs that arrived BEFORE their parent (VLC shows its
+            // first-run prompt before its main window maps): now that the
+            // parent exists, centre them over it and keep them above it.
+            for child in self.windowManager.windows where child.id != shellWindowId {
+                guard let childX11 = x11.x11WindowId(forShellWindowId: child.id),
+                      x11.transientFor(windowId: childX11) == windowId else { continue }
+                let cw = child.rect.width, ch = child.rect.height
+                let cx = max(0.0, min(fullRect.left + (fullRect.width - cw) / 2.0, screenLogW - cw))
+                let cy = max(DesktopTheme.kStatusBarHeight,
+                             min(fullRect.top + (fullRect.height - ch) / 2.0, screenLogH - ch))
+                self.setState {
+                    child.transientFor = shellWindowId
+                    child.rect = Rect.fromLTWH(cx, cy, cw, ch)
+                    self.windowManager.bringToFront(child.id)
+                }
             }
             return shellWindowId
         }
@@ -3684,7 +3720,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if let shellId = x11.shellWindowId(forX11Window: windowId),
                let win = self.windowManager.windows.first(where: { $0.id == shellId }) {
                 let bar = win.isFullscreen ? 0.0 : DesktopTheme.kTitleBarHeight
-                let rect = Rect.fromLTWH(Double(x) / dpi, Double(y) / dpi - bar,
+                // A client may move itself, but not its title bar under the
+                // status bar (fullscreen excepted: it owns the whole screen).
+                let minTop = win.isFullscreen ? 0.0 : DesktopTheme.kStatusBarHeight
+                let rect = Rect.fromLTWH(Double(x) / dpi,
+                                         max(minTop, Double(y) / dpi - bar),
                                          max(80.0, Double(width) / dpi),
                                          max(60.0, Double(height) / dpi) + bar)
                 self.setState { win.rect = rect }

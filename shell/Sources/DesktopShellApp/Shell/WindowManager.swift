@@ -25,6 +25,9 @@ class WindowInfo {
     let id: String
     /// Nested native subwindows composited inside this window's content.
     var childSurfaces: [ChildSurface] = []
+    /// The window this one is a dialog for (X11 WM_TRANSIENT_FOR), as a
+    /// shell window id. Raising the parent raises it too.
+    var transientFor: String? = nil
     var title: String
     var appId: String
     /// What the client called itself: `xdg_toplevel.set_app_id` for a Wayland
@@ -732,6 +735,13 @@ class WindowManagerState {
         win.zIndex = nextZIndex
         nextZIndex += 1
         focusedWindowId = id
+        // A dialog stays above the window it belongs to: raising the parent
+        // raises its dialogs after it, so a modal prompt is never buried
+        // under the very window it is blocking.
+        for child in windows where child.transientFor == id && child.id != id {
+            child.zIndex = nextZIndex
+            nextZIndex += 1
+        }
     }
 
     // MARK: - Move & Resize

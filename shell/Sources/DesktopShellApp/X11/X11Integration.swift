@@ -695,6 +695,13 @@ class X11Integration {
     /// Where the shell composites the window's content, root-absolute device
     /// px. Keeps the server's TranslateCoordinates/GetGeometry answers — and
     /// the ConfigureNotify a client gets — truthful about where it really is.
+    /// The toplevel this window is a dialog for (WM_TRANSIENT_FOR), if any.
+    func transientFor(windowId: UInt32) -> UInt32? {
+        guard let server = server else { return nil }
+        let p = x11_server_window_transient_for(server, windowId)
+        return p == 0 ? nil : p
+    }
+
     func setWindowPosition(windowId: UInt32, x: Int, y: Int) {
         guard let server = server else { return }
         x11_server_set_window_position(server, windowId, Int32(x), Int32(y))
