@@ -2729,6 +2729,26 @@ static void handle_request(X11Server* server, int client_idx,
                      * announced to a shell that had no window for it yet. */
                     if (win->shaped && server->config.on_window_shaped)
                         server->config.on_window_shaped(server->config.userdata, wid, 1);
+                    /* Likewise the title: toolkits set WM_NAME/_NET_WM_NAME
+                     * BEFORE mapping, when the shell had no window to name,
+                     * so every X11 window opened as "X11 App" until the app
+                     * next changed its title (VLC: until a file loaded). */
+                    if (server->config.on_title_changed) {
+                        uint32_t net_name = intern_atom(server, "_NET_WM_NAME", 0);
+                        uint32_t wm_name = intern_atom(server, "WM_NAME", 0);
+                        const X11Property* tp = nullptr;
+                        for (auto& p : win->properties)
+                            if (p.atom == net_name && !p.data.empty()) { tp = &p; break; }
+                        if (!tp)
+                            for (auto& p : win->properties)
+                                if (p.atom == wm_name && !p.data.empty()) { tp = &p; break; }
+                        if (tp) {
+                            char title[256] = {};
+                            size_t n = tp->data.size() < 255 ? tp->data.size() : 255;
+                            std::memcpy(title, tp->data.data(), n);
+                            server->config.on_title_changed(server->config.userdata, wid, title);
+                        }
+                    }
                 }
                 x11_server_set_focus(server, wid);
 
