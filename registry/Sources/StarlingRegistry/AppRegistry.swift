@@ -314,6 +314,13 @@ public final class AppRegistry: @unchecked Sendable {
         guard !running.isEmpty else { return [] }
         var out: Set<String> = []
         for app in apps where app.installed {
+            // A sandboxed app's exe is a path inside its own mount namespace
+            // (/app/bin/…), so it can never match a host path. Its identity
+            // comes from the sandbox instead: see runningExecutables().
+            if app.kind == .flatpak {
+                if running.contains("flatpak:" + app.exec) { out.insert(app.id) }
+                continue
+            }
             // Both forms: /usr/bin/gimp is a symlink to gimp-3.2, and which
             // one the kernel reports depends on which the launcher exec'd.
             let hit = app.bins.contains {
@@ -354,6 +361,22 @@ public final class AppRegistry: @unchecked Sendable {
             guard n > 0 else { continue }
             buf[n] = 0
             out.insert(stripDeleted(String(cString: buf)))
+            // A Flatpak sandbox mounts its manifest at /.flatpak-info; through
+            // /proc/<pid>/root it is readable from outside for our own
+            // processes. `name=` under [Application] is the app id, recorded
+            // as "flatpak:<id>" so a .flatpak record can match on it.
+            let info = "/proc/\(pid)/root/.flatpak-info"
+            guard access(info, R_OK) == 0,
+                  let text = try? String(contentsOfFile: info, encoding: .utf8)
+            else { continue }
+            var inApp = false
+            for line in text.split(separator: "\n") {
+                if line.hasPrefix("[") { inApp = (line == "[Application]"); continue }
+                if inApp, line.hasPrefix("name=") {
+                    out.insert("flatpak:" + String(line.dropFirst("name=".count)))
+                    break
+                }
+            }
         }
         return out
         #else
@@ -480,6 +503,14 @@ public final class AppRegistry: @unchecked Sendable {
                 var appIds = [wmClass, appId, "flatpak-\(appId)"]
                 var seen = Set<String>()
                 appIds = appIds.filter { seen.insert($0.lowercased()).inserted }
+                // Deep links: the entry's MimeType lists the schemes the app
+                // handles as x-scheme-handler/<scheme> (Telegram: tg, Zoom:
+                // zoommtg;zoomus). The catalog used to spell these out per
+                // app; with Flathub as the source they come from the app.
+                let schemes = kf.list("MimeType").compactMap { m -> String? in
+                    let p = "x-scheme-handler/"
+                    return m.hasPrefix(p) ? String(m.dropFirst(p.count)) : nil
+                }
 
                 order += 1
                 out.append(AppRecord(
@@ -491,7 +522,8 @@ public final class AppRegistry: @unchecked Sendable {
                     desktopEntries: [base], wmClasses: [wmClass], titleMatches: [],
                     renameWindows: false, debURL: nil, debMarker: nil,
                     desktopFile: dir + "/" + file, iconPath: iconPath,
-                    version: nil, installedAt: nil, installed: true, appIds: appIds))
+                    version: nil, installedAt: nil, installed: true, appIds: appIds,
+                    urlSchemes: schemes))
             }
         }
         return out
