@@ -72,7 +72,13 @@ if "--only" in sys.argv:
 # GIMP because it is a plain Ubuntu-archive package (no vendor repo, no
 # account) whose window carries an app_id and a title that names a document
 # rather than the app — the case app_id matching exists for.
-REAL_APP = "gimp"
+# The real third-party app the identity checks are built around. Third-party
+# apps come from Flathub now (the store's default source), so this is the
+# Flathub GIMP: its Flatpak id, the registry id the shell derives from it
+# (`flatpak-<id>`), and the process names to quit it by.
+REAL_APP_FLATPAK = "org.gimp.GIMP"
+REAL_APP = "flatpak-" + REAL_APP_FLATPAK
+REAL_APP_PROCS = ("gimp-3.2", "gimp")
 
 # A fake app for the offline install/remove check: no download, no vendor, no
 # network, and nothing on the machine to damage. It covers the part we own —
@@ -304,13 +310,14 @@ def drive(*actions: str) -> None:
                    check=True, capture_output=True)
 
 
-def app_run(app_id: str) -> subprocess.Popen:
+def app_run(*args: str) -> subprocess.Popen:
+    """`app-run <id>` for a catalog app, `app-run --flatpak <id>` for a Flatpak."""
     # The tier runs as root while the session belongs to $SUDO_USER, and the
     # runtime dir is per-user — app-run's own default would resolve to root's
     # dir, not the session's. The shell passes STARLING_XDG_DIR to every child
     # it spawns; do the same, aimed at the session actually under test.
     env = dict(os.environ, STARLING_XDG_DIR=os.path.dirname(broker_path()))
-    return subprocess.Popen([str(APP_RUN), app_id], env=env,
+    return subprocess.Popen([str(APP_RUN), *args], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -390,19 +397,19 @@ def check_real_install() -> None:
     if apps().get(REAL_APP, {}).get("installed"):
         raise Skip(f"{REAL_APP} is already installed")
 
-    result = subprocess.run(["sudo", str(APP_INSTALL), REAL_APP],
-                            capture_output=True, text=True, timeout=900)
+    # `app-install --flatpak <id>` is exactly what the store's Install button
+    # runs for a Flathub app (behind pkexec). A first install also fetches the
+    # app's runtime, so the budget is generous.
+    result = subprocess.run(["sudo", str(APP_INSTALL), "--flatpak", REAL_APP_FLATPAK],
+                            capture_output=True, text=True, timeout=1800)
     assert result.returncode == 0, \
-        f"app-install {REAL_APP} failed: {result.stderr.strip()[-200:]}"
-    # The record is what tells the desktop it happened, and it must carry the
-    # host facts resolved at install time — not just exist.
-    wait_for(lambda: apps()[REAL_APP]["installed"],
+        f"app-install --flatpak {REAL_APP_FLATPAK} failed: {result.stderr.strip()[-200:]}"
+    # No record file for a Flatpak: the registry discovers it from the
+    # exported .desktop entry (inotify on the exports dir), which is what
+    # must light it up in the launcher with no relogin.
+    wait_for(lambda: apps().get(REAL_APP, {}).get("installed"),
              f"the shell to show {REAL_APP} as installed")
-    records = Path(os.environ.get("STARLING_APP_RECORDS",
-                                  "/var/lib/starling/installed.d"))
-    record = (records / f"{REAL_APP}.app").read_text()
-    assert "WmClass=" in record, f"no WmClass recorded:\n{record}"
-    log(record.strip().replace("\n", " | "))
+    log(f"registry: {apps()[REAL_APP]}")
 
 
 @check("identity: a third-party window resolves to its app via app_id")
@@ -415,26 +422,26 @@ def check_third_party_identity() -> None:
     before = apps()[REAL_APP]
     assert not before["process"] and not before["window"], \
         "gimp is already running; quit it first"
-    assert "gimp" not in dock(), "gimp already has a dock icon"
+    assert REAL_APP not in dock(), "gimp already has a dock icon"
 
-    app_run("gimp")
+    app_run("--flatpak", REAL_APP_FLATPAK)
     try:
-        wait_for(lambda: apps()["gimp"]["process"], "gimp process")
+        wait_for(lambda: apps()[REAL_APP]["process"], "gimp process")
         log("process seen")
-        wait_for(lambda: apps()["gimp"]["window"], "gimp window")
+        wait_for(lambda: apps()[REAL_APP]["window"], "gimp window")
         log("window attributed to gimp")
-        wait_for(lambda: "gimp" in dock(), "gimp transient dock icon")
+        wait_for(lambda: REAL_APP in dock(), "gimp transient dock icon")
         log(f"dock: {dock()}")
     finally:
-        quit_app("gimp", "gimp-3.2")
-    wait_for(lambda: "gimp" not in dock(), "gimp icon to go away")
-    wait_for(lambda: not apps()["gimp"]["window"], "gimp window to go away")
+        quit_app(*REAL_APP_PROCS)
+    wait_for(lambda: REAL_APP not in dock(), "gimp icon to go away")
+    wait_for(lambda: not apps()[REAL_APP]["window"], "gimp window to go away")
     # And for the process itself. quit_app only signals, and the window and
     # dock icon both clear the moment the surface goes — while GIMP is still
     # tearing down. The removal check below requires it gone, so leaving that
     # to luck makes this a timing race between two checks: it survived only
     # while the desktop was small enough for GIMP to exit quickly.
-    wait_for(lambda: not apps()["gimp"]["process"], "gimp process to exit")
+    wait_for(lambda: not apps()[REAL_APP]["process"], "gimp process to exit")
 
 
 @check("identity: a window is NOT attributed to an app that merely shares its binary")
@@ -442,32 +449,33 @@ def check_identity_is_not_incidental() -> None:
     """Keeps the check above honest.
 
     "GIMP's window was attributed to gimp" would also pass if the shell simply
-    credited any window to any running app. The decoy fixture shares GIMP's
-    binary but declares a window class that matches nothing, so while GIMP runs
-    the shell must report the decoy as process=true, window=false. If that
+    credited any window to any running app. The decoy fixture claims GIMP's
+    sandboxed binary (/app/bin/gimp-3.2, the exe the kernel reports for the
+    Flathub GIMP) but declares a window class that matches nothing, so while
+    GIMP runs the shell must report the decoy as process=true, window=false. If that
     window ever turns true, attribution has stopped being app_id-driven.
     """
     decoy = apps().get("starlingnotgimp")
     if decoy is None:
         raise Skip("decoy fixture not present")
-    if not apps().get("gimp", {}).get("installed"):
+    if not apps().get(REAL_APP, {}).get("installed"):
         raise Skip("gimp is not installed")
-    assert not apps()["gimp"]["process"], "gimp is already running; quit it first"
+    assert not apps()[REAL_APP]["process"], "gimp is already running; quit it first"
 
-    app_run("gimp")
+    app_run("--flatpak", REAL_APP_FLATPAK)
     try:
-        wait_for(lambda: apps()["gimp"]["window"], "gimp window")
+        wait_for(lambda: apps()[REAL_APP]["window"], "gimp window")
         state = apps()["starlingnotgimp"]
         assert state["process"], (
-            "decoy should be seen as running — it shares GIMP's binary, so a "
+            "decoy should be seen as running — it claims GIMP's binary, so a "
             "false here means the process check stopped working")
         assert not state["window"], (
             "decoy was credited with GIMP's window: attribution is no longer "
             "driven by app_id")
         log("decoy: process=True window=False — attribution is app_id-driven")
     finally:
-        quit_app("gimp", "gimp-3.2")
-    wait_for(lambda: not apps()["gimp"]["process"], "gimp to exit")
+        quit_app(*REAL_APP_PROCS)
+    wait_for(lambda: not apps()[REAL_APP]["process"], "gimp to exit")
 
 
 def _reinstall_and_launch(app_id: str, query: str, *procs: str,

@@ -128,20 +128,23 @@ launcher with no relogin; `app-install` refuses to remove a running app; and
 **that real app removes again and leaves the launcher**.
 
 The install and remove of a real app are gated on `STARLING_TEST_INSTALL=1`
-(they download a package) and `test/vm.sh` turns them on. They matter for a
+(they download a package — for a Flatpak, its runtime too) and `test/vm.sh`
+turns them on. They matter for a
 reason beyond coverage: the app the identity checks need is *produced* by the
 install check rather than set up behind the tests' back. An earlier version
 ran `apt-get install gimp` and then `app-install --record gimp` — fabricating
 the end state with the repair tool, exercising none of the real path, and
 quietly making "can this desktop install an app?" a preconditon instead of a
-question. `app-install <id>` is exactly the subprocess the store's Install
-button runs; the store adds `pkexec`, and that hop is proved separately by the
+question. The real app is the Flathub GIMP (`org.gimp.GIMP`) — third-party
+apps come from Flathub now — and `app-install --flatpak <id>` is exactly the
+subprocess the store's Install button runs; the store adds `pkexec`, and that hop is proved separately by the
 `pkcheck` step in `test/vm.sh`.
 
 That fourth check is what keeps the third honest. "GIMP's window was
 attributed to gimp" would also pass if the shell credited any window to any
-running app — so `test/fixtures/starlingnotgimp.app` shares GIMP's binary and
-declares a window class matching nothing. While GIMP runs, the shell must
+running app — so `test/fixtures/starlingnotgimp.app` claims GIMP's sandboxed
+binary (`/app/bin/gimp-3.2`, the exe the kernel reports for the Flathub GIMP)
+and declares a window class matching nothing. While GIMP runs, the shell must
 report the decoy as process=true, window=false.
 
 The install/remove loop uses `test/fixtures/starlingselftest.app`: no vendor,
