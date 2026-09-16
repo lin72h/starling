@@ -389,6 +389,16 @@ public final class AppRegistry: @unchecked Sendable {
                 home + "/.local/share/flatpak/exports/share/applications"]
     }
 
+    /// Is this Flatpak app installed (system-wide or for the user)? The
+    /// store asks per row, straight from disk, so an install or removal done
+    /// anywhere else shows without a reload.
+    public static func isFlatpakInstalled(_ appId: String) -> Bool {
+        let fm = FileManager.default
+        return flatpakExportsDirs.contains {
+            fm.fileExists(atPath: $0 + "/" + appId + ".desktop")
+        }
+    }
+
     /// Synthesize a record for every installed Flatpak app not already
     /// described by a catalog record. Same shape as `discoverSnaps`; runs
     /// BEFORE it, so when both ecosystems hold the same app (VLC from Flathub
@@ -435,6 +445,16 @@ public final class AppRegistry: @unchecked Sendable {
                         }
                         if iconPath == nil {
                             iconPath = DesktopEntry.resolveIcon(icon, in: DesktopEntry.dataDirs())
+                        }
+                        // Many Flatpaks export only an SVG, which the engine
+                        // cannot decode. The App Store caches Flathub's PNG of
+                        // the same icon when it shows the app; use that.
+                        if iconPath == nil {
+                            let env = ProcessInfo.processInfo.environment
+                            let cache = env["XDG_CACHE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+                                ?? ((env["HOME"] ?? NSHomeDirectory()) + "/.cache")
+                            let p = cache + "/starling/flathub/" + appId + ".png"
+                            if fm.fileExists(atPath: p) { iconPath = p }
                         }
                     }
                 }

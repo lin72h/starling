@@ -231,8 +231,25 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     /// dock shows.
     private var running: Set<String> = []
 
+    // Flathub page. Collections load once on first visit; a search replaces
+    // them while the query is non-empty. Results are Flathub's own records
+    // turned into AppRecords, so every row below is the same row widget.
+    private let flathubSearch = TextEditingController()
+    private var flathubQuery = ""
+    private var flathubSearchGeneration = 0
+    private var flathubResults: [FlathubApp]? = nil
+    private var flathubSearching = false
+    private var flathubPopular: [FlathubApp]? = nil
+    private var flathubTrending: [FlathubApp]? = nil
+    private var flathubError: String? = nil
+    private var flathubLoadedCollections = false
+
     override func initState() {
         super.initState()
+        FlathubClient.shared.onIconsChanged = { [weak self] in
+            guard let self else { return }
+            self.setState {}
+        }
         ShellLink.shared.onRunningChanged = { [weak self] live in
             guard let self, live != self.running else { return }
             self.setState { self.running = live }
@@ -241,6 +258,7 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     }
 
     override func dispose() {
+        FlathubClient.shared.onIconsChanged = nil
         ShellLink.shared.onRunningChanged = nil
         ShellLink.shared.disconnect()
         super.dispose()
@@ -250,6 +268,7 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         switch entry.backend {
         case .host(let bins):     return HostStore.shared.isInstalled(bins: bins)
         case .deb(_, let marker): return DebStore.shared.isInstalled(entry.id, marker: marker)
+        case .flatpak(let appId): return HostStore.shared.isFlatpakInstalled(appId)
         }
     }
 
@@ -292,6 +311,15 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         case .deb(let url, let marker):
             DebStore.shared.install(entry.id, url: url, marker: marker,
                                     onUpdate: onUpdate)
+        case .flatpak(let appId):
+            HostStore.shared.installFlatpak(appId) { state in
+                onUpdate(state)
+                if case .installed = state {
+                    // The launcher and dock learn of it by watching Flatpak's
+                    // exports; the store's own list is refreshed here.
+                    DispatchQueue.main.async { AppRegistry.shared.reload() }
+                }
+            }
         }
     }
 
@@ -317,11 +345,22 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                                     onUpdate: onUpdate)
         case .deb:
             DebStore.shared.remove(entry.id, onUpdate: onUpdate)
+        case .flatpak(let appId):
+            HostStore.shared.removeFlatpak(appId) { state in
+                onUpdate(state)
+                if case .notInstalled = state {
+                    DispatchQueue.main.async { AppRegistry.shared.reload() }
+                }
+            }
         }
     }
 
     /// Open an installed app through the same launcher the dock uses.
     private func _open(_ entry: AppRecord) {
+        if case .flatpak(let appId) = entry.backend {
+            HostStore.shared.launchFlatpak(appId)
+            return
+        }
         HostStore.shared.launch(entry.exec)
     }
 
@@ -337,7 +376,9 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                 _buildSidebar(),
                 Expanded(child: selectedCategory == "Discover"
                     ? _buildDiscover()
-                    : _buildCategory(selectedCategory)),
+                    : selectedCategory == "Flathub"
+                        ? _buildFlathub()
+                        : _buildCategory(selectedCategory)),
             ])
         )
     }
@@ -404,6 +445,8 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                     // never a new category that fails to show up.
                     _sidebarItem("Discover"),
                 ] + _categories().map { _sidebarItem($0) } + [
+                    SizedBox(height: 10),
+                    _sidebarItem("Flathub"),
                     Expanded(child: SizedBox(expand: ())),
                 ])
             )
@@ -499,6 +542,176 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         )
     }
 
+    // MARK: Flathub page
+
+    private func _loadFlathubCollections() {
+        guard !flathubLoadedCollections else { return }
+        flathubLoadedCollections = true
+        FlathubClient.shared.collection("popular") { [weak self] apps, error in
+            guard let self else { return }
+            self.setState {
+                self.flathubPopular = apps
+                if let error, self.flathubPopular == nil { self.flathubError = error }
+            }
+        }
+        FlathubClient.shared.collection("trending") { [weak self] apps, _ in
+            guard let self else { return }
+            self.setState { self.flathubTrending = apps }
+        }
+    }
+
+    private func _flathubQueryChanged(_ q: String) {
+        let trimmed = q.trimmingCharacters(in: .whitespaces)
+        flathubQuery = trimmed
+        flathubSearchGeneration += 1
+        let gen = flathubSearchGeneration
+        if trimmed.count < 2 {
+            setState { flathubResults = nil; flathubSearching = false }
+            return
+        }
+        // Debounced: a keystroke starts a search only once typing pauses.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, gen == self.flathubSearchGeneration else { return }
+            self._runFlathubSearch(trimmed, generation: gen)
+        }
+    }
+
+    private func _runFlathubSearch(_ q: String, generation: Int) {
+        setState { flathubSearching = true; flathubError = nil }
+        FlathubClient.shared.search(q) { [weak self] apps, error in
+            guard let self, generation == self.flathubSearchGeneration else { return }
+            self.setState {
+                self.flathubSearching = false
+                self.flathubResults = apps ?? []
+                self.flathubError = error
+            }
+        }
+    }
+
+    /// A Flathub app as a store row: its record, with the icon fetch kicked
+    /// off the first time the row is built.
+    private func _flathubRow(_ app: FlathubApp) -> Widget {
+        FlathubClient.shared.loadIcon(appId: app.appId, url: app.iconURL, localPath: nil)
+        return _appRow(app.record())
+    }
+
+    private func _flathubList(_ apps: [FlathubApp]) -> Widget {
+        var rows: [Widget] = []
+        for app in apps {
+            if !rows.isEmpty { rows.append(_divider()) }
+            rows.append(_flathubRow(app))
+        }
+        return DecoratedBox(
+            decoration: BoxDecoration(
+                color: pal.card,
+                borderRadius: BorderRadius.circular(12)
+            ),
+            child: Padding(
+                padding: EdgeInsets(left: 16, top: 4, right: 16, bottom: 4),
+                child: Column(children: rows)
+            )
+        )
+    }
+
+    private func _sectionTitle(_ title: String) -> Widget {
+        Row(children: [
+            Text(title, style: TextStyle(
+                color: pal.textPrimary, fontSize: 17, fontWeight: .w600)),
+        ])
+    }
+
+    private func _note(_ text: String, color: Color? = nil) -> Widget {
+        Padding(
+            padding: EdgeInsets(left: 0, top: 16, right: 0, bottom: 0),
+            child: Row(children: [
+                Text(text, style: TextStyle(color: color ?? pal.textSecondary, fontSize: 14)),
+            ])
+        )
+    }
+
+    private func _buildFlathub() -> Widget {
+        _loadFlathubCollections()
+        var children: [Widget] = [
+            Row(children: [
+                Text("Flathub", style: TextStyle(
+                    color: pal.textPrimary, fontSize: 24, fontWeight: .w700)),
+            ]),
+            SizedBox(height: 4),
+            Row(children: [
+                Text("Apps from flathub.org, sandboxed, with a graphics driver the store keeps current.",
+                     style: TextStyle(color: pal.textSecondary, fontSize: 12)),
+            ]),
+            SizedBox(height: 14),
+            SizedBox(width: 420, child: MacosSearchField(
+                controller: flathubSearch,
+                placeholder: "Search Flathub",
+                onChanged: { [self] q in _flathubQueryChanged(q) },
+                onSubmitted: { [self] q in
+                    flathubSearchGeneration += 1
+                    _runFlathubSearch(q.trimmingCharacters(in: .whitespaces),
+                                      generation: flathubSearchGeneration)
+                }
+            )),
+            SizedBox(height: 20),
+        ]
+        if !flathubQuery.isEmpty {
+            if flathubSearching {
+                children.append(_note("Searching…"))
+            } else if let error = flathubError {
+                children.append(_note(error, color: pal.failedRed))
+            } else if let results = flathubResults {
+                if results.isEmpty {
+                    children.append(_note("Nothing on Flathub matches “\(flathubQuery)”."))
+                } else {
+                    children.append(_sectionTitle("Results"))
+                    children.append(SizedBox(height: 6))
+                    children.append(_flathubList(results))
+                }
+            }
+        } else {
+            let installed = AppRegistry.shared.apps.filter { $0.kind == .flatpak }
+            if !installed.isEmpty {
+                for rec in installed {
+                    FlathubClient.shared.loadIcon(appId: rec.exec, url: nil, localPath: rec.iconPath)
+                }
+                var rows: [Widget] = []
+                for rec in installed {
+                    if !rows.isEmpty { rows.append(_divider()) }
+                    rows.append(_appRow(rec))
+                }
+                children.append(_sectionTitle("Installed"))
+                children.append(SizedBox(height: 6))
+                children.append(DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: pal.card, borderRadius: BorderRadius.circular(12)),
+                    child: Padding(
+                        padding: EdgeInsets(left: 16, top: 4, right: 16, bottom: 4),
+                        child: Column(children: rows))
+                ))
+                children.append(SizedBox(height: 26))
+            }
+            if let error = flathubError, flathubPopular == nil {
+                children.append(_note(error, color: pal.failedRed))
+            } else if let popular = flathubPopular {
+                children.append(_sectionTitle("Popular"))
+                children.append(SizedBox(height: 6))
+                children.append(_flathubList(Array(popular.prefix(12))))
+                if let trending = flathubTrending, !trending.isEmpty {
+                    children.append(SizedBox(height: 26))
+                    children.append(_sectionTitle("Trending"))
+                    children.append(SizedBox(height: 6))
+                    children.append(_flathubList(Array(trending.prefix(12))))
+                }
+            } else {
+                children.append(_note("Loading Flathub…"))
+            }
+        }
+        return SingleChildScrollView(
+            padding: EdgeInsets(left: 24, top: 20, right: 24, bottom: 24),
+            child: Column(crossAxisAlignment: .start, children: children)
+        )
+    }
+
     private func _divider() -> Widget {
         return SizedBox(height: 1, child: ColoredBox(
             color: pal.separator, child: SizedBox(expand: ())))
@@ -552,7 +765,7 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                     Text(entry.name, style: TextStyle(
                         color: pal.textPrimary, fontSize: 14, fontWeight: .w600)),
                     SizedBox(height: 2),
-                    Text("\(entry.subtitle) — \(entry.category) · \(entry.publisher)",
+                    Text(_rowSubtitle(entry),
                          style: TextStyle(color: pal.textSecondary, fontSize: 12),
                          maxLines: 2),
                 ])),
@@ -563,7 +776,35 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     }
 
     /// Rounded-square app icon tile.
+    /// "summary — category · publisher", skipping whatever the record lacks
+    /// (an installed Flatpak discovered from disk has only a name).
+    private func _rowSubtitle(_ entry: AppRecord) -> String {
+        let tail = [entry.category, entry.publisher].filter { !$0.isEmpty }.joined(separator: " · ")
+        switch (entry.subtitle.isEmpty, tail.isEmpty) {
+        case (false, false): return "\(entry.subtitle) — \(tail)"
+        case (false, true):  return entry.subtitle
+        case (true, false):  return tail
+        case (true, true):   return entry.kind == .flatpak ? "Flatpak" : ""
+        }
+    }
+
     private func _appTile(_ entry: AppRecord, size: Double, radius: Double) -> Widget {
+        // A Flathub app carries its real icon, fetched and decoded once;
+        // until it lands (or if it never does) the glyph tile stands in.
+        if entry.kind == .flatpak, let icon = FlathubClient.shared.icons[entry.exec] {
+            return SizedBox(width: size, height: size, child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: pal.card,
+                    borderRadius: BorderRadius.circular(radius),
+                    boxShadow: [BoxShadow(
+                        color: Color(0x33000000), offset: Offset(0, 1), blurRadius: 4)]
+                ),
+                child: ClipRRect(
+                    borderRadius: BorderRadius.all(Radius(circular: radius)),
+                    child: CustomPaint(painter: FlathubIconPainter(icon))
+                )
+            ))
+        }
         return SizedBox(width: size, height: size, child: DecoratedBox(
             decoration: BoxDecoration(
                 color: tileColor(entry.glyph),

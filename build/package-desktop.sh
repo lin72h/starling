@@ -268,7 +268,7 @@ Section: x11
 Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Starling <dev@starling.build>
-Depends: $DEPS, libseat1, dbus, pkexec
+Depends: $DEPS, libseat1, dbus, pkexec, curl
 Recommends: gdm3 | lightdm | sddm, xwayland, x11-utils, xdg-utils, network-manager, ffmpeg, pipewire-pulse, pulseaudio-utils, snapd, lxpolkit, flatpak
 Conflicts: starling-desktop
 Replaces: starling-desktop

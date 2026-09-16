@@ -28,6 +28,8 @@ enum InstallBackend {
     /// the installed-apps layer over the read-only runtime. `marker` is the
     /// launchable path relative to the install root.
     case deb(url: String, marker: String)
+    /// A Flathub app; installed and removed through `app-install --flatpak`.
+    case flatpak(appId: String)
 }
 
 /// True on the sealed Starling image (ID=starling in /etc/os-release —
@@ -57,6 +59,7 @@ extension AppRecord {
     /// apt, so a catalog entry that names an official .deb is extracted into
     /// the installed-apps layer instead.
     var backend: InstallBackend {
+        if kind == .flatpak { return .flatpak(appId: exec) }
         if kOnStarlingImage, let url = debURL, let marker = debMarker {
             return .deb(url: url, marker: marker)
         }
@@ -108,6 +111,41 @@ final class HostStore: @unchecked Sendable {
 
     /// The store's Open button: launch through the same registry the dock
     /// uses. Fire-and-forget — the shell composites the window when it maps.
+    func isFlatpakInstalled(_ appId: String) -> Bool {
+        AppRegistry.isFlatpakInstalled(appId)
+    }
+
+    func installFlatpak(_ appId: String,
+                        onUpdate: @escaping @Sendable (InstallState) -> Void) {
+        run(["pkexec", appInstall, "--flatpak", appId],
+            initial: "Installing from Flathub…",
+            failureNoun: "Install",
+            removal: false,
+            done: .installed,
+            onUpdate: onUpdate)
+    }
+
+    func removeFlatpak(_ appId: String,
+                       onUpdate: @escaping @Sendable (InstallState) -> Void) {
+        run(["pkexec", appInstall, "--flatpak", "--remove", appId],
+            initial: "Removing…",
+            failureNoun: "Remove",
+            removal: true,
+            done: .notInstalled,
+            onUpdate: onUpdate)
+    }
+
+    /// Open a Flatpak the way the dock does: through app-run's --flatpak
+    /// recipe, which owns the sandbox's display, sound and session wiring.
+    func launchFlatpak(_ appId: String) {
+        let appRun = ProcessInfo.processInfo.environment["STARLING_APP_RUN"]
+            ?? "/usr/bin/app-run"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: appRun)
+        p.arguments = ["--flatpak", appId]
+        try? p.run()
+    }
+
     func launch(_ id: String) {
         let appRun = ProcessInfo.processInfo.environment["STARLING_APP_RUN"]
             ?? "/usr/bin/app-run"

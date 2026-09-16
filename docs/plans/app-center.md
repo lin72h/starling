@@ -82,3 +82,10 @@ software (~240% CPU vs ~9% on the same clip).
   added on first use. There is no Flathub storefront on the desktop yet;
   Ubuntu's App Center does not list Flathub.
 - Packaging: `flatpak` in Recommends beside `snapd`.
+- Storefront (2026-09-15): the App Store app has a **Flathub** page — search
+  (debounced, via flathub.org's public service through curl), Popular and
+  Trending, an Installed list, real icons (fetched once, cached under
+  `$XDG_CACHE_HOME/starling/flathub`, decoded with the engine codec). Results
+  become `AppRecord`s of kind `flatpak`, so the store's rows, install cluster
+  and `pkexec app-install --flatpak` plumbing are reused unchanged; Open goes
+  through `app-run --flatpak`. `curl` is now a package dependency.
