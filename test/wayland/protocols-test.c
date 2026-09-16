@@ -170,7 +170,8 @@ static struct {
     uint32_t outcfg_id; double outcfg_scale; int outcfg_count;
     uint32_t hints_surface; int32_t min_w, min_h, max_w, max_h; int hints_count;
     uint32_t popup_id; int popup_count;
-    uint32_t sub_id, sub_top; int32_t sub_x, sub_y; int sub_placed;
+    uint32_t sub_id, sub_top; int32_t sub_x, sub_y, sub_z; int sub_placed;
+    uint32_t watch_shm_sid; int watch_shm_count;
     uint32_t sub_unmapped_id; int sub_unmapped;
     uint32_t parent_child, parent_parent; int parent_count;
 } seen;
@@ -187,9 +188,10 @@ static void cb_new_popup(void* ctx, uint32_t sid, uint32_t parent, int x, int y,
     (void)ctx; (void)parent; (void)x; (void)y; (void)w; (void)h;
     LOCKED(seen.popup_id = sid; seen.popup_count++);
 }
-static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int32_t y) {
+static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int32_t y, int32_t z) {
     (void)ctx;
-    LOCKED(seen.sub_id = sid; seen.sub_top = top; seen.sub_x = x; seen.sub_y = y; seen.sub_placed++);
+    LOCKED(seen.sub_id = sid; seen.sub_top = top; seen.sub_x = x; seen.sub_y = y; seen.sub_z = z;
+           seen.sub_placed++);
 }
 static void cb_sub_unmapped(void* ctx, uint32_t sid) {
     (void)ctx;
@@ -229,6 +231,7 @@ static void cb_alpha(void* ctx, uint32_t sid, double alpha) {
 }
 static void cb_shm(void* ctx, uint32_t sid, const void* px, int w, int h, int stride,
                    uint32_t format, int first, int scale, int keep_alpha) {
+    LOCKED(if (seen.watch_shm_sid && sid == seen.watch_shm_sid) seen.watch_shm_count++);
     (void)ctx; (void)stride; (void)first; (void)scale;
     LOCKED(seen.shm_surface = sid; seen.shm_w = w; seen.shm_h = h; seen.shm_format = format;
            memcpy(seen.shm_px, px, 4); seen.shm_count++; seen.shm_keep_alpha = keep_alpha);
@@ -1014,7 +1017,11 @@ static void ed_selection(void* d, struct ext_data_control_device_v1* dev, struct
     if (o) edc_offered = 1;
 }
 static void ed_finished(void* d, struct ext_data_control_device_v1* dev) { (void)d; (void)dev; }
-static void ed_primary(void* d, struct ext_data_control_device_v1* dev, struct ext_data_control_offer_v1* o) { (void)d; (void)dev; (void)o; }
+static volatile int edc_primary_offered; static int edc_primary_null;
+static void ed_primary(void* d, struct ext_data_control_device_v1* dev, struct ext_data_control_offer_v1* o) {
+    (void)d; (void)dev;
+    if (o) edc_primary_offered++; else edc_primary_null++;
+}
 static const struct ext_data_control_device_v1_listener ed_listener = { ed_data_offer, ed_selection, ed_finished, ed_primary };
 static void es_send(void* d, struct ext_data_control_source_v1* s, const char* mime, int32_t fd) { (void)d; (void)s; (void)mime; close(fd); }
 static void es_cancelled(void* d, struct ext_data_control_source_v1* s) { (void)d; (void)s; }
@@ -1984,6 +1991,7 @@ static void test_subsurface(void) {
 
     struct wl_surface* s = wl_compositor_create_surface(compositor);
     struct wl_subsurface* ss = wl_subcompositor_get_subsurface(subcompositor, s, tl_surface);
+    wl_subsurface_set_desync(ss);   /* synchronized is the default; tested below */
     wl_subsurface_set_position(ss, 40, 30);
     struct wl_buffer* small = make_buffer(200, 100, WL_SHM_FORMAT_ARGB8888, NULL);
     wl_surface_attach(s, small, 0, 0);
@@ -2037,10 +2045,58 @@ static void test_subsurface(void) {
     CHECK(unmapped == unmapped0 + 2 && seen.sub_unmapped_id == seen.sub_id,
           "a null buffer unmaps it (%d)", unmapped - unmapped0);
 
-    /* Placed once more, then the role and the surface go: unmapped once. */
+    /* Placed once more (desynchronized, as these were), then stacking: a
+     * second subsurface arrives on top; place_below puts it under. */
     wl_surface_attach(s, small, 0, 0);
     wl_surface_commit(s);
     wl_display_roundtrip(dpy);
+    CHECK(seen.sub_z == 0, "the first subsurface ranks 0 (%d)", seen.sub_z);
+    struct wl_surface* s2 = wl_compositor_create_surface(compositor);
+    struct wl_subsurface* ss2 = wl_subcompositor_get_subsurface(subcompositor, s2, tl_surface);
+    wl_subsurface_set_desync(ss2);
+    wl_subsurface_set_position(ss2, 10, 10);
+    wl_surface_attach(s2, small, 0, 0);
+    wl_surface_commit(s2);
+    wl_display_roundtrip(dpy);
+    uint32_t s2_sid = seen.sub_id;
+    CHECK(seen.sub_z == 1, "a new subsurface ranks above its sibling (%d)", seen.sub_z);
+    LOCKED(placed = seen.sub_placed);
+    wl_subsurface_place_below(ss2, s);
+    wl_display_roundtrip(dpy);
+    int placed2; LOCKED(placed2 = seen.sub_placed);
+    CHECK(placed2 == placed + 2, "both were re-placed with their new ranks (%d)", placed2 - placed);
+    CHECK(seen.sub_id != s2_sid && seen.sub_z == 1, "the first is now on top (%u at %d)", seen.sub_id, seen.sub_z);
+
+    /* Synchronized mode: a commit waits for the parent's. */
+    LOCKED(seen.watch_shm_sid = s2_sid; seen.watch_shm_count = 0);
+    wl_subsurface_set_sync(ss2);
+    wl_surface_attach(s2, small, 0, 0);
+    wl_surface_commit(s2);
+    wl_display_roundtrip(dpy);
+    int wc; LOCKED(wc = seen.watch_shm_count);
+    CHECK(wc == 0, "a synchronized subsurface's commit is held (%d)", wc);
+    wl_surface_commit(tl_surface);
+    wl_display_roundtrip(dpy);
+    LOCKED(wc = seen.watch_shm_count);
+    CHECK(wc == 1, "and applied when the parent commits (%d)", wc);
+    /* Leaving sync mode applies what was waiting. */
+    wl_surface_attach(s2, small, 0, 0);
+    wl_surface_commit(s2);
+    wl_display_roundtrip(dpy);
+    LOCKED(wc = seen.watch_shm_count);
+    CHECK(wc == 1, "held again (%d)", wc);
+    wl_subsurface_set_desync(ss2);
+    wl_display_roundtrip(dpy);
+    LOCKED(wc = seen.watch_shm_count);
+    CHECK(wc == 2, "set_desync applies it (%d)", wc);
+    LOCKED(seen.watch_shm_sid = 0);
+    wl_subsurface_destroy(ss2);
+    wl_surface_destroy(s2);
+    wl_display_roundtrip(dpy);
+
+    /* The role and the surface go: unmapped once. */
+    LOCKED(unmapped = seen.sub_unmapped);
+    unmapped0 = unmapped - 2;
     wl_subsurface_destroy(ss);
     wl_surface_destroy(s);
     wl_display_roundtrip(dpy);
@@ -2211,6 +2267,47 @@ static void task_motion_and_press(void* arg) {
     wayland_server_pointer_button(server, press_sid, 5, 0x110, 0);
     wayland_server_pointer_leave(server, press_sid);
 }
+/* The primary selection through the clipboard managers' protocol: a
+ * selection made natively reaches an ext-data-control device, and one set
+ * through it reaches a native device — `wl-paste --primary` and the mouse
+ * agree. */
+static void test_primary_via_data_control(void) {
+    if (!edc_mgr || !prim_mgr) { CHECK(0, "managers missing"); return; }
+    struct ext_data_control_device_v1* dev =
+        ext_data_control_manager_v1_get_data_device(edc_mgr, seat);
+    ext_data_control_device_v1_add_listener(dev, &ed_listener, NULL);
+    wl_display_roundtrip(dpy);
+    CHECK(edc_primary_null >= 1, "an empty primary is announced at get_data_device (%d)", edc_primary_null);
+
+    struct zwp_primary_selection_device_v1* pd =
+        zwp_primary_selection_device_manager_v1_get_device(prim_mgr, seat);
+    zwp_primary_selection_device_v1_add_listener(pd, &psd_listener, NULL);
+    struct zwp_primary_selection_source_v1* src =
+        zwp_primary_selection_device_manager_v1_create_source(prim_mgr);
+    zwp_primary_selection_source_v1_add_listener(src, &pss_listener, NULL);
+    zwp_primary_selection_source_v1_offer(src, "text/plain");
+    edc_primary_offered = 0;
+    zwp_primary_selection_device_v1_set_selection(pd, src, 0);
+    wl_display_roundtrip(dpy);
+    CHECK(edc_primary_offered == 1, "a native primary selection reaches the data-control device (%d)",
+          edc_primary_offered);
+    CHECK(strcmp(edc_mime, "text/plain") == 0, "with its mime type (%s)", edc_mime);
+
+    struct ext_data_control_source_v1* esrc = ext_data_control_manager_v1_create_data_source(edc_mgr);
+    ext_data_control_source_v1_add_listener(esrc, &es_listener, NULL);
+    ext_data_control_source_v1_offer(esrc, "text/x-from-manager");
+    ps_offered = 0;
+    ext_data_control_device_v1_set_primary_selection(dev, esrc);
+    wl_display_roundtrip(dpy);
+    CHECK(ps_offered == 1, "a primary set through data-control reaches the native device (%d)", ps_offered);
+    CHECK(strcmp(ps_mime, "text/x-from-manager") == 0, "with its mime type (%s)", ps_mime);
+    ext_data_control_source_v1_destroy(esrc);
+    zwp_primary_selection_source_v1_destroy(src);
+    zwp_primary_selection_device_v1_destroy(pd);
+    ext_data_control_device_v1_destroy(dev);
+    wl_display_roundtrip(dpy);
+}
+
 static void test_seat_v1_pointer(void) {
     struct wl_seat* seat1 = wl_registry_bind(registry, seat_gname, &wl_seat_interface, 1);
     struct wl_pointer* ptr = wl_seat_get_pointer(seat1);
@@ -2313,6 +2410,7 @@ int main(void) {
         test_subsurface();
         test_toplevel_parent();
         test_primary_selection();
+        test_primary_via_data_control();
         test_seat_v1_pointer();
         test_unmap();
     } else {

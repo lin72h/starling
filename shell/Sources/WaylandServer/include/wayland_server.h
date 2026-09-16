@@ -171,13 +171,14 @@ void wayland_server_on_toplevel_size_hints(WaylandServer* server,
                int32_t max_w, int32_t max_h), void* ctx);
 
 /* A subsurface of a toplevel window with content of its own: draw it inside
- * that window at (x, y) from the toplevel's surface origin. Fired before the
+ * that window at (x, y) from the toplevel's surface origin, `z` its rank
+ * among the window's subsurfaces (0 = bottom). Fired before the
  * subsurface's first buffer arrives through on_surface_commit /
  * on_shm_surface_commit under the subsurface's own id, and again when the
- * offset moves. `unmapped`: nothing to draw any more. */
+ * offset or the rank changes. `unmapped`: nothing to draw any more. */
 void wayland_server_on_subsurface_placed(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id, uint32_t toplevel_id,
-               int32_t x, int32_t y), void* ctx);
+               int32_t x, int32_t y, int32_t z), void* ctx);
 void wayland_server_on_subsurface_unmapped(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
 

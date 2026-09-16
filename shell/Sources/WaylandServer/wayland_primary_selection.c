@@ -86,27 +86,37 @@ static void send_selection_to_device(struct WaylandServer* server, struct Primar
     zwp_primary_selection_device_v1_send_selection(dev->resource, r);
 }
 
+/* Every protocol that carries the primary selection hears a change: the
+ * native devices here, and the clipboard managers' (wlr and ext
+ * data-control, whose set_primary_selection also lands in
+ * wayland_primary_set), so `wl-paste --primary` and a selection made with
+ * the mouse agree. */
 static void broadcast(struct WaylandServer* server) {
     struct PrimaryDevice* dev;
     wl_list_for_each(dev, &server->primary_device_resources, link)
         send_selection_to_device(server, dev);
+    wayland_data_control_broadcast_primary(server);
+    wayland_ext_data_control_broadcast_primary(server);
 }
 
-static void primary_set(struct WaylandServer* server, struct PrimarySource* owner) {
+void wayland_primary_set(struct WaylandServer* server, void* owner,
+                         char** mimes, int mime_count,
+                         void (*send)(void*, const char*, int32_t),
+                         void (*cancel)(void*)) {
     if (server->primary.owner && server->primary.owner != owner && server->primary.cancel)
         server->primary.cancel(server->primary.owner);
     server->primary.owner = owner;
-    server->primary.mimes = owner ? owner->mimes : NULL;
-    server->primary.mime_count = owner ? owner->mime_count : 0;
-    server->primary.send = owner ? source_send : NULL;
-    server->primary.cancel = owner ? source_cancel : NULL;
+    server->primary.mimes = owner ? mimes : NULL;
+    server->primary.mime_count = owner ? mime_count : 0;
+    server->primary.send = owner ? send : NULL;
+    server->primary.cancel = owner ? cancel : NULL;
     server->primary.serial++;
     broadcast(server);
 }
 
 /* The owning source is going: the selection empties, with no cancel to a
  * resource that is already gone. */
-static void primary_clear_if_owner(struct WaylandServer* server, void* owner) {
+void wayland_primary_clear_if_owner(struct WaylandServer* server, void* owner) {
     if (server->primary.owner != owner) return;
     server->primary.owner = NULL;
     server->primary.mimes = NULL;
@@ -187,7 +197,7 @@ static void source_resource_destroy(struct wl_resource* r) {
     struct PrimarySource* s = wl_resource_get_user_data(r);
     if (!s) return;
     s->resource = NULL;
-    primary_clear_if_owner(s->server, s);
+    wayland_primary_clear_if_owner(s->server, s);
     for (int i = 0; i < s->mime_count; i++) free(s->mimes[i]);
     free(s);
 }
@@ -202,7 +212,8 @@ static void device_set_selection(struct wl_client* client, struct wl_resource* r
     struct PrimaryDevice* dev = wl_resource_get_user_data(resource);
     if (!dev) return;
     struct PrimarySource* s = source ? wl_resource_get_user_data(source) : NULL;
-    primary_set(dev->server, s);
+    if (s) wayland_primary_set(dev->server, s, s->mimes, s->mime_count, source_send, source_cancel);
+    else wayland_primary_set(dev->server, NULL, NULL, 0, NULL, NULL);
 }
 
 static void device_destroy(struct wl_client* client, struct wl_resource* resource) {

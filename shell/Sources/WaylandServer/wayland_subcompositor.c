@@ -8,9 +8,9 @@
  * (set_position), and the commit path in wayland_compositor.c either routes
  * its buffer up as the window's content (a full-size subsurface over a dummy
  * toplevel — Waydroid) or hands it to the shell to draw inside the window
- * at that offset (a video, a hover card). Stacking (place_above/below) and
- * sync mode are not tracked: children draw in creation order, at their own
- * commit.
+ * at that offset (a video, a hover card), in stacking order
+ * (place_above/below). Synchronized mode — the default — holds a
+ * subsurface's commit until its parent's.
  */
 
 #include "wayland_server_internal.h"
@@ -41,26 +41,57 @@ static void subsurface_set_position(struct wl_client* client,
     }
 }
 
+/* Stacking. `sibling` is another subsurface of the same parent, or the
+ * parent itself. Children are drawn above the parent's content, so
+ * "below the parent" can only mean the bottom of the stack. Applied at
+ * once rather than on the parent's commit. */
+static void restack(struct wl_resource* resource, struct wl_resource* sibling, int above) {
+    struct WaylandSurface* s = wl_resource_get_user_data(resource);
+    struct WaylandSurface* sib = sibling ? wl_resource_get_user_data(sibling) : NULL;
+    if (!s || !sib || !s->is_subsurface || !s->subsurface_parent || sib == s) return;
+    struct WaylandSurface* parent = s->subsurface_parent;
+    if (sib == parent) {
+        wl_list_remove(&s->sub_link);
+        if (above) wl_list_insert(&parent->sub_children, &s->sub_link);       /* bottom */
+        else wl_list_insert(&parent->sub_children, &s->sub_link);             /* bottom too */
+    } else {
+        if (sib->subsurface_parent != parent) return;
+        wl_list_remove(&s->sub_link);
+        if (above) wl_list_insert(&sib->sub_link, &s->sub_link);              /* after sib */
+        else wl_list_insert(sib->sub_link.prev, &s->sub_link);                /* before sib */
+    }
+    wayland_subsurface_restacked(s);
+}
+
 static void subsurface_place_above(struct wl_client* client,
                                    struct wl_resource* resource,
                                    struct wl_resource* sibling) {
-    (void)client; (void)resource; (void)sibling;
+    (void)client;
+    restack(resource, sibling, 1);
 }
 
 static void subsurface_place_below(struct wl_client* client,
                                    struct wl_resource* resource,
                                    struct wl_resource* sibling) {
-    (void)client; (void)resource; (void)sibling;
+    (void)client;
+    restack(resource, sibling, 0);
 }
 
 static void subsurface_set_sync(struct wl_client* client,
                                 struct wl_resource* resource) {
-    (void)client; (void)resource;
+    (void)client;
+    struct WaylandSurface* s = wl_resource_get_user_data(resource);
+    if (s) s->sub_synced = 1;
 }
 
+/* Leaving sync mode applies a commit that was waiting for the parent. */
 static void subsurface_set_desync(struct wl_client* client,
                                   struct wl_resource* resource) {
-    (void)client; (void)resource;
+    (void)client;
+    struct WaylandSurface* s = wl_resource_get_user_data(resource);
+    if (!s) return;
+    s->sub_synced = 0;
+    wayland_subsurface_apply_cached(s);
 }
 
 /*
@@ -91,6 +122,9 @@ static void subsurface_resource_destroy(struct wl_resource* resource) {
         s->subsurface_resource = NULL;
         s->is_subsurface = 0;
         s->subsurface_parent = NULL;
+        wl_list_remove(&s->sub_link);
+        wl_list_init(&s->sub_link);
+        s->sub_cached = 0;
         /* No longer part of a window: the shell stops drawing it. */
         if (s->sub_placed) {
             s->sub_placed = 0;
@@ -130,12 +164,17 @@ static void subcompositor_get_subsurface(struct wl_client* client,
      * subsurface's committed buffer up to its toplevel ancestor's window
      * texture. The subsurface resource carries the child WaylandSurface so
      * set_position can update its offset. */
-    if (s) {
+    if (s && p && p != s) {
         s->is_subsurface = 1;
         s->subsurface_parent = p;
         s->subsurface_x = 0;
         s->subsurface_y = 0;
         s->subsurface_resource = subsurface;
+        /* On top of its siblings, synchronized — the protocol's defaults. */
+        wl_list_remove(&s->sub_link);
+        wl_list_insert(p->sub_children.prev, &s->sub_link);
+        s->sub_synced = 1;
+        s->sub_cached = 0;
         /* Its buffers are consumed — drawn inside the window, or routed up
          * as the window's content — so they are released like a role's. */
         s->had_role = 1;

@@ -2118,17 +2118,22 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // A subsurface drawn inside its window's content (a video, a hover
         // card), like an X11 child surface. Only placement changes come
         // through here; frames update the texture directly.
-        wayland.onSubsurfaceChanged = { [weak self] (windowId: String, surfaceId: UInt32, textureId: Int, rect: Rect) in
+        wayland.onSubsurfaceChanged = { [weak self] (windowId: String, surfaceId: UInt32, textureId: Int, rect: Rect, z: Int) in
             guard let self = self,
                   let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
             self.setState {
                 let surface = ChildSurface(x11WindowId: surfaceId, textureId: textureId,
-                                           flipY: true, logicalRect: rect)
+                                           flipY: true, logicalRect: rect, z: z)
                 if let i = win.childSurfaces.firstIndex(where: { $0.x11WindowId == surfaceId }) {
                     win.childSurfaces[i] = surface
                 } else {
                     win.childSurfaces.append(surface)
                 }
+                // Draw order is stacking order; equal ranks keep their
+                // arrival order (a stable sort by rank).
+                win.childSurfaces = win.childSurfaces.enumerated()
+                    .sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }
+                    .map { $0.element }
                 // The cached window widget is keyed on identity, not on its
                 // children — drop it or the new child is never built.
                 self._windowChildCache.removeValue(forKey: windowId)

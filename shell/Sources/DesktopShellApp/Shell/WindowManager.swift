@@ -26,6 +26,8 @@ struct ChildSurface {
     var heightPhys: Int = 0
     var flipY: Bool = true
     var logicalRect: Rect? = nil
+    /// Stacking among the window's children (0 = bottom); drawn in order.
+    var z: Int = 0
 }
 
 class WindowInfo {

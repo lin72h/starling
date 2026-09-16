@@ -65,6 +65,15 @@ struct WaylandSurface {
      * coordinates) and whether the shell currently has it. */
     int32_t sub_placed_x, sub_placed_y;
     int sub_placed;
+    int sub_placed_z;                     // its rank among the window's subsurfaces
+    /* Stacking: this surface's subsurfaces, bottom to top, and this
+     * surface's own link in its parent's list (initialised empty). */
+    struct wl_list sub_children;
+    struct wl_list sub_link;
+    /* wl_subsurface commit mode: synchronized (the default) holds a commit
+     * until the parent's — `sub_cached` says one is waiting. */
+    int sub_synced;
+    int sub_cached;
 
     /* xdg_popup.grab: a press outside the popup's tree dismisses it. */
     int popup_grabbed;
@@ -512,7 +521,8 @@ struct WaylandServer {
          * arrives through on_surface_commit / on_shm_surface_commit under
          * its own id, and again whenever the offset moves. */
         void (*on_subsurface_placed)(void* ctx, uint32_t surface_id,
-                                     uint32_t toplevel_id, int32_t x, int32_t y);
+                                     uint32_t toplevel_id, int32_t x, int32_t y,
+                                     int32_t z);
         /* The subsurface has nothing to draw any more (null buffer, role or
          * surface gone, or its content became the window's own). */
         void (*on_subsurface_unmapped)(void* ctx, uint32_t surface_id);
@@ -923,6 +933,17 @@ void wayland_primary_selection_init(struct WaylandServer* server);
  * selection devices the current selection if they have not had it. */
 void wayland_primary_selection_offer_on_interaction(struct WaylandServer* server,
                                                     struct WaylandSurface* surface);
+/* The primary selection, owned by whichever protocol set it (a native
+ * source or a data-control one); the same contract as wayland_clipboard_set.
+ * Every device of every protocol hears the change. */
+void wayland_primary_set(struct WaylandServer* server, void* owner,
+                         char** mimes, int mime_count,
+                         void (*send)(void*, const char*, int32_t),
+                         void (*cancel)(void*));
+void wayland_primary_clear_if_owner(struct WaylandServer* server, void* owner);
+/* The clipboard managers' devices are told the primary selection changed. */
+void wayland_data_control_broadcast_primary(struct WaylandServer* server);
+void wayland_ext_data_control_broadcast_primary(struct WaylandServer* server);
 void wayland_text_input_init(struct WaylandServer* server);
 void wayland_text_input_focus_enter(struct WaylandServer* server,
                                     struct WaylandSurface* surface);
@@ -1096,6 +1117,12 @@ struct WaylandSurface* wayland_server_find_surface(struct WaylandServer* server,
  * topmost first (popup_done), which is what the spec asks of the compositor. */
 int wayland_popup_grab_contains(struct WaylandServer* server, struct WaylandSurface* surface);
 void wayland_popup_grab_dismiss_all(struct WaylandServer* server);
+
+/* A subsurface was re-stacked (place_above/below) or its commit mode
+ * changed: every placed subsurface of its window whose rank changed is
+ * re-placed for the shell; a commit cached under sync mode is applied. */
+void wayland_subsurface_restacked(struct WaylandSurface* subsurface);
+void wayland_subsurface_apply_cached(struct WaylandSurface* subsurface);
 
 /* Server teardown for the per-server lists that no client resource owns. */
 void wayland_security_context_fini(struct WaylandServer* server);

@@ -36,7 +36,8 @@ struct WaylandExtDataControlSource {
 struct WaylandExtDataControlOffer {
     struct wl_resource* resource;
     struct WaylandServer* server;
-    uint64_t serial;                   /* clipboard serial this offer serves */
+    uint64_t serial;                   /* the serial of the selection it serves */
+    int primary;                       /* serves server->primary, not the clipboard */
 };
 
 struct WaylandExtDataControlDevice {
@@ -94,6 +95,38 @@ static void edc_send_selection_to_device(struct WaylandServer* server,
     ext_data_control_device_v1_send_selection(device, offer_res);
 }
 
+/* The primary selection: the same, from server->primary. */
+static void edc_send_primary_to_device(struct WaylandServer* server,
+                                       struct wl_resource* device) {
+    if (!server->primary.owner) {
+        ext_data_control_device_v1_send_primary_selection(device, NULL);
+        return;
+    }
+    struct WaylandExtDataControlOffer* offer = calloc(1, sizeof(*offer));
+    if (!offer) return;
+    struct wl_resource* offer_res = wl_resource_create(
+        wl_resource_get_client(device),
+        &ext_data_control_offer_v1_interface,
+        wl_resource_get_version(device), 0);
+    if (!offer_res) { free(offer); return; }
+    offer->resource = offer_res;
+    offer->server = server;
+    offer->serial = server->primary.serial;
+    offer->primary = 1;
+    wl_resource_set_implementation(offer_res, &edc_offer_impl, offer,
+                                   edc_offer_resource_destroy);
+    ext_data_control_device_v1_send_data_offer(device, offer_res);
+    for (int i = 0; i < server->primary.mime_count; i++)
+        ext_data_control_offer_v1_send_offer(offer_res, server->primary.mimes[i]);
+    ext_data_control_device_v1_send_primary_selection(device, offer_res);
+}
+
+void wayland_ext_data_control_broadcast_primary(struct WaylandServer* server) {
+    struct WaylandExtDataControlDevice* dcd;
+    wl_list_for_each(dcd, &server->ext_data_control_devices, link)
+        edc_send_primary_to_device(server, dcd->resource);
+}
+
 void wayland_ext_data_control_broadcast_selection(struct WaylandServer* server) {
     struct WaylandExtDataControlDevice* dcd;
     wl_list_for_each(dcd, &server->ext_data_control_devices, link)
@@ -110,12 +143,13 @@ static void edc_offer_receive(struct wl_client* client,
     (void)client;
     struct WaylandExtDataControlOffer* offer = wl_resource_get_user_data(resource);
     struct WaylandServer* server = offer ? offer->server : NULL;
-    if (!server || !server->clipboard.owner || !server->clipboard.send ||
-        server->clipboard.serial != offer->serial) {
+    struct WaylandClipboard* sel = NULL;
+    if (server) sel = offer->primary ? &server->primary : &server->clipboard;
+    if (!sel || !sel->owner || !sel->send || sel->serial != offer->serial) {
         close(fd);
         return;
     }
-    server->clipboard.send(server->clipboard.owner, mime_type, fd);
+    sel->send(sel->owner, mime_type, fd);
     close(fd);
 }
 
@@ -175,6 +209,7 @@ static void edc_source_resource_destroy(struct wl_resource* resource) {
         wayland_data_control_broadcast_selection(s->server);
         wayland_ext_data_control_broadcast_selection(s->server);
     }
+    if (s->server) wayland_primary_clear_if_owner(s->server, s);
     for (int i = 0; i < s->mime_count; i++) free(s->mime_types[i]);
     free(s);
 }
@@ -204,11 +239,20 @@ static void edc_device_set_selection(struct wl_client* client,
 }
 
 static void edc_device_set_primary_selection(struct wl_client* client,
-                                            struct wl_resource* resource,
-                                            struct wl_resource* source_resource) {
-    (void)client; (void)resource; (void)source_resource;
-    /* Primary selection via data-control not wired (zwp_primary_selection
-     * serves native primary). No-op keeps v2 clients happy. */
+                                             struct wl_resource* resource,
+                                             struct wl_resource* source_resource) {
+    (void)client;
+    struct WaylandExtDataControlDevice* dev = wl_resource_get_user_data(resource);
+    if (!dev) return;
+    if (source_resource) {
+        struct WaylandExtDataControlSource* s = wl_resource_get_user_data(source_resource);
+        if (!s) return;
+        s->used = 1;
+        wayland_primary_set(dev->server, s, s->mime_types, s->mime_count,
+                            edc_source_send, edc_source_cancel);
+    } else {
+        wayland_primary_set(dev->server, NULL, NULL, 0, NULL, NULL);
+    }
 }
 
 static void edc_device_destroy(struct wl_client* client,
@@ -276,6 +320,7 @@ static void edc_manager_get_data_device(struct wl_client* client,
      * bridge) learns it — this is the focus-free equivalent of the
      * send-on-keyboard-focus that wl_data_device relies on. */
     edc_send_selection_to_device(server, device);
+    edc_send_primary_to_device(server, device);
 }
 
 static void edc_manager_destroy(struct wl_client* client,

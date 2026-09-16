@@ -113,11 +113,84 @@ static void committed_buffer_destroyed(struct wl_listener* listener, void* data)
     surface->committed_buffer = NULL;
 }
 
+/* Where a subsurface ranks among its window's subsurfaces: depth-first
+ * through the stacking lists, bottom first; -1 if it is not in the tree. */
+static int sub_rank_walk(struct WaylandSurface* parent, struct WaylandSurface* target,
+                         int* counter) {
+    struct WaylandSurface* c;
+    wl_list_for_each(c, &parent->sub_children, sub_link) {
+        if (c == target) return *counter;
+        (*counter)++;
+        int r = sub_rank_walk(c, target, counter);
+        if (r >= 0) return r;
+    }
+    return -1;
+}
+
+/* The toplevel a subsurface ultimately belongs to, and its offset from
+ * that toplevel's surface origin through every subsurface ancestor. */
+static struct WaylandSurface* sub_toplevel(struct WaylandSurface* s, int32_t* off_x, int32_t* off_y) {
+    struct WaylandSurface* top = s->subsurface_parent;
+    int32_t x = s->subsurface_x, y = s->subsurface_y;
+    int guard = 0;
+    while (top && top->is_subsurface && top->subsurface_parent && guard++ < 16) {
+        x += top->subsurface_x;
+        y += top->subsurface_y;
+        top = top->subsurface_parent;
+    }
+    if (off_x) *off_x = x;
+    if (off_y) *off_y = y;
+    return top;
+}
+
+/* Synchronized mode is inherited: a desynchronized subsurface under a
+ * synchronized one still waits for the ancestor's commit. */
+static int sub_effectively_synced(struct WaylandSurface* s) {
+    int guard = 0;
+    while (s && s->is_subsurface && guard++ < 16) {
+        if (s->sub_synced) return 1;
+        s = s->subsurface_parent;
+    }
+    return 0;
+}
+
+static void surface_apply(struct WaylandSurface* surface);
+
+/* A parent's state was applied: the subsurfaces that committed under sync
+ * mode since then apply now, each taking its own waiting children along. */
+static void apply_cached_children(struct WaylandSurface* parent) {
+    struct WaylandSurface* c;
+    struct WaylandSurface* tmp;
+    wl_list_for_each_safe(c, tmp, &parent->sub_children, sub_link) {
+        if (c->sub_cached) {
+            c->sub_cached = 0;
+            surface_apply(c);
+        }
+    }
+}
+
+/* wl_surface.commit. A synchronized subsurface's commit is held (cached)
+ * until its parent commits; everything else applies at once. */
 static void surface_commit(struct wl_client* client,
                            struct wl_resource* resource) {
     (void)client;
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
     if (!surface) return;
+    if (sub_effectively_synced(surface)) {
+        surface->sub_cached = 1;
+        return;
+    }
+    surface_apply(surface);
+}
+
+void wayland_subsurface_apply_cached(struct WaylandSurface* s) {
+    if (s->sub_cached && !sub_effectively_synced(s)) {
+        s->sub_cached = 0;
+        surface_apply(s);
+    }
+}
+
+static void surface_apply(struct WaylandSurface* surface) {
     struct WaylandServer* server = surface->server;
 
     /* Apply pending buffer_scale. */
@@ -294,25 +367,23 @@ static void surface_commit(struct wl_client* client,
      * buffer through the ordinary commit callbacks under that id. A null
      * buffer, or a buffer that now routes up as the content, unmaps it. */
     if (surface->is_subsurface && !surface->xdg_toplevel && !surface->xdg_popup) {
-        struct WaylandSurface* top = surface->subsurface_parent;
-        int32_t off_x = surface->subsurface_x, off_y = surface->subsurface_y;
-        int guard = 0;
-        while (top && top->is_subsurface && top->subsurface_parent && guard++ < 16) {
-            off_x += top->subsurface_x;
-            off_y += top->subsurface_y;
-            top = top->subsurface_parent;
-        }
+        int32_t off_x = 0, off_y = 0;
+        struct WaylandSurface* top = sub_toplevel(surface, &off_x, &off_y);
         int drawable = top && top->xdg_toplevel && target == surface &&
                        surface->committed_buffer != NULL;
         if (drawable) {
+            int counter = 0;
+            int z = sub_rank_walk(top, surface, &counter);
+            if (z < 0) z = 0;
             if (!surface->sub_placed || surface->sub_placed_x != off_x ||
-                surface->sub_placed_y != off_y) {
+                surface->sub_placed_y != off_y || surface->sub_placed_z != z) {
                 surface->sub_placed = 1;
                 surface->sub_placed_x = off_x;
                 surface->sub_placed_y = off_y;
+                surface->sub_placed_z = z;
                 if (server->cb.on_subsurface_placed) {
                     server->cb.on_subsurface_placed(server->cb_ctx, surface->id,
-                                                    top->id, off_x, off_y);
+                                                    top->id, off_x, off_y, z);
                 }
             }
         } else if (surface->sub_placed) {
@@ -425,6 +496,34 @@ static void surface_commit(struct wl_client* client,
         wl_event_source_timer_update(surface->frame_done_timer,
                                      server->saw_flip ? 100 : 16);
     }
+
+    apply_cached_children(surface);
+}
+
+/* After a place_above/place_below: every placed subsurface of the window
+ * whose rank moved is re-placed for the shell, which draws them in rank
+ * order. */
+static void sub_restack_walk(struct WaylandServer* server, struct WaylandSurface* top,
+                             struct WaylandSurface* parent, int* counter) {
+    struct WaylandSurface* c;
+    wl_list_for_each(c, &parent->sub_children, sub_link) {
+        int z = (*counter)++;
+        if (c->sub_placed && c->sub_placed_z != z) {
+            c->sub_placed_z = z;
+            if (server->cb.on_subsurface_placed) {
+                server->cb.on_subsurface_placed(server->cb_ctx, c->id, top->id,
+                                                c->sub_placed_x, c->sub_placed_y, z);
+            }
+        }
+        sub_restack_walk(server, top, c, counter);
+    }
+}
+
+void wayland_subsurface_restacked(struct WaylandSurface* s) {
+    struct WaylandSurface* top = sub_toplevel(s, NULL, NULL);
+    if (!top || !top->xdg_toplevel) return;
+    int counter = 0;
+    sub_restack_walk(top->server, top, top, &counter);
 }
 
 static void surface_set_buffer_transform(struct wl_client* client,
@@ -594,7 +693,14 @@ static void surface_destroy_resource(struct wl_resource* resource) {
             if (other->subsurface_parent == surface) {
                 other->subsurface_parent = NULL;
                 other->is_subsurface = 0;
+                wl_list_remove(&other->sub_link);
+                wl_list_init(&other->sub_link);
             }
+        }
+        wl_list_init(&surface->sub_children);
+        if (!wl_list_empty(&surface->sub_link)) {
+            wl_list_remove(&surface->sub_link);
+            wl_list_init(&surface->sub_link);
         }
     }
 
@@ -681,6 +787,8 @@ static void compositor_create_surface(struct wl_client* client,
     surface->alpha = 1.0;
     surface->pending_alpha = 1.0;
     wl_list_init(&surface->foreign_handles);
+    wl_list_init(&surface->sub_children);
+    wl_list_init(&surface->sub_link);
     surface->frame_done_timer = wl_event_loop_add_timer(
         server->event_loop, frame_done_timer_cb, surface);
 
