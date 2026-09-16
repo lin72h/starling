@@ -177,6 +177,24 @@ fi
 # as snaps: a root dev shell drops to the login user first.
 if [ "$NAME" = "--flatpak" ]; then
     FLATPAK_APP="${1:?app-run --flatpak needs an app id}"; shift
+    # Many sandboxes see no host files at all (Celluloid's can see only
+    # ~/Pictures), so a path on the command line is invisible inside and the
+    # app silently opens nothing. `--file-forwarding` hands every argument
+    # between @@ markers over the document portal — what a launch from the
+    # app's own .desktop entry (%U) does — while an app that can already see
+    # the path gets it unchanged. Only existing files are wrapped, so options
+    # pass through untouched.
+    # QT_XCB_GL_INTEGRATION=xcb_egl: a Qt app that lands on the X11 fallback
+    # (Zoom is X11-only) otherwise picks Qt's GLX integration, whose config
+    # search finds nothing on the in-tree X server and aborts the app with
+    # "Could not initialize GLX". Qt's EGL-on-X11 integration works here.
+    # (POSIX sh: rotate the positional list instead of building an array.)
+    _n=$#; _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _a=$1; shift
+        if [ -e "$_a" ]; then set -- "$@" @@ "$_a" @@; else set -- "$@" "$_a"; fi
+        _i=$((_i + 1))
+    done
     if ! is_starling_os && [ "$(id -u)" -eq 0 ] && [ "${STAY_ROOT:-0}" -eq 0 ]; then
         LOGIN_HOME="$(getent passwd "$LOGIN_USER" | cut -d: -f6)"
         LOGIN_UID="$(id -u "$LOGIN_USER" 2>/dev/null || echo 1000)"
@@ -190,7 +208,8 @@ if [ "$NAME" = "--flatpak" ]; then
             PULSE_SERVER="unix:/run/user/$LOGIN_UID/pulse/native" \
             XDG_SESSION_TYPE=wayland \
             GDK_BACKEND="wayland,x11" QT_QPA_PLATFORM="wayland;xcb" \
-            flatpak run "$FLATPAK_APP" "$@"
+            QT_XCB_GL_INTEGRATION=xcb_egl \
+            flatpak run --file-forwarding "$FLATPAK_APP" "$@"
     fi
     RUID="$(id -u)"
     exec env \
@@ -200,7 +219,8 @@ if [ "$NAME" = "--flatpak" ]; then
         PULSE_SERVER="unix:/run/user/$RUID/pulse/native" \
         XDG_SESSION_TYPE=wayland \
         GDK_BACKEND="wayland,x11" QT_QPA_PLATFORM="wayland;xcb" \
-        flatpak run "$FLATPAK_APP" "$@"
+        QT_XCB_GL_INTEGRATION=xcb_egl \
+        flatpak run --file-forwarding "$FLATPAK_APP" "$@"
 fi
 
 # ── App registry ─────────────────────────────────────────────────────────
