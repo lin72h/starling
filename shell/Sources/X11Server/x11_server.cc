@@ -1268,6 +1268,23 @@ static void send_property_notify(X11Server* server, X11Window* win, uint32_t ato
     send_to_client(server, oc, ev, 32);
 }
 
+/* _NET_FRAME_EXTENTS = 0,0,0,0. The shell draws the frame outside the X
+ * window, so a client's window has no decoration around it in X space. Set
+ * on every managed toplevel at map, as a real WM does: GTK3 reads it before
+ * falling back to a QueryTree walk, and wxGTK waits for it before showing a
+ * new toplevel once it has sent _NET_REQUEST_FRAME_EXTENTS. */
+static void set_frame_extents(X11Server* server, X11Window* win) {
+    uint32_t a_ext = intern_atom(server, "_NET_FRAME_EXTENTS", 0);
+    uint32_t zero[4] = {0, 0, 0, 0};
+    auto& pr = set_property(win, a_ext);
+    pr.type = intern_atom(server, "CARDINAL", 0);
+    pr.format = 32;
+    pr.length = 4;
+    pr.data.assign(reinterpret_cast<uint8_t*>(zero),
+                   reinterpret_cast<uint8_t*>(zero) + 16);
+    send_property_notify(server, win, a_ext, 0);
+}
+
 /* Rebuild _NET_WM_STATE from the window's flags + whether it holds focus. */
 static void update_net_wm_state(X11Server* server, X11Window* win) {
     if (!win || win->parent_id != server->root_window_id) return;
@@ -2748,6 +2765,7 @@ static void handle_request(X11Server* server, int client_idx,
                     fprintf(stderr, "[X11Server] on_window_mapped returned\n");
                     win->shell_managed = 1;
                     stack_raise(server, wid);
+                    set_frame_extents(server, win);
                     /* A shape set before the map (the usual order) was
                      * announced to a shell that had no window for it yet. */
                     if (win->shaped && server->config.on_window_shaped)
@@ -3054,6 +3072,24 @@ static void handle_request(X11Server* server, int client_idx,
 
     case X11_QUERY_TREE: {
         uint32_t wid = *reinterpret_cast<const uint32_t*>(data + 4);
+        /* The parent field used to be a constant None. GDK's frame-extents
+         * fallback walks up with QueryTree until parent == root, so every
+         * GTK3 window on this server that lacked _NET_FRAME_EXTENTS looped
+         * forever: None != root, then QueryTree(None) — which we also
+         * answered instead of erroring — and round again, 130 times a
+         * second. Audacity never got past its splash. Report the parent,
+         * and BadWindow for an id that does not exist. */
+        X11Window* qw = find_window(server, wid);
+        if (!qw && wid != server->root_window_id) {
+            uint8_t err[32] = {};
+            err[0] = 0; err[1] = 3;  /* BadWindow */
+            *reinterpret_cast<uint16_t*>(err + 2) = seq;
+            *reinterpret_cast<uint32_t*>(err + 4) = wid;
+            err[10] = X11_QUERY_TREE;
+            send_to_client(server, client_idx, err, 32);
+            break;
+        }
+        uint32_t parent_id = qw ? qw->parent_id : 0;
         int child_count = 0;
         for (auto& w : server->windows) {
             if (w.parent_id == wid) child_count++;
@@ -3064,7 +3100,7 @@ static void handle_request(X11Server* server, int client_idx,
         *reinterpret_cast<uint16_t*>(&reply[2]) = seq;
         *reinterpret_cast<uint32_t*>(&reply[4]) = static_cast<uint32_t>(child_count);
         *reinterpret_cast<uint32_t*>(&reply[8]) = server->root_window_id;
-        *reinterpret_cast<uint32_t*>(&reply[12]) = 0;
+        *reinterpret_cast<uint32_t*>(&reply[12]) = parent_id;
         *reinterpret_cast<uint16_t*>(&reply[16]) = static_cast<uint16_t>(child_count);
 
         int off2 = 32;
@@ -3712,7 +3748,18 @@ static void handle_request(X11Server* server, int client_idx,
             uint32_t a_change_state = intern_atom(server, "WM_CHANGE_STATE", 1);
             uint32_t a_close = intern_atom(server, "_NET_CLOSE_WINDOW", 1);
             uint32_t a_restack = intern_atom(server, "_NET_RESTACK_WINDOW", 1);
-            if (mtype == a_restack && a_restack) {
+            uint32_t a_req_frame = intern_atom(server, "_NET_REQUEST_FRAME_EXTENTS", 1);
+            if (mtype == a_req_frame && a_req_frame) {
+                /* We list _NET_FRAME_EXTENTS as supported, so wxGTK defers
+                 * gtk_widget_show on every new toplevel until the WM answers
+                 * this request with the property. Nothing answered: Audacity
+                 * sat on its splash for good, main window created and never
+                 * mapped, polling QueryTree 160 times a second. The shell
+                 * draws the frame outside the X window, so the extents are
+                 * zero on all sides. */
+                set_frame_extents(server, target);
+                handled = true;
+            } else if (mtype == a_restack && a_restack) {
                 /* data[1] sibling (None = whole stack), data[2] detail: 0 Above */
                 if (d[2] == 0) forward_window_request(server, target, X11_WIN_REQ_RAISE);
                 handled = true;
@@ -4935,21 +4982,29 @@ static void handle_glx(X11Server* server, int client_idx, uint8_t minor,
             { 0,  0, 0, 0x22, 32 }, { 24, 8, 0, 0x22, 32 },
         };
         int nc = static_cast<int>(sizeof(cfgs) / sizeof(cfgs[0]));
+        /* Every config twice: double-buffered first, then a single-buffered
+         * twin. glXChooseFBConfig matches GLX_DOUBLEBUFFER exactly, and Qt
+         * asks for False when a QSurfaceFormat says SingleBuffer — Zoom does
+         * — so a list with only double-buffered entries matched nothing,
+         * three times, and Zoom aborted with "Could not initialize GLX". */
+        int total = nc * 2;
         int cw = np21 * 2;
-        int ex21 = nc * cw;
+        int ex21 = total * cw;
         int rl21 = 32 + ex21 * 4;
         std::vector<uint8_t> reply(static_cast<size_t>(rl21), 0);
         reply[0] = 1; *reinterpret_cast<uint16_t*>(&reply[2]) = seq;
         *reinterpret_cast<uint32_t*>(&reply[4]) = static_cast<uint32_t>(ex21);
-        *reinterpret_cast<uint32_t*>(&reply[8]) = static_cast<uint32_t>(nc);
+        *reinterpret_cast<uint32_t*>(&reply[8]) = static_cast<uint32_t>(total);
         *reinterpret_cast<uint32_t*>(&reply[12]) = static_cast<uint32_t>(np21);
         uint32_t* p = reinterpret_cast<uint32_t*>(&reply[32]);
         int i = 0;
-        for (int c = 0; c < nc; c++) {
-            p[i++]=0x8013; p[i++]=static_cast<uint32_t>(c+1);
+        for (int k = 0; k < total; k++) {
+            int c = k % nc;
+            uint32_t dbl = (k < nc) ? 1u : 0u;
+            p[i++]=0x8013; p[i++]=static_cast<uint32_t>(k+1);
             p[i++]=0x800B; p[i++]=cfgs[c].visual;
             p[i++]=0x2; p[i++]=static_cast<uint32_t>(cfgs[c].buf_size);
-            p[i++]=0x5; p[i++]=1;
+            p[i++]=0x5; p[i++]=dbl;
             p[i++]=0x8; p[i++]=8;
             p[i++]=0x9; p[i++]=8;
             p[i++]=0xA; p[i++]=8;
