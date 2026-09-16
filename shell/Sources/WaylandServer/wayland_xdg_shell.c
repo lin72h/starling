@@ -156,11 +156,24 @@ static void xdg_toplevel_destroy_handler(struct wl_client* client,
     wl_resource_destroy(resource);
 }
 
-/* Runs on explicit destroy AND on client disconnect, where libwayland frees
- * resources in id order — so a role object can outlive its wl_surface. */
+/* Runs on explicit destroy AND on client disconnect. The explicit request
+ * handler above clears surface->xdg_toplevel before destroying the resource,
+ * so finding it still set here means the client died. libwayland frees a
+ * dying client's objects in id order, and ids are recycled: a client that hid
+ * and re-showed its window (Telegram: xdg_toplevel#37 on wl_surface#38) has
+ * its toplevel freed BEFORE its wl_surface. Merely clearing the pointer here
+ * left the surface destructor with no role to report, the shell was never
+ * told, and the window stayed on screen with no process behind it. Tear the
+ * toplevel down here the same way the request path does; the surface
+ * destructor then sees no role and stays quiet, so nothing is reported twice. */
 static void xdg_toplevel_resource_destroy(struct wl_resource* resource) {
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
     if (surface && surface->xdg_toplevel == resource) {
+        struct WaylandServer* server = surface->server;
+        wayland_output_send_leave(server, surface);
+        if (server->cb.on_toplevel_destroy) {
+            server->cb.on_toplevel_destroy(server->cb_ctx, surface->id);
+        }
         surface->xdg_toplevel = NULL;
     }
 }
