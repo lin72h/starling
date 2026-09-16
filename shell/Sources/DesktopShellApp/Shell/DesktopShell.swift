@@ -2085,6 +2085,36 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             win.clientMaxSize = (maxW > 0 || maxH > 0) ? (width: maxW, height: maxH) : nil
         }
 
+        // xdg_toplevel.set_parent: the window is a dialog for another. It
+        // stays above its parent (bringToFront raises them together) and,
+        // if it has not drawn yet, it is taken off the maximized default it
+        // was given at birth and configured with no size, so the toolkit
+        // draws it at its natural size — which then centres it over the
+        // parent (onWindowBufferResized). Every X11 dialog already works
+        // this way through WM_TRANSIENT_FOR; a Wayland About box used to
+        // come up filling the screen.
+        wayland.onWindowParent = { [weak self] (windowId: String, parentWindowId: String?, mapped: Bool) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+            win.transientFor = parentWindowId
+            guard let parentId = parentWindowId,
+                  let parent = self.windowManager.windows.first(where: { $0.id == parentId }),
+                  let sid = wayland.surfaceId(forWindowId: windowId) else { return }
+            if !mapped {
+                self.setState {
+                    win.isMaximized = false
+                    win.dialogPlacementPending = true
+                }
+                wayland.sendNaturalSize(surfaceId: sid)
+            } else {
+                // Already on screen: centre it over the parent as it is.
+                self.setState {
+                    win.rect = self._dialogRect(size: Size(win.rect.width, win.rect.height), over: parent)
+                    self.windowManager.bringToFront(windowId)
+                }
+            }
+        }
+
         // A subsurface drawn inside its window's content (a video, a hover
         // card), like an X11 child surface. Only placement changes come
         // through here; frames update the texture directly.
@@ -2134,6 +2164,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
         }
 
+        // The frame a repositioned popup drew for its new place: the whole
+        // placement is replaced (the buffer's content origin is the
+        // positioner's point, as at creation).
+        wayland.onPopupRepositioned = { [weak self] (popupId: String, logicalWidth: Int, logicalHeight: Int, geoX: Int, geoY: Int, x: Int, y: Int) in
+            guard let self = self, var popup = self.popups[popupId] else { return }
+            popup.x = Double(x) - Double(geoX)
+            popup.y = Double(y) - Double(geoY)
+            popup.width = Double(logicalWidth)
+            popup.height = Double(logicalHeight)
+            popup.mapped = true
+            self.popups[popupId] = popup
+            self._popupsDidChange()
+        }
+
         wayland.onWindowBufferResized = { [weak self] (windowId: String, logicalWidth: Int, logicalHeight: Int) in
             guard let self = self else { return }
             // Otherwise it's a toplevel window.
@@ -2173,6 +2217,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 // Update rect to Chrome's actual rendered size
                 self.setState {
                     win.rect = Rect.fromLTWH(win.rect.left, win.rect.top, newWidth, newHeight)
+                }
+            } else if win.dialogPlacementPending {
+                // A dialog's first frame: its natural size, centred over
+                // its parent (or the screen, if the parent went meanwhile).
+                win.dialogPlacementPending = false
+                let parent = win.transientFor.flatMap { pid in
+                    self.windowManager.windows.first(where: { $0.id == pid }) }
+                self.setState {
+                    win.rect = self._dialogRect(size: Size(newWidth, newHeight), over: parent)
+                    self.windowManager.bringToFront(windowId)
                 }
             } else {
                 // Normal buffer resize (not dragging)
@@ -7969,6 +8023,25 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             withIntermediateDirectories: true)
         try? (enabled ? "tiling" : "floating").write(
             toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Where a dialog of `size` goes: centred over `parent` (the screen
+    /// when there is none), kept inside the work area so its title bar is
+    /// never under the status bar and its body never off an edge.
+    func _dialogRect(size: Size, over parent: WindowInfo?) -> Rect {
+        let sw = screenWidth, sh = screenHeight
+        let w = min(size.width, sw), h = min(size.height, sh - DesktopTheme.kStatusBarHeight)
+        var x: Double, y: Double
+        if let p = parent {
+            x = p.rect.left + (p.rect.width - w) / 2.0
+            y = p.rect.top + (p.rect.height - h) / 2.0
+        } else {
+            x = (sw - w) / 2.0
+            y = (sh - h) / 2.0
+        }
+        x = max(0.0, min(x, sw - w))
+        y = max(DesktopTheme.kStatusBarHeight, min(y, sh - h))
+        return Rect.fromLTWH(x, y, w, h)
     }
 
     /// Switch the desktop wallpaper preset (Settings' picker); persists and

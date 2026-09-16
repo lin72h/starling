@@ -335,6 +335,13 @@ void wayland_server_configure_toplevel(WaylandServer* server,
     wayland_xdg_shell_configure(server, surface, width, height);
 }
 
+void wayland_server_configure_toplevel_natural(WaylandServer* server, uint32_t surface_id) {
+    WARN_IF_OFF_LOOP_THREAD(server, "configure_toplevel_natural");
+    struct WaylandSurface* surface = wayland_server_find_surface(server, surface_id);
+    if (!surface) return;
+    wayland_xdg_shell_configure_natural(server, surface);
+}
+
 void wayland_server_configure_fullscreen(WaylandServer* server,
                                          uint32_t surface_id,
                                          int width, int height) {
@@ -413,6 +420,15 @@ static void deferred_input_enqueue(WaylandServer* server,
         if (wl_resource_get_client(ir->resource) == (target) &&        \
             ir->seat == ev->seat)
 
+/* wl_pointer.frame exists from version 5. A client that bound the seat
+ * older than that — weston's demos bind version 1 — has no listener slot
+ * for it, and libwayland aborts the client on an event it cannot
+ * dispatch: weston-simple-egl died on its first pointer enter. */
+static void pointer_frame(struct wl_resource* pointer) {
+    if (wl_resource_get_version(pointer) >= WL_POINTER_FRAME_SINCE_VERSION)
+        wl_pointer_send_frame(pointer);
+}
+
 static void deferred_input_send_one(WaylandServer* server,
                                     const struct WaylandPointerEvent* ev) {
     /* Not input: dma-buf modifier demotion queued from the raster thread
@@ -473,18 +489,19 @@ static void deferred_input_send_one(WaylandServer* server,
                                   surface->resource,
                                   wl_fixed_from_double(ev->x),
                                   wl_fixed_from_double(ev->y));
-            wl_pointer_send_frame(ir->resource);
+            pointer_frame(ir->resource);
         }
         /* Keyboard focus is lazy (first keystroke), so this is the earliest
          * point a mouse-only client can be handed a selection it missed. */
         wayland_data_device_offer_on_interaction(server, surface);
+        wayland_primary_selection_offer_on_interaction(server, surface);
         break;
     }
     case WL_PTR_LEAVE: {
         uint32_t serial = wl_display_next_serial(server->display);
         FOR_EACH_INPUT_OF_CLIENT(ir, &server->pointer_resources, target) {
             wl_pointer_send_leave(ir->resource, serial, surface->resource);
-            wl_pointer_send_frame(ir->resource);
+            pointer_frame(ir->resource);
         }
         break;
     }
@@ -493,7 +510,7 @@ static void deferred_input_send_one(WaylandServer* server,
             wl_pointer_send_motion(ir->resource, ev->time_ms,
                                    wl_fixed_from_double(ev->x),
                                    wl_fixed_from_double(ev->y));
-            wl_pointer_send_frame(ir->resource);
+            pointer_frame(ir->resource);
         }
         break;
     case WL_PTR_BUTTON: {
@@ -508,7 +525,7 @@ static void deferred_input_send_one(WaylandServer* server,
         FOR_EACH_INPUT_OF_CLIENT(ir, &server->pointer_resources, target) {
             wl_pointer_send_button(ir->resource, serial,
                                    ev->time_ms, ev->button, ev->state);
-            wl_pointer_send_frame(ir->resource);
+            pointer_frame(ir->resource);
         }
         break;
     }
@@ -523,6 +540,7 @@ static void deferred_input_send_one(WaylandServer* server,
         }
         wayland_text_input_focus_enter(server, surface);
         wayland_data_device_offer_on_interaction(server, surface);
+        wayland_primary_selection_offer_on_interaction(server, surface);
         break;
     }
     case WL_KB_LEAVE: {
@@ -563,7 +581,7 @@ static void deferred_input_send_one(WaylandServer* server,
                                      1 /* WL_POINTER_AXIS_HORIZONTAL_SCROLL */,
                                      wl_fixed_from_double(ev->x));
             }
-            wl_pointer_send_frame(ir->resource);
+            pointer_frame(ir->resource);
         }
         break;
     }
@@ -820,6 +838,8 @@ DEF_CB_SETTER(toplevel_destroy)
 DEF_CB_SETTER(client_destroy)
 DEF_CB_SETTER(surface_commit)
 DEF_CB_SETTER(shm_surface_commit)
+DEF_CB_SETTER(toplevel_parent)
+DEF_CB_SETTER(popup_repositioned)
 DEF_CB_SETTER(toplevel_size_hints)
 DEF_CB_SETTER(subsurface_placed)
 DEF_CB_SETTER(subsurface_unmapped)

@@ -15,6 +15,7 @@ scaled by FLUTTER_DRM_DPI, default 2.0):
     down / up              press / release the left button
     click [X Y]            click (optionally moving there first)
     rclick [X Y]           right-click (optionally moving there first)
+    mclick [X Y]           middle-click (primary-selection paste)
     dblclick [X Y]         double-click (optionally moving there first)
     drag X1 Y1 X2 Y2       press at (X1,Y1), glide to (X2,Y2), release
     resize X Y DX DY       grab at (X,Y) and pull by (DX,DY) — put the grab
@@ -197,7 +198,7 @@ UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_ABSBIT = 0x40045564, 0x40045565, 0x40045567
 UI_SET_RELBIT = 0x40045566
 UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
 EV_SYN, EV_KEY, EV_REL, EV_ABS = 0x00, 0x01, 0x02, 0x03
-BTN_LEFT, BTN_RIGHT, ABS_X, ABS_Y = 0x110, 0x111, 0x00, 0x01
+BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, ABS_X, ABS_Y = 0x110, 0x111, 0x112, 0x00, 0x01
 REL_X, REL_Y = 0x00, 0x01
 REL_WHEEL, REL_WHEEL_HI_RES = 0x08, 0x0B
 
@@ -208,6 +209,7 @@ class Mouse:
         fcntl.ioctl(f, UI_SET_EVBIT, EV_KEY)
         fcntl.ioctl(f, UI_SET_KEYBIT, BTN_LEFT)
         fcntl.ioctl(f, UI_SET_KEYBIT, BTN_RIGHT)
+        fcntl.ioctl(f, UI_SET_KEYBIT, BTN_MIDDLE)
         fcntl.ioctl(f, UI_SET_EVBIT, EV_ABS)
         fcntl.ioctl(f, UI_SET_ABSBIT, ABS_X)
         fcntl.ioctl(f, UI_SET_ABSBIT, ABS_Y)
@@ -262,6 +264,7 @@ class RelMouse:
         fcntl.ioctl(f, UI_SET_EVBIT, EV_KEY)
         fcntl.ioctl(f, UI_SET_KEYBIT, BTN_LEFT)
         fcntl.ioctl(f, UI_SET_KEYBIT, BTN_RIGHT)
+        fcntl.ioctl(f, UI_SET_KEYBIT, BTN_MIDDLE)
         fcntl.ioctl(f, UI_SET_EVBIT, EV_REL)
         fcntl.ioctl(f, UI_SET_RELBIT, REL_X)
         fcntl.ioctl(f, UI_SET_RELBIT, REL_Y)
@@ -550,6 +553,13 @@ def main():
                 m.button(True, BTN_RIGHT)
                 time.sleep(0.08)
                 m.button(False, BTN_RIGHT)
+            elif cmd == "mclick":
+                if len(p) == 3:
+                    m.glide(float(p[1]), float(p[2]))
+                    time.sleep(0.15)
+                m.button(True, BTN_MIDDLE)
+                time.sleep(0.08)
+                m.button(False, BTN_MIDDLE)
             elif cmd == "dblclick":
                 if len(p) == 3:
                     m.glide(float(p[1]), float(p[2]))

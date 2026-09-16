@@ -69,6 +69,9 @@ class WindowInfo {
     /// frame adds the title bar). nil or 0 = the client set none; resizes
     /// stay inside them.
     var clientMinSize: (width: Double, height: Double)? = nil
+    /// A Wayland dialog (xdg_toplevel.set_parent) that has not drawn yet:
+    /// its first buffer's size places it centred over its parent.
+    var dialogPlacementPending = false
     var clientMaxSize: (width: Double, height: Double)? = nil
     /// wp_alpha_modifier: the client asked for its content at this opacity.
     /// The frame stays opaque; only the content area is drawn through it.

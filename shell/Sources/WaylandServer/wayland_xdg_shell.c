@@ -190,10 +190,23 @@ static void xdg_toplevel_resource_destroy(struct wl_resource* resource) {
     }
 }
 
+/* The toplevel is a dialog for `parent` (another xdg_toplevel), or for
+ * nothing. Not double-buffered: toolkits set it before the first commit,
+ * and the shell wants it before the first buffer so the dialog is never
+ * configured at the maximized size. */
 static void xdg_toplevel_set_parent_handler(struct wl_client* client,
                                             struct wl_resource* resource,
                                             struct wl_resource* parent) {
-    /* stub — we don't track parent-child relationships yet */
+    (void)client;
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (!surface) return;
+    struct WaylandSurface* p = parent ? wl_resource_get_user_data(parent) : NULL;
+    uint32_t parent_id = (p && p != surface) ? p->id : 0;
+    if (surface->toplevel_parent_id == parent_id) return;
+    surface->toplevel_parent_id = parent_id;
+    struct WaylandServer* server = surface->server;
+    if (server->cb.on_toplevel_parent)
+        server->cb.on_toplevel_parent(server->cb_ctx, surface->id, parent_id);
 }
 
 static void xdg_toplevel_set_title_handler(struct wl_client* client,
@@ -583,14 +596,39 @@ void wayland_popup_grab_dismiss_all(struct WaylandServer* server) {
     }
 }
 
+/* xdg_popup.reposition (v3): the client wants the popup placed again from
+ * a new positioner — GTK4 does it right after the first configure whenever
+ * the size it asked for and the size it wants differ, and then WAITS for
+ * `repositioned` before it draws. Left unanswered, the menu never mapped
+ * and the client's main loop sat in that wait: the first right-click menu
+ * in any GTK4 app was blank, and the events behind it (the button's own
+ * release) stayed queued. The reply is repositioned(token), then the
+ * configure pair, and the shell hears the new place to apply with the
+ * frame the client commits for it. */
 static void xdg_popup_reposition_handler(struct wl_client* client,
                                           struct wl_resource* resource,
                                           struct wl_resource* positioner,
                                           uint32_t token) {
     (void)client;
-    (void)resource;
-    (void)positioner;
-    (void)token;
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (!surface || surface->xdg_popup != resource || !surface->xdg_surface) return;
+    struct WaylandServer* server = surface->server;
+    struct WaylandPositioner* pos = positioner ? wl_resource_get_user_data(positioner) : NULL;
+    if (pos) {
+        positioner_compute_position(pos, &surface->popup_x, &surface->popup_y);
+        if (pos->width > 0) surface->popup_w = pos->width;
+        if (pos->height > 0) surface->popup_h = pos->height;
+    }
+    if (wl_resource_get_version(resource) >= XDG_POPUP_REPOSITIONED_SINCE_VERSION)
+        xdg_popup_send_repositioned(resource, token);
+    xdg_popup_send_configure(resource, surface->popup_x, surface->popup_y,
+                             surface->popup_w, surface->popup_h);
+    xdg_surface_send_configure(surface->xdg_surface, wayland_server_next_serial(server));
+    if (server->cb.on_popup_repositioned) {
+        server->cb.on_popup_repositioned(server->cb_ctx, surface->id,
+                                         surface->popup_x, surface->popup_y,
+                                         surface->popup_w, surface->popup_h);
+    }
 }
 
 static const struct xdg_popup_interface xdg_popup_impl = {
@@ -805,15 +843,9 @@ void wayland_xdg_shell_init(struct WaylandServer* server) {
  * Configure + state
  * ========================================================================== */
 
-void wayland_xdg_shell_configure(struct WaylandServer* server,
-                                 struct WaylandSurface* surface,
-                                 int32_t w, int32_t h) {
-    if (!surface->xdg_toplevel || !surface->xdg_surface) return;
-    if (w <= 0 || h <= 0) {
-        w = surface->last_conf_w;
-        h = surface->last_conf_h;
-        if (w <= 0 || h <= 0) return;   /* nothing to repeat yet */
-    }
+static void configure_send(struct WaylandServer* server,
+                           struct WaylandSurface* surface,
+                           int32_t w, int32_t h) {
     surface->last_conf_w = w;
     surface->last_conf_h = h;
 
@@ -846,6 +878,24 @@ void wayland_xdg_shell_configure(struct WaylandServer* server,
 
     xdg_surface_send_configure(surface->xdg_surface,
                                wayland_server_next_serial(server));
+}
+
+void wayland_xdg_shell_configure(struct WaylandServer* server,
+                                 struct WaylandSurface* surface,
+                                 int32_t w, int32_t h) {
+    if (!surface->xdg_toplevel || !surface->xdg_surface) return;
+    if (w <= 0 || h <= 0) {
+        w = surface->last_conf_w;
+        h = surface->last_conf_h;
+        if (w <= 0 || h <= 0) return;   /* nothing to repeat yet */
+    }
+    configure_send(server, surface, w, h);
+}
+
+void wayland_xdg_shell_configure_natural(struct WaylandServer* server,
+                                         struct WaylandSurface* surface) {
+    if (!surface->xdg_toplevel || !surface->xdg_surface) return;
+    configure_send(server, surface, 0, 0);
 }
 
 void wayland_xdg_shell_set_states(struct WaylandServer* server,

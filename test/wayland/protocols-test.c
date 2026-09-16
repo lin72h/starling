@@ -61,6 +61,7 @@
 #include "xdg-toplevel-drag-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
+#include "primary-selection-unstable-v1-client-protocol.h"
 #include <xkbcommon/xkbcommon.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -171,6 +172,7 @@ static struct {
     uint32_t popup_id; int popup_count;
     uint32_t sub_id, sub_top; int32_t sub_x, sub_y; int sub_placed;
     uint32_t sub_unmapped_id; int sub_unmapped;
+    uint32_t parent_child, parent_parent; int parent_count;
 } seen;
 
 #define LOCKED(stmt) do { pthread_mutex_lock(&seen_mu); stmt; pthread_mutex_unlock(&seen_mu); } while (0)
@@ -192,6 +194,10 @@ static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int3
 static void cb_sub_unmapped(void* ctx, uint32_t sid) {
     (void)ctx;
     LOCKED(seen.sub_unmapped_id = sid; seen.sub_unmapped++);
+}
+static void cb_parent(void* ctx, uint32_t sid, uint32_t parent) {
+    (void)ctx;
+    LOCKED(seen.parent_child = sid; seen.parent_parent = parent; seen.parent_count++);
 }
 static void cb_new_toplevel(void* ctx, uint32_t sid, uint64_t client) {
     (void)ctx; (void)client;
@@ -299,6 +305,7 @@ static struct wl_compositor* compositor;
 static struct wl_shm* shm;
 static struct wl_seat* seat;
 static struct wl_subcompositor* subcompositor;
+static struct zwp_primary_selection_device_manager_v1* prim_mgr;
 
 /* Proxies the server hands out through events (handles, heads, modes,
  * offers) that the tests read and never destroy: kept here and destroyed
@@ -336,6 +343,7 @@ static struct wl_data_device_manager* dd_mgr;
 static struct wl_registry* registry;
 static uint32_t outmgr_name, outmgr_version;
 static uint32_t wsmgr_name;
+static uint32_t seat_gname;   /* wl_seat's registry name, for a second bind */
 static int globals_removed;
 
 struct global_seen { char name[64]; uint32_t version; };
@@ -356,6 +364,7 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     BIND(shm, wl_shm, 2);
     BIND(seat, wl_seat, 9);
     BIND(subcompositor, wl_subcompositor, 1);
+    BIND(prim_mgr, zwp_primary_selection_device_manager_v1, 1);
     BIND(output, wl_output, 4);
     BIND(wm_base, xdg_wm_base, 7);
     BIND(layer_shell, zwlr_layer_shell_v1, 5);
@@ -383,6 +392,7 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     BIND(vkbd_mgr, zwp_virtual_keyboard_manager_v1, 1);
     BIND(dd_mgr, wl_data_device_manager, 3);
     if (strcmp(iface, ext_workspace_manager_v1_interface.name) == 0) wsmgr_name = id;
+    if (strcmp(iface, wl_seat_interface.name) == 0 && !seat_gname) seat_gname = id;
     /* Bound later, listener first: its heads arrive the moment it binds. */
     if (strcmp(iface, zwlr_output_manager_v1_interface.name) == 0) {
         outmgr_name = id;
@@ -1815,15 +1825,18 @@ static void test_size_hints(void) {
  * the parent window, or on nothing (the desktop), dismisses it with
  * popup_done — a nested pair topmost first. */
 static int pu_done_order[8], pu_done_n;
+static volatile int pu_conf_n; static int32_t pu_conf_x, pu_conf_y, pu_conf_w, pu_conf_h;
+static volatile int pu_repos_n; static uint32_t pu_repos_token;
 static void pu_configure(void* d, struct xdg_popup* p, int32_t x, int32_t y, int32_t w, int32_t h) {
-    (void)d; (void)p; (void)x; (void)y; (void)w; (void)h;
+    (void)d; (void)p;
+    pu_conf_x = x; pu_conf_y = y; pu_conf_w = w; pu_conf_h = h; pu_conf_n++;
 }
 static void pu_done(void* d, struct xdg_popup* p) {
     (void)p;
     if (pu_done_n < 8) pu_done_order[pu_done_n] = (int)(intptr_t)d;
     pu_done_n++;
 }
-static void pu_repositioned(void* d, struct xdg_popup* p, uint32_t token) { (void)d; (void)p; (void)token; }
+static void pu_repositioned(void* d, struct xdg_popup* p, uint32_t token) { (void)d; (void)p; pu_repos_token = token; pu_repos_n++; }
 static const struct xdg_popup_listener pu_listener = { pu_configure, pu_done, pu_repositioned };
 
 static uint32_t press_sid;
@@ -1911,6 +1924,26 @@ static void test_popup_grab(void) {
           pu_done_order[0], pu_done_order[1]);
     destroy_test_popup(&sub);
     destroy_test_popup(&m);
+
+    /* Reposition: a new positioner is answered with repositioned(token)
+     * and a configure at the new place and size, and the shell hears it.
+     * GTK4 does this right after the first configure and waits for it. */
+    struct test_popup r = make_grabbed_popup(tl_xdg, 6);
+    int conf_before = pu_conf_n, repos_before = pu_repos_n;
+    struct xdg_positioner* np = xdg_wm_base_create_positioner(wm_base);
+    xdg_positioner_set_size(np, 164, 248);
+    xdg_positioner_set_anchor_rect(np, 800, 430, 1, 1);
+    xdg_positioner_set_anchor(np, XDG_POSITIONER_ANCHOR_BOTTOM_LEFT);
+    xdg_positioner_set_gravity(np, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+    xdg_popup_reposition(r.p, np, 77);
+    xdg_positioner_destroy(np);
+    wl_display_roundtrip(dpy);
+    CHECK(pu_repos_n == repos_before + 1 && pu_repos_token == 77, "repositioned(77) came back (%d, %u)",
+          pu_repos_n - repos_before, pu_repos_token);
+    CHECK(pu_conf_n == conf_before + 1, "followed by a configure (%d)", pu_conf_n - conf_before);
+    CHECK(pu_conf_w == 164 && pu_conf_h == 248, "at the new size %dx%d", pu_conf_w, pu_conf_h);
+    CHECK(pu_conf_x == 800 && pu_conf_y == 431, "at the new place %d,%d", pu_conf_x, pu_conf_y);
+    destroy_test_popup(&r);
 
     /* No grab: an outside press is nobody's business. */
     pu_done_n = 0;
@@ -2017,6 +2050,183 @@ static void test_subsurface(void) {
     wl_buffer_destroy(big);
 }
 
+/* xdg_toplevel.set_parent: the shell hears which window a dialog belongs
+ * to, as the request arrives, and hears it cleared. */
+static void test_toplevel_parent(void) {
+    uint32_t tl_sid = seen.new_toplevel_id;
+    int before; LOCKED(before = seen.parent_count);
+    struct wl_surface* s = wl_compositor_create_surface(compositor);
+    struct xdg_surface* xs = xdg_wm_base_get_xdg_surface(wm_base, s);
+    xdg_surface_add_listener(xs, &xs_listener, NULL);
+    struct xdg_toplevel* t = xdg_surface_get_toplevel(xs);
+    xdg_toplevel_add_listener(t, &tl_listener, NULL);
+    xdg_toplevel_set_parent(t, tl_toplevel);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    uint32_t dlg_sid = seen.new_toplevel_id;
+    int n; LOCKED(n = seen.parent_count);
+    CHECK(n == before + 1, "the parent reached the shell (%d)", n - before);
+    CHECK(seen.parent_child == dlg_sid && seen.parent_parent == tl_sid,
+          "dialog %u for window %u (got %u for %u)", dlg_sid, tl_sid,
+          seen.parent_child, seen.parent_parent);
+    xdg_toplevel_set_parent(t, tl_toplevel);
+    wl_display_roundtrip(dpy);
+    LOCKED(n = seen.parent_count);
+    CHECK(n == before + 1, "the same parent again is not repeated");
+    xdg_toplevel_set_parent(t, NULL);
+    wl_display_roundtrip(dpy);
+    LOCKED(n = seen.parent_count);
+    CHECK(n == before + 2 && seen.parent_parent == 0, "cleared (%d, parent %u)", n - before,
+          seen.parent_parent);
+    xdg_toplevel_destroy(t);
+    xdg_surface_destroy(xs);
+    wl_surface_destroy(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(seen.new_toplevel_id = tl_sid);
+}
+
+/* zwp_primary_selection: a selection set on one device reaches every
+ * device, its data comes through on receive, a device bound later hears
+ * of it when the pointer enters a surface (never at get_device), a new
+ * source displaces the old with cancelled, and the owner going empties it. */
+static volatile int ps_offered;
+static char ps_mime[64];
+static struct zwp_primary_selection_offer_v1* ps_offer;
+static void pso_offer(void* d, struct zwp_primary_selection_offer_v1* o, const char* mime) {
+    (void)d; (void)o; snprintf(ps_mime, sizeof(ps_mime), "%s", mime);
+}
+static const struct zwp_primary_selection_offer_v1_listener pso_listener = { pso_offer };
+static void psd_data_offer(void* d, struct zwp_primary_selection_device_v1* dev,
+                           struct zwp_primary_selection_offer_v1* o) {
+    (void)d; (void)dev;
+    TRASH(o);
+    zwp_primary_selection_offer_v1_add_listener(o, &pso_listener, NULL);
+}
+static void psd_selection(void* d, struct zwp_primary_selection_device_v1* dev,
+                          struct zwp_primary_selection_offer_v1* o) {
+    (void)d; (void)dev; ps_offer = o; ps_offered++;
+}
+static const struct zwp_primary_selection_device_v1_listener psd_listener = { psd_data_offer, psd_selection };
+static volatile int pss_sent, pss_cancelled;
+static void pss_send(void* d, struct zwp_primary_selection_source_v1* s, const char* mime, int32_t fd) {
+    (void)d; (void)s; (void)mime;
+    ssize_t w = write(fd, "hello", 5); (void)w;
+    close(fd);
+    pss_sent++;
+}
+static void pss_cancel(void* d, struct zwp_primary_selection_source_v1* s) { (void)d; (void)s; pss_cancelled++; }
+static const struct zwp_primary_selection_source_v1_listener pss_listener = { pss_send, pss_cancel };
+static uint32_t enter_sid;
+static void task_enter(void* arg) { (void)arg; wayland_server_pointer_enter(server, enter_sid, 5, 5); }
+
+static void test_primary_selection(void) {
+    if (!prim_mgr) { CHECK(0, "no zwp_primary_selection_device_manager_v1"); return; }
+    struct zwp_primary_selection_device_v1* d1 =
+        zwp_primary_selection_device_manager_v1_get_device(prim_mgr, seat);
+    zwp_primary_selection_device_v1_add_listener(d1, &psd_listener, NULL);
+    struct zwp_primary_selection_device_v1* d2 =
+        zwp_primary_selection_device_manager_v1_get_device(prim_mgr, seat);
+    zwp_primary_selection_device_v1_add_listener(d2, &psd_listener, NULL);
+    wl_display_roundtrip(dpy);
+    CHECK(ps_offered == 0, "no selection event at get_device (Qt6 init crashes on one)");
+
+    struct zwp_primary_selection_source_v1* src =
+        zwp_primary_selection_device_manager_v1_create_source(prim_mgr);
+    zwp_primary_selection_source_v1_add_listener(src, &pss_listener, NULL);
+    zwp_primary_selection_source_v1_offer(src, "text/plain");
+    zwp_primary_selection_device_v1_set_selection(d1, src, 0);
+    wl_display_roundtrip(dpy);
+    CHECK(ps_offered == 2, "both devices were handed the selection (%d)", ps_offered);
+    CHECK(strcmp(ps_mime, "text/plain") == 0, "with its mime type (%s)", ps_mime);
+    CHECK(ps_offer != NULL, "as an offer");
+    if (ps_offer) {
+        int fds[2];
+        CHECK(pipe2(fds, O_CLOEXEC) == 0, "pipe");
+        zwp_primary_selection_offer_v1_receive(ps_offer, "text/plain", fds[1]);
+        close(fds[1]);
+        wl_display_flush(dpy);
+        CHECK(wait_for(&pss_sent, 500), "the source was asked to send");
+        char buf[16] = {0};
+        ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+        close(fds[0]);
+        CHECK(n == 5 && strcmp(buf, "hello") == 0, "and the data came through (%zd: %s)", n, buf);
+    }
+
+    /* A device bound after the copy: told when the pointer enters. */
+    ps_offered = 0;
+    struct zwp_primary_selection_device_v1* d3 =
+        zwp_primary_selection_device_manager_v1_get_device(prim_mgr, seat);
+    zwp_primary_selection_device_v1_add_listener(d3, &psd_listener, NULL);
+    wl_display_roundtrip(dpy);
+    CHECK(ps_offered == 0, "a late device is not told at get_device");
+    enter_sid = seen.new_toplevel_id;
+    on_server(task_enter, NULL);
+    CHECK(wait_for(&ps_offered, 500), "a late device hears of the selection when the pointer enters");
+    CHECK(ps_offered == 1, "once (%d), the others already had it", ps_offered);
+
+    /* A new source displaces the old one. */
+    struct zwp_primary_selection_source_v1* src2 =
+        zwp_primary_selection_device_manager_v1_create_source(prim_mgr);
+    zwp_primary_selection_source_v1_add_listener(src2, &pss_listener, NULL);
+    zwp_primary_selection_source_v1_offer(src2, "text/plain");
+    ps_offered = 0;
+    zwp_primary_selection_device_v1_set_selection(d2, src2, 0);
+    wl_display_roundtrip(dpy);
+    CHECK(pss_cancelled == 1, "the displaced source was cancelled (%d)", pss_cancelled);
+    CHECK(ps_offered == 3, "every device got the new one (%d)", ps_offered);
+
+    /* The owner goes: the selection empties. */
+    ps_offered = 0; ps_offer = (void*)(intptr_t)1;
+    zwp_primary_selection_source_v1_destroy(src2);
+    wl_display_roundtrip(dpy);
+    CHECK(ps_offered == 3 && ps_offer == NULL, "destroying the owner empties it (%d, %p)",
+          ps_offered, (void*)ps_offer);
+
+    zwp_primary_selection_source_v1_destroy(src);
+    zwp_primary_selection_device_v1_destroy(d1);
+    zwp_primary_selection_device_v1_destroy(d2);
+    zwp_primary_selection_device_v1_destroy(d3);
+    wl_display_roundtrip(dpy);
+}
+
+/* A client that binds wl_seat at version 1 (weston's demos do) has no
+ * listener for wl_pointer.frame (v5); a compositor that sends it anyway
+ * aborts the client — libwayland cannot dispatch it. Here the abort would
+ * be this process's, so the run dies rather than reports. */
+static volatile int v1_buttons;
+static void v1p_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* sf, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)s; (void)sf; (void)x; (void)y; }
+static void v1p_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* sf) { (void)d; (void)p; (void)s; (void)sf; }
+static void v1p_motion(void* d, struct wl_pointer* p, uint32_t t, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)t; (void)x; (void)y; }
+static void v1p_button(void* d, struct wl_pointer* p, uint32_t s, uint32_t t, uint32_t b, uint32_t st) { (void)d; (void)p; (void)s; (void)t; (void)b; (void)st; v1_buttons++; }
+static void v1p_axis(void* d, struct wl_pointer* p, uint32_t t, uint32_t a, wl_fixed_t v) { (void)d; (void)p; (void)t; (void)a; (void)v; }
+static const struct wl_pointer_listener v1p_listener = {
+    .enter = v1p_enter, .leave = v1p_leave, .motion = v1p_motion,
+    .button = v1p_button, .axis = v1p_axis,
+    /* .frame and later stay NULL, as they are for a v1 client */
+};
+static void task_motion_and_press(void* arg) {
+    (void)arg;
+    wayland_server_pointer_motion(server, press_sid, 3, 7, 7);
+    wayland_server_pointer_button(server, press_sid, 4, 0x110, 1);
+    wayland_server_pointer_button(server, press_sid, 5, 0x110, 0);
+    wayland_server_pointer_leave(server, press_sid);
+}
+static void test_seat_v1_pointer(void) {
+    struct wl_seat* seat1 = wl_registry_bind(registry, seat_gname, &wl_seat_interface, 1);
+    struct wl_pointer* ptr = wl_seat_get_pointer(seat1);
+    wl_pointer_add_listener(ptr, &v1p_listener, NULL);
+    wl_display_roundtrip(dpy);
+    press_sid = seen.new_toplevel_id;
+    enter_sid = press_sid;
+    on_server(task_enter, NULL);
+    on_server(task_motion_and_press, NULL);
+    CHECK(wait_for(&v1_buttons, 500), "a v1 pointer gets its button events, and lives");
+    CHECK(v1_buttons == 2, "press and release (%d)", v1_buttons);
+    wl_pointer_destroy(ptr);
+    wl_seat_destroy(seat1);
+    wl_display_roundtrip(dpy);
+}
+
 static void test_unmap(void) {
     ftl_closed = 0;
     xdg_toplevel_destroy(tl_toplevel);
@@ -2059,6 +2269,7 @@ int main(void) {
     wayland_server_on_toplevel_drag(server, cb_tdrag, NULL);
     wayland_server_on_output_config(server, cb_outcfg, NULL);
     wayland_server_on_toplevel_size_hints(server, cb_size_hints, NULL);
+    wayland_server_on_toplevel_parent(server, cb_parent, NULL);
     wayland_server_on_new_popup(server, cb_new_popup, NULL);
     wayland_server_on_subsurface_placed(server, cb_sub_placed, NULL);
     wayland_server_on_subsurface_unmapped(server, cb_sub_unmapped, NULL);
@@ -2100,6 +2311,9 @@ int main(void) {
         test_size_hints();
         test_popup_grab();
         test_subsurface();
+        test_toplevel_parent();
+        test_primary_selection();
+        test_seat_v1_pointer();
         test_unmap();
     } else {
         CHECK(0, "core globals missing; protocol tests skipped");

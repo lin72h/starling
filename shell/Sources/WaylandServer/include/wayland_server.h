@@ -152,6 +152,18 @@ void wayland_server_on_shm_surface_commit(WaylandServer* server,
 void wayland_shm_pack_rgba(void* dst, const void* src, int width, int height,
                            int src_stride, int keep_alpha);
 
+/* xdg_popup.reposition answered: the popup's new place (relative to its
+ * parent) and size, applied by the shell with the frame the client then
+ * commits. */
+void wayland_server_on_popup_repositioned(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int x, int y, int w, int h), void* ctx);
+
+/* xdg_toplevel.set_parent: this toplevel is a dialog for `parent_id` (a
+ * surface id; 0 when the parent is cleared). Fired as the request arrives —
+ * for a toolkit's dialog that is before its first buffer. */
+void wayland_server_on_toplevel_parent(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, uint32_t parent_id), void* ctx);
+
 /* xdg_toplevel min/max size hints (surface coordinates, 0 = unset), applied
  * on commit. The shell keeps its interactive resizes within them. */
 void wayland_server_on_toplevel_size_hints(WaylandServer* server,
@@ -492,6 +504,10 @@ pid_t wayland_server_surface_pid(WaylandServer* server, uint32_t surface_id);
 void wayland_server_configure_toplevel(WaylandServer* server,
                                        uint32_t surface_id,
                                        int width, int height);
+/* Configure with no size (0x0) and the current states: the client picks
+ * its own size. The shell uses it for a dialog, which must not come up at
+ * the maximized size it would otherwise be configured to. */
+void wayland_server_configure_toplevel_natural(WaylandServer* server, uint32_t surface_id);
 
 /* Send a fullscreen configure event to a toplevel surface.
  * Sends ACTIVATED + FULLSCREEN states. width/height are surface-local. */

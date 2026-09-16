@@ -602,16 +602,38 @@ class X11Integration {
 
         switch phase {
         case 2: // down
-            x11_server_pointer_button(server, 1, 1, Int32(x), Int32(y))  // BTN_LEFT
+            _syncButtons(server, windowId: windowId, mask: buttons, x: x, y: y)
         case 1: // up
-            x11_server_pointer_button(server, 1, 0, Int32(x), Int32(y))
-        case 3: // move (dragging)
+            _syncButtons(server, windowId: windowId, mask: buttons, x: x, y: y)
+        case 3: // move (dragging) — a chord's second button comes as a move
             x11_server_pointer_motion(server, Int32(x), Int32(y))
+            _syncButtons(server, windowId: windowId, mask: buttons, x: x, y: y)
         case 6: // hover
             x11_server_pointer_motion(server, Int32(x), Int32(y))
+            _syncButtons(server, windowId: windowId, mask: 0, x: x, y: y)
         default:
             break
         }
+    }
+
+    /// Flutter's button mask → X button numbers, sent as the difference
+    /// from what this window was last told. Every button used to go out as
+    /// button 1, so a right-click in an X11 app was a left click.
+    private var _heldButtons: [UInt32: Int64] = [:]
+    private static let _buttonNumbers: [(mask: Int64, button: UInt32)] = [
+        (1, 1), (2, 3), (4, 2), (8, 8), (16, 9),
+    ]
+    private func _syncButtons(_ server: OpaquePointer, windowId: UInt32, mask: Int64,
+                              x: Double, y: Double) {
+        let held = _heldButtons[windowId] ?? 0
+        if held == mask { return }
+        for b in Self._buttonNumbers {
+            let was = held & b.mask != 0, now = mask & b.mask != 0
+            if now && !was { x11_server_pointer_button(server, b.button, 1, Int32(x), Int32(y)) }
+            if was && !now { x11_server_pointer_button(server, b.button, 0, Int32(x), Int32(y)) }
+        }
+        if mask == 0 { _heldButtons.removeValue(forKey: windowId) }
+        else { _heldButtons[windowId] = mask }
     }
 
     /// Ask the client owning `windowId` to close (WM_DELETE_WINDOW).

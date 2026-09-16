@@ -69,6 +69,10 @@ struct WaylandSurface {
     /* xdg_popup.grab: a press outside the popup's tree dismisses it. */
     int popup_grabbed;
 
+    /* xdg_toplevel.set_parent: the toplevel this one is a dialog for (its
+     * surface id), 0 for none. Applied at once, as the request is. */
+    uint32_t toplevel_parent_id;
+
     /* xdg_toplevel.set_min_size / set_max_size, double-buffered: the
      * pending pair lands on commit, and the shell hears the four together. */
     int32_t pending_min_w, pending_min_h, pending_max_w, pending_max_h;
@@ -422,6 +426,10 @@ struct WaylandServer {
     // themselves in their resource destructor — never store a bare
     // wl_data_device pointer here.
     struct wl_list data_device_resources;
+    /* The primary selection (zwp_primary_selection_v1, middle-click paste):
+     * its own owner, serial and devices, the same shape as `clipboard`. */
+    struct WaylandClipboard primary;
+    struct wl_list primary_device_resources;  // PrimaryDevice.link
     // All bound zwlr_data_control_device_v1 resources (same discipline).
     struct wl_list data_control_devices;
 
@@ -487,6 +495,14 @@ struct WaylandServer {
                                        int buffer_scale, int keep_alpha);
         /* xdg_toplevel min/max size hints, in surface coordinates, 0 =
          * unset. Applied on commit; the shell clamps its resizes to them. */
+        /* xdg_popup.reposition answered: the popup's new place and size
+         * relative to its parent, to take effect with its next frame. */
+        void (*on_popup_repositioned)(void* ctx, uint32_t surface_id,
+                                      int x, int y, int w, int h);
+        /* xdg_toplevel.set_parent: `parent_id` is the parent toplevel's
+         * surface id, 0 when cleared. A dialog is placed over its parent,
+         * stays above it and does not open maximized. */
+        void (*on_toplevel_parent)(void* ctx, uint32_t surface_id, uint32_t parent_id);
         void (*on_toplevel_size_hints)(void* ctx, uint32_t surface_id,
                                        int32_t min_w, int32_t min_h,
                                        int32_t max_w, int32_t max_h);
@@ -903,6 +919,10 @@ void wayland_cursor_shape_init(struct WaylandServer* server);
 void wayland_pointer_constraints_init(struct WaylandServer* server);
 void wayland_relative_pointer_init(struct WaylandServer* server);
 void wayland_primary_selection_init(struct WaylandServer* server);
+/* A client's pointer or keyboard entered a surface: hand its primary-
+ * selection devices the current selection if they have not had it. */
+void wayland_primary_selection_offer_on_interaction(struct WaylandServer* server,
+                                                    struct WaylandSurface* surface);
 void wayland_text_input_init(struct WaylandServer* server);
 void wayland_text_input_focus_enter(struct WaylandServer* server,
                                     struct WaylandSurface* surface);
@@ -924,6 +944,10 @@ int wayland_xdg_activation_consume_token(struct WaylandServer* server,
 /* Send a toplevel configure carrying the surface's current state bits
  * (ACTIVATED always — see wayland_xdg_shell.c). w/h = 0 repeats the last
  * configured size. */
+/* A configure of 0x0 — "pick your own size" — with the current states.
+ * For a dialog, which the shell does not open maximized. */
+void wayland_xdg_shell_configure_natural(struct WaylandServer* server,
+                                         struct WaylandSurface* surface);
 void wayland_xdg_shell_configure(struct WaylandServer* server,
                                  struct WaylandSurface* surface,
                                  int32_t w, int32_t h);

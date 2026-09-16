@@ -106,6 +106,10 @@ private enum WaylandEvent: @unchecked Sendable {
     case windowGeometry(surfaceId: UInt32, x: Int, y: Int, width: Int, height: Int)
     /// xdg_toplevel min/max size hints, surface coordinates, 0 = unset.
     case sizeHints(surfaceId: UInt32, minW: Int32, minH: Int32, maxW: Int32, maxH: Int32)
+    /// xdg_toplevel.set_parent: a dialog for `parentId` (0 = cleared).
+    case toplevelParent(surfaceId: UInt32, parentId: UInt32)
+    /// xdg_popup.reposition answered: parent-relative place and size.
+    case popupRepositioned(surfaceId: UInt32, x: Int, y: Int, width: Int, height: Int)
     /// A subsurface with content of its own, drawn inside its toplevel's
     /// window at (x, y) from the toplevel's surface origin.
     case subsurfacePlaced(surfaceId: UInt32, toplevelId: UInt32, x: Int32, y: Int32)
@@ -155,6 +159,8 @@ private enum WaylandEvent: @unchecked Sendable {
 /// Commands produced on the UI thread, executed on the platform thread.
 private enum WaylandCommand: @unchecked Sendable {
     case configureToplevel(surfaceId: UInt32, width: Int32, height: Int32)
+    /// A 0x0 configure: the client picks its size (a dialog).
+    case configureToplevelNatural(surfaceId: UInt32)
     case closeToplevel(surfaceId: UInt32)
     case flushClients
     case updateScale(scale: Int32, fractional120: UInt32)
@@ -217,6 +223,9 @@ class WaylandIntegration {
     private var surfaceGeometry: [UInt32: (x: Int, y: Int, width: Int, height: Int)] = [:]
     private var lastEmittedGeometry: [UInt32: (x: Int, y: Int, w: Int, h: Int, bufW: Int, bufH: Int)] = [:]
     private var popupSurfaceIds: Set<UInt32> = []
+    /// Popups repositioned since their last frame: the new place waits for
+    /// the frame the client commits for it (surface units, parent-relative).
+    private var pendingPopupMoves: [UInt32: (x: Int, y: Int)] = [:]
     /// Wayland subsurfaces the shell draws inside a window: their toplevel
     /// (a surface id in surfaceWindows), their offset from its surface
     /// origin, their logical size, and the rect last handed to the shell.
@@ -281,9 +290,18 @@ class WaylandIntegration {
     var onAppIdChanged: ((_ windowId: String, _ appId: String) -> Void)?
     var onWindowBufferResized: ((_ windowId: String, _ logicalWidth: Int, _ logicalHeight: Int) -> Void)?
     var onPopupBufferResized: ((_ popupId: String, _ logicalWidth: Int, _ logicalHeight: Int, _ geoX: Int, _ geoY: Int) -> Void)?
+    /// A repositioned popup's first frame after the reposition: its new
+    /// parent-relative place (x, y — surface units, before the geometry
+    /// offset) with the size and geometry of that frame, all at once.
+    var onPopupRepositioned: ((_ popupId: String, _ logicalWidth: Int, _ logicalHeight: Int,
+                               _ geoX: Int, _ geoY: Int, _ x: Int, _ y: Int) -> Void)?
     var onNewPopup: ((_ surfaceId: UInt32, _ textureId: Int, _ parentSurfaceId: UInt32, _ x: Int, _ y: Int, _ width: Int, _ height: Int) -> String)?
     var onPopupDestroyed: ((_ popupId: String) -> Void)?
     var onWindowGeometryChanged: ((_ windowId: String, _ x: Int, _ y: Int, _ width: Int, _ height: Int, _ bufferLogicalWidth: Int, _ bufferLogicalHeight: Int) -> Void)?
+    /// xdg_toplevel.set_parent: the window is a dialog for `parentWindowId`
+    /// (nil = cleared). `mapped` says whether it has drawn yet — before its
+    /// first buffer the shell can still change what it is configured to.
+    var onWindowParent: ((_ windowId: String, _ parentWindowId: String?, _ mapped: Bool) -> Void)?
     /// xdg_toplevel min/max size hints in the shell's logical pixels
     /// (content size; 0 = unset). The shell clamps its resizes to them.
     var onWindowSizeHints: ((_ windowId: String, _ minW: Double, _ minH: Double,
@@ -534,6 +552,20 @@ class WaylandIntegration {
                                        width: Int(w), height: Int(h))
         }, ctx)
 
+        wayland_server_on_popup_repositioned(server, { (ctx, surfaceId, x, y, w, h) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.pendingEvents.withLock { $0.append(.popupRepositioned(
+                surfaceId: surfaceId, x: Int(x), y: Int(y), width: Int(w), height: Int(h))) }
+            this._needsFrame = true
+        }, ctx)
+
+        wayland_server_on_toplevel_parent(server, { (ctx, surfaceId, parentId) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.pendingEvents.withLock { $0.append(.toplevelParent(
+                surfaceId: surfaceId, parentId: parentId)) }
+            this._needsFrame = true
+        }, ctx)
+
         wayland_server_on_toplevel_size_hints(server, { (ctx, surfaceId, minW, minH, maxW, maxH) in
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             this.pendingEvents.withLock { $0.append(.sizeHints(
@@ -781,6 +813,8 @@ class WaylandIntegration {
             switch cmd {
             case .configureToplevel(let surfaceId, let w, let h):
                 wayland_server_configure_toplevel(server, surfaceId, w, h)
+            case .configureToplevelNatural(let surfaceId):
+                wayland_server_configure_toplevel_natural(server, surfaceId)
             case .closeToplevel(let surfaceId):
                 wayland_server_close_toplevel(server, surfaceId)
             case .flushClients:
@@ -888,6 +922,13 @@ class WaylandIntegration {
                     let f = fractionalScale / shellDpi
                     onWindowSizeHints?(windowId, Double(minW) * f, Double(minH) * f,
                                        Double(maxW) * f, Double(maxH) * f)
+                }
+            case .popupRepositioned(let surfaceId, let x, let y, _, _):
+                pendingPopupMoves[surfaceId] = (x, y)
+            case .toplevelParent(let surfaceId, let parentId):
+                if let windowId = surfaceWindows[surfaceId] {
+                    let parent = parentId != 0 ? surfaceWindows[parentId] : nil
+                    onWindowParent?(windowId, parent, surfaceSizes[surfaceId] != nil)
                 }
             case .subsurfacePlaced(let surfaceId, let toplevelId, let x, let y):
                 processSubsurfacePlaced(surfaceId, toplevelId: toplevelId, x: Int(x), y: Int(y))
@@ -1322,7 +1363,19 @@ class WaylandIntegration {
         let sizeChanged = prevSize.map { $0.0 != width || $0.1 != height } ?? true
         let scaleChanged = prevScale.map { $0 != bufferScale } ?? true
         let isLayer = layerSurfaceIds.contains(surfaceId)
-        if sizeChanged || scaleChanged {
+        // A repositioned popup: this frame is the one drawn for the new
+        // place, so the move lands with it, whatever the size did.
+        if let move = pendingPopupMoves.removeValue(forKey: surfaceId),
+           popupSurfaceIds.contains(surfaceId),
+           let popupId = surfaceWindows[surfaceId] {
+            let geo = surfaceGeometry[surfaceId]
+            onPopupRepositioned?(popupId,
+                                 Int(Double(width) / effectiveScale),
+                                 Int(Double(height) / effectiveScale),
+                                 Int(Double(geo?.x ?? 0) * fractionalScale / shellDpi),
+                                 Int(Double(geo?.y ?? 0) * fractionalScale / shellDpi),
+                                 move.x, move.y)
+        } else if sizeChanged || scaleChanged {
             if let windowId = surfaceWindows[surfaceId] {
                 let isPopup = popupSurfaceIds.contains(surfaceId)
                 if isLayer {
@@ -1592,6 +1645,7 @@ class WaylandIntegration {
 
     private func processPopupDestroy(_ surfaceId: UInt32) {
         popupSurfaceIds.remove(surfaceId)
+        pendingPopupMoves.removeValue(forKey: surfaceId)
 
         if let popupId = surfaceWindows.removeValue(forKey: surfaceId) {
             onPopupDestroyed?(popupId)
@@ -2127,18 +2181,47 @@ class WaylandIntegration {
         switch phase {
         case 2: // down
             _pressReachedClient = true
-            wayland_server_pointer_button(server, surfaceId, timeMs, 0x110, 1)
+            _syncButtons(server, surfaceId: surfaceId, mask: buttons, timeMs: timeMs)
         case 1: // up
-            wayland_server_pointer_button(server, surfaceId, timeMs, 0x110, 0)
-        case 3: // move
+            _syncButtons(server, surfaceId: surfaceId, mask: buttons, timeMs: timeMs)
+        case 3: // move — a second button pressed or released mid-drag
+                // arrives as a move with a changed mask, not as down/up
             let d = shellDpi / fractionalScale
             wayland_server_pointer_motion(server, surfaceId, timeMs, x * d, y * d)
+            _syncButtons(server, surfaceId: surfaceId, mask: buttons, timeMs: timeMs)
         case 6: // hover
             let d = shellDpi / fractionalScale
             wayland_server_pointer_motion(server, surfaceId, timeMs, x * d, y * d)
+            _syncButtons(server, surfaceId: surfaceId, mask: 0, timeMs: timeMs)
         default:
             break
         }
+    }
+
+    /// Flutter's button mask → evdev codes. What the client is told is the
+    /// DIFFERENCE from what it was last told for this surface, so a chord
+    /// presses and releases each button once, whatever order Flutter's
+    /// events arrive in. Every button used to be sent as BTN_LEFT: a
+    /// right-click in any Wayland app was a left click.
+    private var _heldButtons: [UInt32: Int64] = [:]
+    private static let _buttonCodes: [(mask: Int64, code: UInt32)] = [
+        (1, 0x110),   // kPrimaryButton      → BTN_LEFT
+        (2, 0x111),   // kSecondaryButton    → BTN_RIGHT
+        (4, 0x112),   // kMiddleMouseButton  → BTN_MIDDLE
+        (8, 0x113),   // kBackMouseButton    → BTN_SIDE
+        (16, 0x114),  // kForwardMouseButton → BTN_EXTRA
+    ]
+    private func _syncButtons(_ server: OpaquePointer, surfaceId: UInt32, mask: Int64,
+                              timeMs: UInt32) {
+        let held = _heldButtons[surfaceId] ?? 0
+        if held == mask { return }
+        for b in Self._buttonCodes {
+            let was = held & b.mask != 0, now = mask & b.mask != 0
+            if now && !was { wayland_server_pointer_button(server, surfaceId, timeMs, b.code, 1) }
+            if was && !now { wayland_server_pointer_button(server, surfaceId, timeMs, b.code, 0) }
+        }
+        if mask == 0 { _heldButtons.removeValue(forKey: surfaceId) }
+        else { _heldButtons[surfaceId] = mask }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2201,6 +2284,18 @@ class WaylandIntegration {
         let sh = Int32(Double(height) * shellDpi / fractionalScale)
         syncToplevelState(surfaceId: surfaceId)
         enqueueCommand(.configureToplevel(surfaceId: surfaceId, width: sw, height: sh))
+        enqueueCommand(.flushClients)
+    }
+
+    /// Configure with no size: the client picks its own. For a dialog,
+    /// which was configured to the maximized size when it appeared and must
+    /// not draw at it. Any throttled resize is dropped — it was that size.
+    func sendNaturalSize(surfaceId: UInt32) {
+        guard server != nil else { return }
+        pendingResize.removeValue(forKey: surfaceId)
+        lastResizeTime[surfaceId] = DispatchTime.now().uptimeNanoseconds
+        syncToplevelState(surfaceId: surfaceId)
+        enqueueCommand(.configureToplevelNatural(surfaceId: surfaceId))
         enqueueCommand(.flushClients)
     }
 
