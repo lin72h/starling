@@ -221,7 +221,6 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     // removal done outside this window — the CLI, the dock, another view — is
     // reflected live without reopening the store.
     private var states: [String: InstallState] = [:]
-    private var selectedCategory = "Discover"
 
     /// Apps the shell reports as live. Removing one would pull the package
     /// out from under a running program, so Remove is disabled for them.
@@ -231,8 +230,40 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     /// dock shows.
     private var running: Set<String> = []
 
+    // Flathub page. Collections load once on first visit; a search replaces
+    // them while the query is non-empty. Results are Flathub's own records
+    // turned into AppRecords, so every row below is the same row widget.
+    private let flathubSearch = TextEditingController()
+    private var flathubQuery = ""
+    private var flathubSearchGeneration = 0
+    private var flathubResults: [FlathubApp]? = nil
+    private var flathubSearching = false
+    private var flathubPopular: [FlathubApp]? = nil
+    private var flathubTrending: [FlathubApp]? = nil
+    private var flathubError: String? = nil
+    private var flathubLoadedCollections = false
+    // The page the sidebar has selected: "Discover", "Installed", or one of
+    // Flathub's category ids below. Every page is filled from Flathub.
+    private var selectedPage = "Discover"
+    /// Flathub's main categories, in sidebar order. Left: the id its
+    /// collection endpoint takes; right: the label.
+    static let flathubCategories: [(id: String, label: String)] = [
+        ("AudioVideo", "Audio & Video"), ("Development", "Development"),
+        ("Education", "Education"), ("Game", "Games"), ("Graphics", "Graphics"),
+        ("Network", "Internet"), ("Office", "Office"), ("Science", "Science"),
+        ("System", "System"), ("Utility", "Utilities"),
+    ]
+    // A category's listing loads the first time its page is opened.
+    private var flathubCategoryApps: [String: [FlathubApp]] = [:]
+    private var flathubCategoryError: [String: String] = [:]
+    private var flathubCategoryRequested: Set<String> = []
+
     override func initState() {
         super.initState()
+        FlathubClient.shared.onIconsChanged = { [weak self] in
+            guard let self else { return }
+            self.setState {}
+        }
         ShellLink.shared.onRunningChanged = { [weak self] live in
             guard let self, live != self.running else { return }
             self.setState { self.running = live }
@@ -241,6 +272,7 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     }
 
     override func dispose() {
+        FlathubClient.shared.onIconsChanged = nil
         ShellLink.shared.onRunningChanged = nil
         ShellLink.shared.disconnect()
         super.dispose()
@@ -250,6 +282,7 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         switch entry.backend {
         case .host(let bins):     return HostStore.shared.isInstalled(bins: bins)
         case .deb(_, let marker): return DebStore.shared.isInstalled(entry.id, marker: marker)
+        case .flatpak(let appId): return HostStore.shared.isFlatpakInstalled(appId)
         }
     }
 
@@ -292,6 +325,15 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         case .deb(let url, let marker):
             DebStore.shared.install(entry.id, url: url, marker: marker,
                                     onUpdate: onUpdate)
+        case .flatpak(let appId):
+            HostStore.shared.installFlatpak(appId) { state in
+                onUpdate(state)
+                if case .installed = state {
+                    // The launcher and dock learn of it by watching Flatpak's
+                    // exports; the store's own list is refreshed here.
+                    DispatchQueue.main.async { AppRegistry.shared.reload() }
+                }
+            }
         }
     }
 
@@ -317,11 +359,22 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                                     onUpdate: onUpdate)
         case .deb:
             DebStore.shared.remove(entry.id, onUpdate: onUpdate)
+        case .flatpak(let appId):
+            HostStore.shared.removeFlatpak(appId) { state in
+                onUpdate(state)
+                if case .notInstalled = state {
+                    DispatchQueue.main.async { AppRegistry.shared.reload() }
+                }
+            }
         }
     }
 
     /// Open an installed app through the same launcher the dock uses.
     private func _open(_ entry: AppRecord) {
+        if case .flatpak(let appId) = entry.backend {
+            HostStore.shared.launchFlatpak(appId)
+            return
+        }
         HostStore.shared.launch(entry.exec)
     }
 
@@ -331,25 +384,41 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         let theme = MacosTheme.of(context)
         pal = StorePalette(dark: theme.brightness == .dark)
 
+        // The store is Flathub, and nothing else: third-party apps come from
+        // there, sandboxed, with a graphics stack the runtime keeps current.
+        // Discover, Installed and the category shelves are all Flathub. The
+        // catalog's remaining host entries (Chrome, VS Code, IntelliJ,
+        // Ubuntu's App Center) are launcher and dock entries, installed from
+        // the command line with `app-install <id>` — not store items.
+        let page: Widget
+        switch selectedPage {
+        case "Discover": page = _buildDiscover()
+        case "Installed": page = _buildInstalled()
+        default: page = _buildCategoryPage(selectedPage)
+        }
         return ColoredBox(
             color: pal.background,
             child: Row(crossAxisAlignment: .stretch, children: [
                 _buildSidebar(),
-                Expanded(child: selectedCategory == "Discover"
-                    ? _buildDiscover()
-                    : _buildCategory(selectedCategory)),
+                Expanded(child: page),
             ])
         )
     }
 
+    /// Categories with at least one app, in catalog order — the first app of
+    /// each category decides where its section sits, so the shelf order is a
+    /// curation the catalog owns rather than an alphabetical accident.
+
+    /// Filtered list page for a sidebar category (Browsers, Work, …).
+
     // MARK: Sidebar
 
-    private func _sidebarItem(_ label: String) -> Widget {
-        let selected = label == selectedCategory
+    private func _sidebarItem(_ id: String, _ label: String) -> Widget {
+        let selected = id == selectedPage
         return GestureDetector(
             onTap: { [self] in
-                if selectedCategory != label {
-                    setState { selectedCategory = label }
+                if selectedPage != id {
+                    setState { selectedPage = id }
                 }
             },
             behavior: .opaque,
@@ -373,18 +442,6 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
         )
     }
 
-    /// Categories with at least one app, in catalog order — the first app of
-    /// each category decides where its section sits, so the shelf order is a
-    /// curation the catalog owns rather than an alphabetical accident.
-    private func _categories() -> [String] {
-        var seen: [String] = []
-        for entry in AppRecord.storeCatalog
-        where !entry.category.isEmpty && !seen.contains(entry.category) {
-            seen.append(entry.category)
-        }
-        return seen
-    }
-
     private func _buildSidebar() -> Widget {
         return SizedBox(
             width: 185,
@@ -399,104 +456,229 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                                 color: pal.textPrimary, fontSize: 17, fontWeight: .w700)),
                         ])
                     ),
-                    // Sections come from the catalog: every category that has
-                    // at least one app, so there is never an empty shelf and
-                    // never a new category that fails to show up.
-                    _sidebarItem("Discover"),
-                ] + _categories().map { _sidebarItem($0) } + [
+                    _sidebarItem("Discover", "Discover"),
+                    _sidebarItem("Installed", "Installed"),
+                    SizedBox(height: 10),
+                ] + Self.flathubCategories.map { _sidebarItem($0.id, $0.label) } + [
                     Expanded(child: SizedBox(expand: ())),
                 ])
             )
         )
     }
 
-    // MARK: Discover page
+    // MARK: Flathub data
 
-    private func _buildDiscover() -> Widget {
-        let catalog = AppRecord.storeCatalog
+    private func _loadFlathubCollections() {
+        guard !flathubLoadedCollections else { return }
+        flathubLoadedCollections = true
+        FlathubClient.shared.collection("popular") { [weak self] apps, error in
+            guard let self else { return }
+            self.setState {
+                self.flathubPopular = apps
+                if let error, self.flathubPopular == nil { self.flathubError = error }
+            }
+        }
+        FlathubClient.shared.collection("trending") { [weak self] apps, _ in
+            guard let self else { return }
+            self.setState { self.flathubTrending = apps }
+        }
+    }
+
+    private func _loadCategory(_ id: String) {
+        guard !flathubCategoryRequested.contains(id) else { return }
+        flathubCategoryRequested.insert(id)
+        FlathubClient.shared.collection("category/\(id)?page=1&per_page=40") { [weak self] apps, error in
+            guard let self else { return }
+            self.setState {
+                if let apps { self.flathubCategoryApps[id] = apps }
+                if let error { self.flathubCategoryError[id] = error }
+            }
+        }
+    }
+
+    private func _flathubQueryChanged(_ q: String) {
+        let trimmed = q.trimmingCharacters(in: .whitespaces)
+        flathubQuery = trimmed
+        flathubSearchGeneration += 1
+        let gen = flathubSearchGeneration
+        if trimmed.count < 2 {
+            setState { flathubResults = nil; flathubSearching = false }
+            return
+        }
+        // Debounced: a keystroke starts a search only once typing pauses.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, gen == self.flathubSearchGeneration else { return }
+            self._runFlathubSearch(trimmed, generation: gen)
+        }
+    }
+
+    private func _runFlathubSearch(_ q: String, generation: Int) {
+        setState { flathubSearching = true; flathubError = nil }
+        FlathubClient.shared.search(q) { [weak self] apps, error in
+            guard let self, generation == self.flathubSearchGeneration else { return }
+            self.setState {
+                self.flathubSearching = false
+                self.flathubResults = apps ?? []
+                self.flathubError = error
+            }
+        }
+    }
+
+    // MARK: Pages
+
+    /// A Flathub app as a store row: its record, with the icon fetch kicked
+    /// off the first time the row is built.
+    private func _flathubRow(_ app: FlathubApp) -> Widget {
+        FlathubClient.shared.loadIcon(appId: app.appId, url: app.iconURL, localPath: nil)
+        return _appRow(app.record())
+    }
+
+    private func _card(_ rows: [Widget]) -> Widget {
+        DecoratedBox(
+            decoration: BoxDecoration(
+                color: pal.card,
+                borderRadius: BorderRadius.circular(12)
+            ),
+            child: Padding(
+                padding: EdgeInsets(left: 16, top: 4, right: 16, bottom: 4),
+                child: Column(children: rows)
+            )
+        )
+    }
+
+    private func _flathubList(_ apps: [FlathubApp]) -> Widget {
         var rows: [Widget] = []
-        for (i, entry) in catalog.enumerated() {
-            if i > 0 { rows.append(_divider()) }
-            rows.append(_appRow(entry))
+        for app in apps {
+            if !rows.isEmpty { rows.append(_divider()) }
+            rows.append(_flathubRow(app))
         }
-        guard let featured = catalog.first else {
-            return Center(child: Text("No app catalog installed.",
-                                      style: TextStyle(color: pal.textSecondary,
-                                                       fontSize: 14)))
-        }
-        return SingleChildScrollView(
-            padding: EdgeInsets(left: 24, top: 20, right: 24, bottom: 24),
-            child: Column(crossAxisAlignment: .start, children: [
-                Row(children: [
-                    Text("Discover", style: TextStyle(
-                        color: pal.textPrimary, fontSize: 24, fontWeight: .w700)),
-                ]),
-                SizedBox(height: 16),
-                _featuredCard(featured),
-                SizedBox(height: 26),
-                Row(children: [
-                    Text("More Apps", style: TextStyle(
-                        color: pal.textPrimary, fontSize: 17, fontWeight: .w600)),
-                ]),
-                SizedBox(height: 6),
-                DecoratedBox(
-                    decoration: BoxDecoration(
-                        color: pal.card,
-                        borderRadius: BorderRadius.circular(12)
-                    ),
-                    child: Padding(
-                        padding: EdgeInsets(left: 16, top: 4, right: 16, bottom: 4),
-                        child: Column(children: rows)
-                    )
-                ),
+        return _card(rows)
+    }
+
+    private func _sectionTitle(_ title: String) -> Widget {
+        Row(children: [
+            Text(title, style: TextStyle(
+                color: pal.textPrimary, fontSize: 17, fontWeight: .w600)),
+        ])
+    }
+
+    private func _note(_ text: String, color: Color? = nil) -> Widget {
+        Padding(
+            padding: EdgeInsets(left: 0, top: 16, right: 0, bottom: 0),
+            child: Row(children: [
+                Text(text, style: TextStyle(color: color ?? pal.textSecondary, fontSize: 14)),
             ])
         )
     }
 
-    // MARK: Category pages
-
-    /// Filtered list page for a sidebar category (Browsers, Work, …).
-    private func _buildCategory(_ category: String) -> Widget {
-        let entries = AppRecord.storeCatalog.filter { $0.category == category }
-
-        var rows: [Widget] = []
-        for entry in entries {
-            if !rows.isEmpty { rows.append(_divider()) }
-            rows.append(_appRow(entry))
-        }
-
-        var children: [Widget] = [
+    private func _pageHeader(_ title: String, _ subtitle: String) -> [Widget] {
+        [
             Row(children: [
-                Text(category, style: TextStyle(
+                Text(title, style: TextStyle(
                     color: pal.textPrimary, fontSize: 24, fontWeight: .w700)),
             ]),
-            SizedBox(height: 16),
+            SizedBox(height: 4),
+            Row(children: [
+                Text(subtitle, style: TextStyle(color: pal.textSecondary, fontSize: 12)),
+            ]),
         ]
-        if entries.isEmpty {
-            children.append(Padding(
-                padding: EdgeInsets(left: 0, top: 24, right: 0, bottom: 0),
-                child: Row(children: [
-                    Text("No apps in \(category) yet.", style: TextStyle(
-                        color: pal.textSecondary, fontSize: 14)),
-                ])
-            ))
-        } else {
-            children.append(DecoratedBox(
-                decoration: BoxDecoration(
-                    color: pal.card,
-                    borderRadius: BorderRadius.circular(12)
-                ),
-                child: Padding(
-                    padding: EdgeInsets(left: 16, top: 4, right: 16, bottom: 4),
-                    child: Column(children: rows)
-                )
-            ))
-        }
+    }
 
-        return SingleChildScrollView(
+    private func _page(_ children: [Widget]) -> Widget {
+        SingleChildScrollView(
             padding: EdgeInsets(left: 24, top: 20, right: 24, bottom: 24),
             child: Column(crossAxisAlignment: .start, children: children)
         )
+    }
+
+    /// Search, then what Flathub says is popular and trending.
+    private func _buildDiscover() -> Widget {
+        _loadFlathubCollections()
+        var children = _pageHeader(
+            "Discover",
+            "Apps from Flathub, sandboxed, with a graphics driver the store keeps current.")
+        children.append(SizedBox(height: 14))
+        children.append(SizedBox(width: 420, child: MacosSearchField(
+            controller: flathubSearch,
+            placeholder: "Search Flathub",
+            onChanged: { [self] q in _flathubQueryChanged(q) },
+            onSubmitted: { [self] q in
+                flathubSearchGeneration += 1
+                _runFlathubSearch(q.trimmingCharacters(in: .whitespaces),
+                                  generation: flathubSearchGeneration)
+            }
+        )))
+        children.append(SizedBox(height: 20))
+        if !flathubQuery.isEmpty {
+            if flathubSearching {
+                children.append(_note("Searching…"))
+            } else if let error = flathubError {
+                children.append(_note(error, color: pal.failedRed))
+            } else if let results = flathubResults {
+                if results.isEmpty {
+                    children.append(_note("Nothing on Flathub matches “\(flathubQuery)”."))
+                } else {
+                    children.append(_sectionTitle("Results"))
+                    children.append(SizedBox(height: 6))
+                    children.append(_flathubList(results))
+                }
+            }
+        } else if let error = flathubError, flathubPopular == nil {
+            children.append(_note(error, color: pal.failedRed))
+        } else if let popular = flathubPopular {
+            children.append(_sectionTitle("Popular"))
+            children.append(SizedBox(height: 6))
+            children.append(_flathubList(Array(popular.prefix(12))))
+            if let trending = flathubTrending, !trending.isEmpty {
+                children.append(SizedBox(height: 26))
+                children.append(_sectionTitle("Trending"))
+                children.append(SizedBox(height: 6))
+                children.append(_flathubList(Array(trending.prefix(12))))
+            }
+        } else {
+            children.append(_note("Loading Flathub…"))
+        }
+        return _page(children)
+    }
+
+    /// Every Flatpak on this machine, from the registry — the same records the
+    /// launcher and dock read, so the store cannot disagree with them.
+    private func _buildInstalled() -> Widget {
+        var children = _pageHeader("Installed", "Flatpaks on this machine.")
+        children.append(SizedBox(height: 16))
+        let installed = AppRegistry.shared.apps.filter { $0.kind == .flatpak }
+        if installed.isEmpty {
+            children.append(_note("Nothing from Flathub is installed yet."))
+        } else {
+            var rows: [Widget] = []
+            for rec in installed {
+                FlathubClient.shared.loadIcon(appId: rec.exec, url: nil, localPath: rec.iconPath)
+                if !rows.isEmpty { rows.append(_divider()) }
+                rows.append(_appRow(rec))
+            }
+            children.append(_card(rows))
+        }
+        return _page(children)
+    }
+
+    /// One of Flathub's category shelves, fetched the first time it opens.
+    private func _buildCategoryPage(_ id: String) -> Widget {
+        _loadCategory(id)
+        let label = Self.flathubCategories.first { $0.id == id }?.label ?? id
+        var children = _pageHeader(label, "\(label) on Flathub, most popular first.")
+        children.append(SizedBox(height: 16))
+        if let apps = flathubCategoryApps[id] {
+            if apps.isEmpty {
+                children.append(_note("Flathub lists nothing in \(label) yet."))
+            } else {
+                children.append(_flathubList(apps))
+            }
+        } else if let error = flathubCategoryError[id] {
+            children.append(_note(error, color: pal.failedRed))
+        } else {
+            children.append(_note("Loading Flathub…"))
+        }
+        return _page(children)
     }
 
     private func _divider() -> Widget {
@@ -506,40 +688,6 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
 
     /// Big gradient banner for the headline app, macOS-style. The gradient is
     /// Starling's own accent, deliberately not the featured vendor's brand blue.
-    private func _featuredCard(_ entry: AppRecord) -> Widget {
-        return DecoratedBox(
-            decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF2B6CB0), Color(0xFF7C3AED)]
-                )
-            ),
-            child: Padding(
-                padding: EdgeInsets(left: 22, top: 20, right: 22, bottom: 20),
-                child: Row(children: [
-                    _appTile(entry, size: 84, radius: 19),
-                    SizedBox(width: 20),
-                    Expanded(child: Column(crossAxisAlignment: .start, children: [
-                        Text("FEATURED", style: TextStyle(
-                            color: Color(0xB3FFFFFF), fontSize: 11, fontWeight: .w700)),
-                        SizedBox(height: 3),
-                        Text(entry.name, style: TextStyle(
-                            color: Color(0xFFFFFFFF), fontSize: 24, fontWeight: .w700)),
-                        SizedBox(height: 4),
-                        Text(entry.subtitle, style: TextStyle(
-                            color: Color(0xE6FFFFFF), fontSize: 14)),
-                        SizedBox(height: 8),
-                        Text(entry.details, style: TextStyle(
-                            color: Color(0xB3FFFFFF), fontSize: 12), maxLines: 3),
-                    ])),
-                    SizedBox(width: 20),
-                    _actionCluster(entry, onBanner: true),
-                ])
-            )
-        )
-    }
 
     /// One row in the "More Apps" list.
     private func _appRow(_ entry: AppRecord) -> Widget {
@@ -552,7 +700,7 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
                     Text(entry.name, style: TextStyle(
                         color: pal.textPrimary, fontSize: 14, fontWeight: .w600)),
                     SizedBox(height: 2),
-                    Text("\(entry.subtitle) — \(entry.category) · \(entry.publisher)",
+                    Text(_rowSubtitle(entry),
                          style: TextStyle(color: pal.textSecondary, fontSize: 12),
                          maxLines: 2),
                 ])),
@@ -563,7 +711,35 @@ class _AppStoreAppState: State<StatefulWidget>, @unchecked Sendable {
     }
 
     /// Rounded-square app icon tile.
+    /// "summary — category · publisher", skipping whatever the record lacks
+    /// (an installed Flatpak discovered from disk has only a name).
+    private func _rowSubtitle(_ entry: AppRecord) -> String {
+        let tail = [entry.category, entry.publisher].filter { !$0.isEmpty }.joined(separator: " · ")
+        switch (entry.subtitle.isEmpty, tail.isEmpty) {
+        case (false, false): return "\(entry.subtitle) — \(tail)"
+        case (false, true):  return entry.subtitle
+        case (true, false):  return tail
+        case (true, true):   return entry.kind == .flatpak ? "Flatpak" : ""
+        }
+    }
+
     private func _appTile(_ entry: AppRecord, size: Double, radius: Double) -> Widget {
+        // A Flathub app carries its real icon, fetched and decoded once;
+        // until it lands (or if it never does) the glyph tile stands in.
+        if entry.kind == .flatpak, let icon = FlathubClient.shared.icons[entry.exec] {
+            return SizedBox(width: size, height: size, child: DecoratedBox(
+                decoration: BoxDecoration(
+                    color: pal.card,
+                    borderRadius: BorderRadius.circular(radius),
+                    boxShadow: [BoxShadow(
+                        color: Color(0x33000000), offset: Offset(0, 1), blurRadius: 4)]
+                ),
+                child: ClipRRect(
+                    borderRadius: BorderRadius.all(Radius(circular: radius)),
+                    child: CustomPaint(painter: FlathubIconPainter(icon))
+                )
+            ))
+        }
         return SizedBox(width: size, height: size, child: DecoratedBox(
             decoration: BoxDecoration(
                 color: tileColor(entry.glyph),

@@ -138,8 +138,17 @@ public final class AppRegistry: @unchecked Sendable {
 
     /// The app a window belongs to, from the `app_id` it reported over
     /// `xdg_toplevel.set_app_id`.
+    ///
+    /// A window can match two records: a curated catalog entry that names the
+    /// app but is not installed (Telegram and GIMP ship a native `host` record
+    /// whose `WmClass` list includes the Flatpak's app_id) and the Flatpak
+    /// record that is actually on disk. Prefer the installed one — it is the
+    /// manifestation the window really belongs to, and it is the one that
+    /// carries the exported icon, so the dock shows the real icon instead of a
+    /// generic tile and never draws the two as separate apps.
     public func app(forAppId appId: String) -> AppRecord? {
-        apps.first { $0.matches(appId: appId) }
+        let matching = apps.filter { $0.matches(appId: appId) }
+        return matching.first { $0.installed } ?? matching.first
     }
 
     /// The app a window belongs to, by title — only for records that declare
@@ -305,6 +314,13 @@ public final class AppRegistry: @unchecked Sendable {
         guard !running.isEmpty else { return [] }
         var out: Set<String> = []
         for app in apps where app.installed {
+            // A sandboxed app's exe is a path inside its own mount namespace
+            // (/app/bin/…), so it can never match a host path. Its identity
+            // comes from the sandbox instead: see runningExecutables().
+            if app.kind == .flatpak {
+                if running.contains("flatpak:" + app.exec) { out.insert(app.id) }
+                continue
+            }
             // Both forms: /usr/bin/gimp is a symlink to gimp-3.2, and which
             // one the kernel reports depends on which the launcher exec'd.
             let hit = app.bins.contains {
@@ -345,6 +361,22 @@ public final class AppRegistry: @unchecked Sendable {
             guard n > 0 else { continue }
             buf[n] = 0
             out.insert(stripDeleted(String(cString: buf)))
+            // A Flatpak sandbox mounts its manifest at /.flatpak-info; through
+            // /proc/<pid>/root it is readable from outside for our own
+            // processes. `name=` under [Application] is the app id, recorded
+            // as "flatpak:<id>" so a .flatpak record can match on it.
+            let info = "/proc/\(pid)/root/.flatpak-info"
+            guard access(info, R_OK) == 0,
+                  let text = try? String(contentsOfFile: info, encoding: .utf8)
+            else { continue }
+            var inApp = false
+            for line in text.split(separator: "\n") {
+                if line.hasPrefix("[") { inApp = (line == "[Application]"); continue }
+                if inApp, line.hasPrefix("name=") {
+                    out.insert("flatpak:" + String(line.dropFirst("name=".count)))
+                    break
+                }
+            }
         }
         return out
         #else
@@ -387,6 +419,16 @@ public final class AppRegistry: @unchecked Sendable {
         let home = env["HOME"] ?? NSHomeDirectory()
         return ["/var/lib/flatpak/exports/share/applications",
                 home + "/.local/share/flatpak/exports/share/applications"]
+    }
+
+    /// Is this Flatpak app installed (system-wide or for the user)? The
+    /// store asks per row, straight from disk, so an install or removal done
+    /// anywhere else shows without a reload.
+    public static func isFlatpakInstalled(_ appId: String) -> Bool {
+        let fm = FileManager.default
+        return flatpakExportsDirs.contains {
+            fm.fileExists(atPath: $0 + "/" + appId + ".desktop")
+        }
     }
 
     /// Synthesize a record for every installed Flatpak app not already
@@ -435,6 +477,20 @@ public final class AppRegistry: @unchecked Sendable {
                         }
                         if iconPath == nil {
                             iconPath = DesktopEntry.resolveIcon(icon, in: DesktopEntry.dataDirs())
+                            // The shell decodes PNG only. An .svg hit here would win
+                            // over the store's cached PNG below and draw as a generic
+                            // tile — Discord and Spotify export only SVG.
+                            if let p = iconPath, p.lowercased().hasSuffix(".svg") { iconPath = nil }
+                        }
+                        // Many Flatpaks export only an SVG, which the engine
+                        // cannot decode. The App Store caches Flathub's PNG of
+                        // the same icon when it shows the app; use that.
+                        if iconPath == nil {
+                            let env = ProcessInfo.processInfo.environment
+                            let cache = env["XDG_CACHE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+                                ?? ((env["HOME"] ?? NSHomeDirectory()) + "/.cache")
+                            let p = cache + "/starling/flathub/" + appId + ".png"
+                            if fm.fileExists(atPath: p) { iconPath = p }
                         }
                     }
                 }
@@ -447,6 +503,14 @@ public final class AppRegistry: @unchecked Sendable {
                 var appIds = [wmClass, appId, "flatpak-\(appId)"]
                 var seen = Set<String>()
                 appIds = appIds.filter { seen.insert($0.lowercased()).inserted }
+                // Deep links: the entry's MimeType lists the schemes the app
+                // handles as x-scheme-handler/<scheme> (Telegram: tg, Zoom:
+                // zoommtg;zoomus). The catalog used to spell these out per
+                // app; with Flathub as the source they come from the app.
+                let schemes = kf.list("MimeType").compactMap { m -> String? in
+                    let p = "x-scheme-handler/"
+                    return m.hasPrefix(p) ? String(m.dropFirst(p.count)) : nil
+                }
 
                 order += 1
                 out.append(AppRecord(
@@ -458,7 +522,8 @@ public final class AppRegistry: @unchecked Sendable {
                     desktopEntries: [base], wmClasses: [wmClass], titleMatches: [],
                     renameWindows: false, debURL: nil, debMarker: nil,
                     desktopFile: dir + "/" + file, iconPath: iconPath,
-                    version: nil, installedAt: nil, installed: true, appIds: appIds))
+                    version: nil, installedAt: nil, installed: true, appIds: appIds,
+                    urlSchemes: schemes))
             }
         }
         return out

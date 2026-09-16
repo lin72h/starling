@@ -220,15 +220,7 @@ if [ -n "$REMOVE" ]; then
     case "$NAME" in
         chrome)       apt-get remove -y -q google-chrome-stable ;;
         vscode)       apt-get remove -y -q code ;;
-        spotify)      apt-get remove -y -q spotify-client ;;
-        slack)        apt-get remove -y -q slack-desktop ;;
-        discord)      apt-get remove -y -q discord ;;
-        zoom)         apt-get remove -y -q zoom ;;
-        teams)        apt-get remove -y -q teams-for-linux ;;
-        telegram)     rm -rf /opt/telegram ;;
         intellij)     rm -rf /opt/idea ;;
-        blender)      apt-get remove -y -q blender ;;
-        gimp)         apt-get remove -y -q gimp ;;
         mpv)          apt-get remove -y -q mpv ;;
         vlc)          apt-get remove -y -q vlc ;;
         libreoffice)  apt-get remove -y -q libreoffice ;;
@@ -429,38 +421,6 @@ case "$NAME" in
             "https://packages.microsoft.com/repos/code stable main"
         inst code
         ;;
-    spotify)
-        vendor_repo spotify \
-            "https://download.spotify.com/debian/pubkey_5384CE82BA52C83A.gpg" \
-            "http://repository.spotify.com stable non-free"
-        inst spotify-client
-        ;;
-    slack)
-        # No stable "latest" URL — version pinned, bump on update.
-        vendor_deb "https://downloads.slack-edge.com/desktop-releases/linux/x64/4.39.95/slack-desktop-4.39.95-amd64.deb"
-        ;;
-    discord)
-        vendor_deb "https://discord.com/api/download?platform=linux&format=deb"
-        ;;
-    zoom)
-        vendor_deb "https://zoom.us/client/latest/zoom_amd64.deb"
-        ;;
-    teams)
-        # teams-for-linux — community Electron client (Microsoft ended the
-        # native Linux Teams; their official path is the PWA).
-        vendor_repo teams-for-linux \
-            "https://repo.teamsforlinux.de/teams-for-linux.asc" \
-            "https://repo.teamsforlinux.de/debian/ stable main"
-        inst teams-for-linux
-        ;;
-    telegram)
-        # Removed from the Ubuntu archive as of 26.04 and Telegram publishes
-        # no deb — official tarball to /opt/telegram (app-run's path).
-        fetch "https://telegram.org/dl/desktop/linux" "$TMP/tg.tar.xz"
-        rm -rf /opt/telegram
-        tar -xJf "$TMP/tg.tar.xz" -C /opt
-        mv /opt/Telegram /opt/telegram
-        ;;
     intellij)
         # No JetBrains apt repo and nothing in the archive, so this is the
         # telegram model: official tarball to /opt/idea (app-run's path).
@@ -508,8 +468,6 @@ case "$NAME" in
         }
         snap install snap-store
         ;;
-    blender)      inst blender ;;
-    gimp)         inst gimp ;;
     mpv)          inst mpv ;;
     vlc)          inst vlc ;;
     libreoffice)  inst libreoffice ;;
