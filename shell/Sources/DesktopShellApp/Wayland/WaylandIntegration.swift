@@ -104,6 +104,12 @@ private enum WaylandEvent: @unchecked Sendable {
                   x: Int, y: Int, width: Int, height: Int)
     case popupDestroy(surfaceId: UInt32)
     case windowGeometry(surfaceId: UInt32, x: Int, y: Int, width: Int, height: Int)
+    /// xdg_toplevel min/max size hints, surface coordinates, 0 = unset.
+    case sizeHints(surfaceId: UInt32, minW: Int32, minH: Int32, maxW: Int32, maxH: Int32)
+    /// A subsurface with content of its own, drawn inside its toplevel's
+    /// window at (x, y) from the toplevel's surface origin.
+    case subsurfacePlaced(surfaceId: UInt32, toplevelId: UInt32, x: Int32, y: Int32)
+    case subsurfaceUnmapped(surfaceId: UInt32)
     case fullscreenRequest(surfaceId: UInt32)
     case unfullscreenRequest(surfaceId: UInt32)
     case cursorShape(shape: UInt32)
@@ -211,6 +217,13 @@ class WaylandIntegration {
     private var surfaceGeometry: [UInt32: (x: Int, y: Int, width: Int, height: Int)] = [:]
     private var lastEmittedGeometry: [UInt32: (x: Int, y: Int, w: Int, h: Int, bufW: Int, bufH: Int)] = [:]
     private var popupSurfaceIds: Set<UInt32> = []
+    /// Wayland subsurfaces the shell draws inside a window: their toplevel
+    /// (a surface id in surfaceWindows), their offset from its surface
+    /// origin, their logical size, and the rect last handed to the shell.
+    private var subsurfaceParents: [UInt32: UInt32] = [:]
+    private var subsurfaceOffsets: [UInt32: (x: Int, y: Int)] = [:]
+    private var subsurfaceLogicalSizes: [UInt32: (Int, Int)] = [:]
+    private var subsurfaceEmitted: [UInt32: (Double, Double, Double, Double)] = [:]
     /// Surfaces with the zwlr_layer_surface_v1 role: placed by the shell at a
     /// screen coordinate, drawn in their layer, never decorated or managed.
     private var layerSurfaceIds: Set<UInt32> = []
@@ -271,6 +284,17 @@ class WaylandIntegration {
     var onNewPopup: ((_ surfaceId: UInt32, _ textureId: Int, _ parentSurfaceId: UInt32, _ x: Int, _ y: Int, _ width: Int, _ height: Int) -> String)?
     var onPopupDestroyed: ((_ popupId: String) -> Void)?
     var onWindowGeometryChanged: ((_ windowId: String, _ x: Int, _ y: Int, _ width: Int, _ height: Int, _ bufferLogicalWidth: Int, _ bufferLogicalHeight: Int) -> Void)?
+    /// xdg_toplevel min/max size hints in the shell's logical pixels
+    /// (content size; 0 = unset). The shell clamps its resizes to them.
+    var onWindowSizeHints: ((_ windowId: String, _ minW: Double, _ minH: Double,
+                             _ maxW: Double, _ maxH: Double) -> Void)?
+    /// A Wayland subsurface to draw inside a window's content: its texture
+    /// and where, content-relative, in the shell's logical pixels. Called
+    /// when it appears and whenever its place or size changes — not per
+    /// frame; the texture updates on its own.
+    var onSubsurfaceChanged: ((_ windowId: String, _ surfaceId: UInt32,
+                               _ textureId: Int, _ rect: Rect) -> Void)?
+    var onSubsurfaceRemoved: ((_ windowId: String, _ surfaceId: UInt32) -> Void)?
     var onFullscreenRequest: ((_ windowId: String) -> Void)?
     var onUnfullscreenRequest: ((_ windowId: String) -> Void)?
     /// Client-initiated interactive move/resize (xdg_toplevel.move/resize).
@@ -508,6 +532,27 @@ class WaylandIntegration {
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             this.handleWindowGeometry(surfaceId, x: Int(x), y: Int(y),
                                        width: Int(w), height: Int(h))
+        }, ctx)
+
+        wayland_server_on_toplevel_size_hints(server, { (ctx, surfaceId, minW, minH, maxW, maxH) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.pendingEvents.withLock { $0.append(.sizeHints(
+                surfaceId: surfaceId, minW: minW, minH: minH, maxW: maxW, maxH: maxH)) }
+            this._needsFrame = true
+        }, ctx)
+
+        // Subsurfaces: placed before their first buffer arrives (the commit
+        // callbacks above need a texture keyed on the id by then).
+        wayland_server_on_subsurface_placed(server, { (ctx, surfaceId, toplevelId, x, y) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.pendingEvents.withLock { $0.append(.subsurfacePlaced(
+                surfaceId: surfaceId, toplevelId: toplevelId, x: x, y: y)) }
+            this._needsFrame = true
+        }, ctx)
+        wayland_server_on_subsurface_unmapped(server, { (ctx, surfaceId) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.pendingEvents.withLock { $0.append(.subsurfaceUnmapped(surfaceId: surfaceId)) }
+            this._needsFrame = true
         }, ctx)
 
         wayland_server_on_fullscreen_request(server, { (ctx, surfaceId) in
@@ -838,6 +883,16 @@ class WaylandIntegration {
                 processPopupDestroy(surfaceId)
             case .windowGeometry(let surfaceId, let x, let y, let w, let h):
                 surfaceGeometry[surfaceId] = (x, y, w, h)
+            case .sizeHints(let surfaceId, let minW, let minH, let maxW, let maxH):
+                if let windowId = surfaceWindows[surfaceId] {
+                    let f = fractionalScale / shellDpi
+                    onWindowSizeHints?(windowId, Double(minW) * f, Double(minH) * f,
+                                       Double(maxW) * f, Double(maxH) * f)
+                }
+            case .subsurfacePlaced(let surfaceId, let toplevelId, let x, let y):
+                processSubsurfacePlaced(surfaceId, toplevelId: toplevelId, x: Int(x), y: Int(y))
+            case .subsurfaceUnmapped(let surfaceId):
+                processSubsurfaceUnmapped(surfaceId)
             case .fullscreenRequest(let surfaceId):
                 processFullscreenRequest(surfaceId)
             case .unfullscreenRequest(let surfaceId):
@@ -1254,6 +1309,15 @@ class WaylandIntegration {
         let effectiveScale = max(Double(scale), shellDpi)
         let hasViewport = vpW > 0 && vpH > 0
 
+        // A subsurface: its size (the viewport's, or the buffer's in logical
+        // px) goes to the shell with its place; nothing below applies.
+        if subsurfaceParents[surfaceId] != nil {
+            subsurfaceLogicalSizes[surfaceId] = hasViewport
+                ? (vpW, vpH)
+                : (Int(Double(width) / effectiveScale), Int(Double(height) / effectiveScale))
+            emitSubsurface(surfaceId)
+        }
+
         // Notify shell of size changes
         let sizeChanged = prevSize.map { $0.0 != width || $0.1 != height } ?? true
         let scaleChanged = prevScale.map { $0 != bufferScale } ?? true
@@ -1416,6 +1480,11 @@ class WaylandIntegration {
         if let textureId = surfaceTextures.removeValue(forKey: surfaceId) {
             textureRegistry.unregisterTexture(engine: engine, id: textureId)
         }
+        // Its subsurfaces went with the window (their unmap may still be
+        // queued behind this; it then finds nothing).
+        for (sid, parent) in subsurfaceParents where parent == surfaceId {
+            processSubsurfaceUnmapped(sid)
+        }
 
         surfaceSizes.removeValue(forKey: surfaceId)
         surfaceAppIds.removeValue(forKey: surfaceId)
@@ -1464,6 +1533,61 @@ class WaylandIntegration {
         if let popupId = onNewPopup?(surfaceId, Int(textureId), parentSurfaceId, x, y, width, height) {
             surfaceWindows[surfaceId] = popupId
         }
+    }
+
+    /// A subsurface the shell draws inside a window. The texture is made
+    /// here, before its first commit is drained; a re-placement of one that
+    /// already has content is handed on at once.
+    private func processSubsurfacePlaced(_ surfaceId: UInt32, toplevelId: UInt32,
+                                         x: Int, y: Int) {
+        subsurfaceParents[surfaceId] = toplevelId
+        subsurfaceOffsets[surfaceId] = (x, y)
+        if surfaceTextures[surfaceId] == nil {
+            let textureId = textureRegistry.registerTexture(engine: engine)
+            textureRegistry.markAsWaylandSurface(id: textureId)
+            // A hover card is mostly transparent; a video is opaque anyway.
+            textureRegistry.setKeepsAlpha(id: textureId, true)
+            surfaceTextures[surfaceId] = textureId
+        }
+        if subsurfaceLogicalSizes[surfaceId] != nil {
+            emitSubsurface(surfaceId)
+        }
+    }
+
+    private func processSubsurfaceUnmapped(_ surfaceId: UInt32) {
+        if let parent = subsurfaceParents.removeValue(forKey: surfaceId),
+           subsurfaceEmitted.removeValue(forKey: surfaceId) != nil,
+           let windowId = surfaceWindows[parent] {
+            onSubsurfaceRemoved?(windowId, surfaceId)
+        }
+        subsurfaceOffsets.removeValue(forKey: surfaceId)
+        subsurfaceLogicalSizes.removeValue(forKey: surfaceId)
+        subsurfaceEmitted.removeValue(forKey: surfaceId)
+        if let textureId = surfaceTextures.removeValue(forKey: surfaceId) {
+            textureRegistry.unregisterTexture(engine: engine, id: textureId)
+        }
+        surfaceSizes.removeValue(forKey: surfaceId)
+        surfaceBufferScales.removeValue(forKey: surfaceId)
+    }
+
+    /// Where the subsurface sits in its window's content, in the shell's
+    /// logical pixels: its offset from the toplevel's surface origin, less
+    /// the toplevel's window-geometry origin, scaled as the geometry is.
+    /// Handed to the shell only when it differs from what it last got.
+    private func emitSubsurface(_ surfaceId: UInt32) {
+        guard let parent = subsurfaceParents[surfaceId],
+              let windowId = surfaceWindows[parent],
+              let textureId = surfaceTextures[surfaceId],
+              let size = subsurfaceLogicalSizes[surfaceId] else { return }
+        let off = subsurfaceOffsets[surfaceId] ?? (0, 0)
+        let geo = surfaceGeometry[parent]
+        let f = fractionalScale / shellDpi
+        let cur = (Double(off.x - (geo?.x ?? 0)) * f, Double(off.y - (geo?.y ?? 0)) * f,
+                   Double(size.0), Double(size.1))
+        if let prev = subsurfaceEmitted[surfaceId], prev == cur { return }
+        subsurfaceEmitted[surfaceId] = cur
+        onSubsurfaceChanged?(windowId, surfaceId, Int(textureId),
+                             Rect.fromLTWH(cur.0, cur.1, cur.2, cur.3))
     }
 
     private func processPopupDestroy(_ surfaceId: UInt32) {
@@ -1855,6 +1979,19 @@ class WaylandIntegration {
     }
 
     private var pointerFocusSurface: UInt32 = 0
+    /// Set by a button press forwarded to a client surface; read and
+    /// cleared by the shell's root listener, which fires after every
+    /// surface's own (hit-test order is child-first). A press that reached
+    /// no client surface is a press "outside", which dismisses a grabbed
+    /// popup — on the desktop, the dock, the bar, an X11 window.
+    private var _pressReachedClient = false
+
+    func notePointerDown() {
+        let reached = _pressReachedClient
+        _pressReachedClient = false
+        guard !reached, !dragActive, let server = server else { return }
+        wayland_server_pointer_pressed_outside(server)
+    }
     private var keyboardFocusSurface: UInt32 = 0
 
     /// xkb modifier masks for the default us(pc105) keymap the seat sends.
@@ -1989,6 +2126,7 @@ class WaylandIntegration {
 
         switch phase {
         case 2: // down
+            _pressReachedClient = true
             wayland_server_pointer_button(server, surfaceId, timeMs, 0x110, 1)
         case 1: // up
             wayland_server_pointer_button(server, surfaceId, timeMs, 0x110, 0)

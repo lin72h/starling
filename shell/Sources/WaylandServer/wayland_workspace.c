@@ -314,3 +314,12 @@ void wayland_server_set_workspaces(WaylandServer* server,
         if (!m->stopped) ext_workspace_manager_v1_send_done(m->resource);
     }
 }
+
+void wayland_workspace_fini(struct WaylandServer* server) {
+    struct WaylandWorkspace* ws;
+    struct WaylandWorkspace* tmp;
+    wl_list_for_each_safe(ws, tmp, &server->workspaces, link) {
+        wl_list_remove(&ws->link);
+        free(ws);
+    }
+}

@@ -144,6 +144,24 @@ static void surface_commit(struct wl_client* client,
         }
     }
 
+    /* Apply pending min/max size hints (double-buffered, like geometry). */
+    if (surface->size_hints_pending) {
+        surface->size_hints_pending = 0;
+        int changed = surface->min_w != surface->pending_min_w
+            || surface->min_h != surface->pending_min_h
+            || surface->max_w != surface->pending_max_w
+            || surface->max_h != surface->pending_max_h;
+        surface->min_w = surface->pending_min_w;
+        surface->min_h = surface->pending_min_h;
+        surface->max_w = surface->pending_max_w;
+        surface->max_h = surface->pending_max_h;
+        if (changed && surface->xdg_toplevel && server->cb.on_toplevel_size_hints) {
+            server->cb.on_toplevel_size_hints(server->cb_ctx, surface->id,
+                                              surface->min_w, surface->min_h,
+                                              surface->max_w, surface->max_h);
+        }
+    }
+
     /* Apply pending buffer. */
     if (surface->pending.buffer_set) {
         /* Release previous committed buffer back to client.
@@ -258,10 +276,46 @@ static void surface_commit(struct wl_client* client,
         }
     }
 
-    /* Notify compositor if we have a buffer and the target has a role. */
+    /* A subsurface that is not the window's content is drawn INSIDE the
+     * window by the shell, at its offset from the toplevel's surface origin
+     * (its own position plus every subsurface ancestor's). The shell hears
+     * the placement first — it keys a texture on the id — and then the
+     * buffer through the ordinary commit callbacks under that id. A null
+     * buffer, or a buffer that now routes up as the content, unmaps it. */
+    if (surface->is_subsurface && !surface->xdg_toplevel && !surface->xdg_popup) {
+        struct WaylandSurface* top = surface->subsurface_parent;
+        int32_t off_x = surface->subsurface_x, off_y = surface->subsurface_y;
+        int guard = 0;
+        while (top && top->is_subsurface && top->subsurface_parent && guard++ < 16) {
+            off_x += top->subsurface_x;
+            off_y += top->subsurface_y;
+            top = top->subsurface_parent;
+        }
+        int drawable = top && top->xdg_toplevel && target == surface &&
+                       surface->committed_buffer != NULL;
+        if (drawable) {
+            if (!surface->sub_placed || surface->sub_placed_x != off_x ||
+                surface->sub_placed_y != off_y) {
+                surface->sub_placed = 1;
+                surface->sub_placed_x = off_x;
+                surface->sub_placed_y = off_y;
+                if (server->cb.on_subsurface_placed) {
+                    server->cb.on_subsurface_placed(server->cb_ctx, surface->id,
+                                                    top->id, off_x, off_y);
+                }
+            }
+        } else if (surface->sub_placed) {
+            surface->sub_placed = 0;
+            if (server->cb.on_subsurface_unmapped)
+                server->cb.on_subsurface_unmapped(server->cb_ctx, surface->id);
+        }
+    }
+
+    /* Notify compositor if we have a buffer and the target has a role — or
+     * is a subsurface the shell draws as part of one. */
     if (surface->committed_buffer &&
         (target->xdg_toplevel || target->xdg_popup || target->layer ||
-         target->is_drag_icon)) {
+         target->is_drag_icon || target->sub_placed)) {
         enum WaylandBufferType* type_ptr =
             wl_resource_get_user_data(surface->committed_buffer);
         if (type_ptr) {
@@ -311,7 +365,8 @@ static void surface_commit(struct wl_client* client,
                      * its alpha. */
                     int keep_alpha = buf->format == WL_SHM_FORMAT_ARGB8888 &&
                                      (target->xdg_popup || target->layer ||
-                                      target->is_drag_icon || target->blur_count > 0);
+                                      target->is_drag_icon || target->blur_count > 0 ||
+                                      target->sub_placed);
                     server->cb.on_shm_surface_commit(
                         server->cb_ctx,
                         target->id,
@@ -354,7 +409,7 @@ static void surface_commit(struct wl_client* client,
     if (surface->frame_done_timer &&
         (surface->frame_callback ||
          ((surface->xdg_toplevel || surface->xdg_popup || surface->layer ||
-           surface->is_drag_icon) &&
+           surface->is_drag_icon || surface->sub_placed) &&
           surface->committed_buffer))) {
         wl_event_source_timer_update(surface->frame_done_timer,
                                      server->saw_flip ? 100 : 16);
@@ -467,6 +522,12 @@ static int frame_done_timer_cb(void* data) {
 static void surface_destroy_resource(struct wl_resource* resource) {
     struct WaylandSurface* surface = wl_resource_get_user_data(resource);
     if (!surface) return;
+
+    if (surface->sub_placed) {
+        surface->sub_placed = 0;
+        if (surface->server->cb.on_subsurface_unmapped)
+            surface->server->cb.on_subsurface_unmapped(surface->server->cb_ctx, surface->id);
+    }
 
     /* Notify compositor that the toplevel/popup is gone. */
     if (surface->xdg_toplevel && surface->server->cb.on_toplevel_destroy) {

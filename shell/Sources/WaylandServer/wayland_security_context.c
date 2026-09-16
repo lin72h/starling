@@ -301,3 +301,16 @@ void wayland_security_context_init(struct WaylandServer* server) {
     server->security_context_global = wl_global_create(server->display,
         &wp_security_context_manager_v1_interface, 1, server, manager_bind);
 }
+
+/* Server teardown. Clients are gone by now (wl_display_destroy_clients ran),
+ * so what is left in the list is committed contexts whose sockets outlived
+ * their objects — each holds event sources on the loop and two fds. */
+void wayland_security_context_fini(struct WaylandServer* server) {
+    struct WaylandSecurityContext* ctx;
+    struct WaylandSecurityContext* tmp;
+    wl_list_for_each_safe(ctx, tmp, &server->security_contexts, link) {
+        context_stop_listening(ctx);
+        wl_list_remove(&ctx->link);
+        free(ctx);
+    }
+}

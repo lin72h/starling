@@ -60,6 +60,20 @@ struct WaylandSurface {
     // surface_destroy_resource() null its user_data instead of leaving it
     // dangling (set_position then wrote through the freed surface).
     struct wl_resource* subsurface_resource;
+    /* A subsurface the shell draws inside its toplevel's window: where it
+     * was last placed (offset from the toplevel's surface origin, surface
+     * coordinates) and whether the shell currently has it. */
+    int32_t sub_placed_x, sub_placed_y;
+    int sub_placed;
+
+    /* xdg_popup.grab: a press outside the popup's tree dismisses it. */
+    int popup_grabbed;
+
+    /* xdg_toplevel.set_min_size / set_max_size, double-buffered: the
+     * pending pair lands on commit, and the shell hears the four together. */
+    int32_t pending_min_w, pending_min_h, pending_max_w, pending_max_h;
+    int size_hints_pending;
+    int32_t min_w, min_h, max_w, max_h;
 
     // Double-buffered pending state (applied atomically on commit)
     struct {
@@ -357,6 +371,8 @@ struct WaylandServer {
     /* ext-workspace: the shell's spaces, as pushed, and every manager. */
     struct wl_global* workspace_manager_global;
     struct wl_list workspaces;               // WaylandWorkspace.link
+    /* xdg_popup grabs in force (popups with popup_grabbed set). */
+    int popup_grab_count;
     struct wl_list workspace_managers;       // WaylandWorkspaceManager.link
     struct wl_global* background_effect_global;
     struct wl_global* transient_seat_manager_global;
@@ -469,8 +485,21 @@ struct WaylandServer {
                                        int w, int h, int stride,
                                        uint32_t format, int first_commit,
                                        int buffer_scale, int keep_alpha);
-        void (*on_toplevel_resize_request)(void* ctx, uint32_t surface_id,
-                                            int w, int h);
+        /* xdg_toplevel min/max size hints, in surface coordinates, 0 =
+         * unset. Applied on commit; the shell clamps its resizes to them. */
+        void (*on_toplevel_size_hints)(void* ctx, uint32_t surface_id,
+                                       int32_t min_w, int32_t min_h,
+                                       int32_t max_w, int32_t max_h);
+        /* A subsurface of a toplevel window has content of its own to draw
+         * inside that window, at (x, y) from the toplevel's surface origin
+         * (surface coordinates). Fired before the subsurface's first buffer
+         * arrives through on_surface_commit / on_shm_surface_commit under
+         * its own id, and again whenever the offset moves. */
+        void (*on_subsurface_placed)(void* ctx, uint32_t surface_id,
+                                     uint32_t toplevel_id, int32_t x, int32_t y);
+        /* The subsurface has nothing to draw any more (null buffer, role or
+         * surface gone, or its content became the window's own). */
+        void (*on_subsurface_unmapped)(void* ctx, uint32_t surface_id);
         // Client-initiated interactive move/resize (xdg_toplevel.move /
         // xdg_toplevel.resize during a pointer grab — e.g. dragging Chrome's
         // tab strip or a CSD titlebar). The shell takes over the drag.
@@ -1036,6 +1065,17 @@ struct ShmBuffer* wayland_shm_buffer_from_resource(struct wl_resource* buffer);
 // Helpers
 uint32_t wayland_server_next_serial(struct WaylandServer* server);
 struct WaylandSurface* wayland_server_find_surface(struct WaylandServer* server, uint32_t surface_id);
+
+/* xdg_popup grabs (wayland_xdg_shell.c). `contains`: the surface is a popup
+ * inside a grabbed popup's tree (itself grabbed, or under one). A press on
+ * anything else while a grab is in force dismisses every grabbed popup,
+ * topmost first (popup_done), which is what the spec asks of the compositor. */
+int wayland_popup_grab_contains(struct WaylandServer* server, struct WaylandSurface* surface);
+void wayland_popup_grab_dismiss_all(struct WaylandServer* server);
+
+/* Server teardown for the per-server lists that no client resource owns. */
+void wayland_security_context_fini(struct WaylandServer* server);
+void wayland_workspace_fini(struct WaylandServer* server);
 
 // Send `discarded` to (and destroy) all pending wp_presentation feedback
 // objects for a surface — called when the surface is destroyed so feedbacks

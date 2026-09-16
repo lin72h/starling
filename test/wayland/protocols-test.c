@@ -167,10 +167,32 @@ static struct {
     uint32_t drag_icon; int drag_active; int drag_icon_count;
     uint32_t tdrag_surface; int32_t tdrag_x, tdrag_y; int tdrag_active; int tdrag_count;
     uint32_t outcfg_id; double outcfg_scale; int outcfg_count;
+    uint32_t hints_surface; int32_t min_w, min_h, max_w, max_h; int hints_count;
+    uint32_t popup_id; int popup_count;
+    uint32_t sub_id, sub_top; int32_t sub_x, sub_y; int sub_placed;
+    uint32_t sub_unmapped_id; int sub_unmapped;
 } seen;
 
 #define LOCKED(stmt) do { pthread_mutex_lock(&seen_mu); stmt; pthread_mutex_unlock(&seen_mu); } while (0)
 
+static void cb_size_hints(void* ctx, uint32_t sid, int32_t min_w, int32_t min_h,
+                          int32_t max_w, int32_t max_h) {
+    (void)ctx;
+    LOCKED(seen.hints_surface = sid; seen.min_w = min_w; seen.min_h = min_h;
+           seen.max_w = max_w; seen.max_h = max_h; seen.hints_count++);
+}
+static void cb_new_popup(void* ctx, uint32_t sid, uint32_t parent, int x, int y, int w, int h) {
+    (void)ctx; (void)parent; (void)x; (void)y; (void)w; (void)h;
+    LOCKED(seen.popup_id = sid; seen.popup_count++);
+}
+static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int32_t y) {
+    (void)ctx;
+    LOCKED(seen.sub_id = sid; seen.sub_top = top; seen.sub_x = x; seen.sub_y = y; seen.sub_placed++);
+}
+static void cb_sub_unmapped(void* ctx, uint32_t sid) {
+    (void)ctx;
+    LOCKED(seen.sub_unmapped_id = sid; seen.sub_unmapped++);
+}
 static void cb_new_toplevel(void* ctx, uint32_t sid, uint64_t client) {
     (void)ctx; (void)client;
     LOCKED(seen.new_toplevel_id = sid; seen.new_toplevel_count++);
@@ -276,6 +298,14 @@ static struct wl_display* dpy;
 static struct wl_compositor* compositor;
 static struct wl_shm* shm;
 static struct wl_seat* seat;
+static struct wl_subcompositor* subcompositor;
+
+/* Proxies the server hands out through events (handles, heads, modes,
+ * offers) that the tests read and never destroy: kept here and destroyed
+ * at the end, so the leak detector's report is about the SERVER. */
+static struct wl_proxy* trash[128];
+static int ntrash;
+#define TRASH(p) do { if (ntrash < 128) trash[ntrash++] = (struct wl_proxy*)(p); } while (0)
 static struct wl_output* output;
 static struct xdg_wm_base* wm_base;
 static struct zwlr_layer_shell_v1* layer_shell;
@@ -325,6 +355,7 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     BIND(compositor, wl_compositor, 6);
     BIND(shm, wl_shm, 2);
     BIND(seat, wl_seat, 9);
+    BIND(subcompositor, wl_subcompositor, 1);
     BIND(output, wl_output, 4);
     BIND(wm_base, xdg_wm_base, 7);
     BIND(layer_shell, zwlr_layer_shell_v1, 5);
@@ -513,6 +544,7 @@ static const struct zwlr_foreign_toplevel_handle_v1_listener h_listener = {
 static void m_toplevel(void* d, struct zwlr_foreign_toplevel_manager_v1* m, struct zwlr_foreign_toplevel_handle_v1* h) {
     (void)d; (void)m;
     ftl_handle = h;
+    TRASH(h);
     zwlr_foreign_toplevel_handle_v1_add_listener(h, &h_listener, NULL);
 }
 static void m_finished(void* d, struct zwlr_foreign_toplevel_manager_v1* m) { (void)d; (void)m; }
@@ -530,6 +562,7 @@ static void eh_identifier(void* d, struct ext_foreign_toplevel_handle_v1* h, con
 static const struct ext_foreign_toplevel_handle_v1_listener eh_listener = { eh_closed, eh_done, eh_title, eh_app_id, eh_identifier };
 static void el_toplevel(void* d, struct ext_foreign_toplevel_list_v1* l, struct ext_foreign_toplevel_handle_v1* h) {
     (void)d; (void)l;
+    TRASH(h);
     ext_foreign_toplevel_handle_v1_add_listener(h, &eh_listener, NULL);
 }
 static void el_finished(void* d, struct ext_foreign_toplevel_list_v1* l) { (void)d; (void)l; }
@@ -568,6 +601,7 @@ static void test_toplevel_state_and_taskbars(void) {
     /* Map it: the taskbars hear of it with title and state. */
     ftl_done = 0; ext_done = 0;
     struct wl_buffer* b = make_buffer(640, 480, WL_SHM_FORMAT_XRGB8888, NULL);
+    TRASH(b);
     wl_surface_attach(tl_surface, b, 0, 0);
     wl_surface_commit(tl_surface);
     CHECK(wait_for(&ftl_done, 500), "zwlr foreign toplevel handle announced");
@@ -721,6 +755,7 @@ static void test_layer_shell(void) {
     /* The buffer reaches the shell through the ordinary shm path. */
     int shm_before; LOCKED(shm_before = seen.shm_count);
     struct wl_buffer* b = make_buffer((int)ls_w, (int)ls_h, WL_SHM_FORMAT_ARGB8888, NULL);
+    TRASH(b);
     wl_surface_attach(s, b, 0, 0);
     wl_surface_commit(s);
     wl_display_roundtrip(dpy);
@@ -961,6 +996,7 @@ static void eo_offer(void* d, struct ext_data_control_offer_v1* o, const char* m
 static const struct ext_data_control_offer_v1_listener eo_listener = { eo_offer };
 static void ed_data_offer(void* d, struct ext_data_control_device_v1* dev, struct ext_data_control_offer_v1* o) {
     (void)d; (void)dev;
+    TRASH(o);
     ext_data_control_offer_v1_add_listener(o, &eo_listener, NULL);
 }
 static void ed_selection(void* d, struct ext_data_control_device_v1* dev, struct ext_data_control_offer_v1* o) {
@@ -1029,7 +1065,7 @@ static const struct zwlr_output_mode_v1_listener mode_listener = { mode_size, mo
 static void head_name(void* d, struct zwlr_output_head_v1* h, const char* n) { (void)d; (void)h; snprintf(om_head_name, 64, "%s", n); }
 static void head_desc(void* d, struct zwlr_output_head_v1* h, const char* n) { (void)d; (void)h; (void)n; }
 static void head_phys(void* d, struct zwlr_output_head_v1* h, int32_t w, int32_t hh) { (void)d; (void)h; (void)w; (void)hh; }
-static void head_mode(void* d, struct zwlr_output_head_v1* h, struct zwlr_output_mode_v1* m) { (void)d; (void)h; zwlr_output_mode_v1_add_listener(m, &mode_listener, NULL); }
+static void head_mode(void* d, struct zwlr_output_head_v1* h, struct zwlr_output_mode_v1* m) { (void)d; (void)h; TRASH(m); zwlr_output_mode_v1_add_listener(m, &mode_listener, NULL); }
 static void head_enabled(void* d, struct zwlr_output_head_v1* h, int32_t e) { (void)d; (void)h; (void)e; }
 static void head_current(void* d, struct zwlr_output_head_v1* h, struct zwlr_output_mode_v1* m) { (void)d; (void)h; (void)m; }
 static void head_position(void* d, struct zwlr_output_head_v1* h, int32_t x, int32_t y) { (void)d; (void)h; om_pos_x = x; om_pos_y = y; }
@@ -1048,6 +1084,7 @@ static struct zwlr_output_head_v1* om_head_res;
 static void om_head(void* d, struct zwlr_output_manager_v1* m, struct zwlr_output_head_v1* h) {
     (void)d; (void)m; om_heads++;
     om_head_res = h;
+    TRASH(h);
     zwlr_output_head_v1_add_listener(h, &head_listener, NULL);
 }
 static void task_outcfg_ok(void* arg) {
@@ -1085,6 +1122,7 @@ static void test_output_management(void) {
     zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
     struct zwlr_output_configuration_head_v1* ch =
         zwlr_output_configuration_v1_enable_head(cfg, om_head_res);
+    TRASH(ch);
     zwlr_output_configuration_head_v1_set_position(ch, 100, 0);
     zwlr_output_configuration_v1_test(cfg);
     CHECK(wait_for(&cfg_failed, 500), "moving the head fails the test");
@@ -1095,6 +1133,7 @@ static void test_output_management(void) {
     cfg = zwlr_output_manager_v1_create_configuration(outmgr, 1);
     zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
     ch = zwlr_output_configuration_v1_enable_head(cfg, om_head_res);
+    TRASH(ch);
     zwlr_output_configuration_head_v1_set_position(ch, om_pos_x, om_pos_y);
     zwlr_output_configuration_v1_apply(cfg);
     CHECK(wait_for(&cfg_succeeded, 500), "an unchanged configuration succeeds");
@@ -1107,6 +1146,7 @@ static void test_output_management(void) {
     cfg = zwlr_output_manager_v1_create_configuration(outmgr, 1);
     zwlr_output_configuration_v1_add_listener(cfg, &cfg_listener, NULL);
     ch = zwlr_output_configuration_v1_enable_head(cfg, om_head_res);
+    TRASH(ch);
     zwlr_output_configuration_head_v1_set_scale(ch, wl_fixed_from_double(1.5));
     zwlr_output_configuration_v1_apply(cfg);
     wl_display_flush(dpy);
@@ -1234,6 +1274,7 @@ static void test_security_context(void) {
         CHECK(!sb_has("zwlr_data_control_manager_v1") && !sb_has("ext_data_control_manager_v1"),
               "clipboard managers' protocols hidden");
         CHECK(!sb_has("wp_security_context_manager_v1"), "no nesting");
+        wl_registry_destroy(reg);
         wl_display_disconnect(sb);
     }
     /* The sandbox exits: the socket stops accepting. */
@@ -1328,10 +1369,11 @@ static void wsg_ws_leave(void* d, struct ext_workspace_group_handle_v1* g, struc
 static void wsg_removed(void* d, struct ext_workspace_group_handle_v1* g) { (void)d; (void)g; }
 static const struct ext_workspace_group_handle_v1_listener wsg_listener = { wsg_caps, wsg_out_enter, wsg_out_leave, wsg_ws_enter, wsg_ws_leave, wsg_removed };
 static struct ext_workspace_group_handle_v1* ws_group;
-static void wsm_group(void* d, struct ext_workspace_manager_v1* m, struct ext_workspace_group_handle_v1* g) { (void)d; (void)m; ws_group = g; ext_workspace_group_handle_v1_add_listener(g, &wsg_listener, NULL); }
+static void wsm_group(void* d, struct ext_workspace_manager_v1* m, struct ext_workspace_group_handle_v1* g) { (void)d; (void)m; ws_group = g; TRASH(g); ext_workspace_group_handle_v1_add_listener(g, &wsg_listener, NULL); }
 static void wsm_workspace(void* d, struct ext_workspace_manager_v1* m, struct ext_workspace_handle_v1* w) {
     (void)d; (void)m;
     if (ws_handles < 8) ws_handle[ws_handles] = w;
+    TRASH(w);
     ws_handles++;
     ext_workspace_handle_v1_add_listener(w, &wsh_listener, NULL);
 }
@@ -1351,6 +1393,7 @@ static void test_workspaces(void) {
 
     struct ext_workspace_manager_v1* wsm = wl_registry_bind(registry, wsmgr_name,
         &ext_workspace_manager_v1_interface, 1);
+    TRASH(wsm);
     ext_workspace_manager_v1_add_listener(wsm, &wsm_listener, NULL);
     CHECK(wait_for(&ws_done, 500), "workspaces listed with done");
     CHECK(ws_group != NULL, "one group");
@@ -1741,6 +1784,239 @@ static void test_pack_rgba(void) {
 }
 
 /* The toplevel goes: the taskbars hear closed. */
+/* xdg_toplevel min/max size hints: double-buffered, the four reach the
+ * shell together on commit, and only when they changed. */
+static void test_size_hints(void) {
+    int before; LOCKED(before = seen.hints_count);
+    xdg_toplevel_set_min_size(tl_toplevel, 320, 240);
+    xdg_toplevel_set_max_size(tl_toplevel, 1600, 1200);
+    wl_display_roundtrip(dpy);
+    int n; LOCKED(n = seen.hints_count);
+    CHECK(n == before, "size hints wait for the commit");
+    wl_surface_commit(tl_surface);
+    wl_display_roundtrip(dpy);
+    LOCKED(n = seen.hints_count);
+    CHECK(n == before + 1, "size hints reached the shell on commit (%d)", n - before);
+    CHECK(seen.hints_surface == seen.new_toplevel_id, "for the toplevel");
+    CHECK(seen.min_w == 320 && seen.min_h == 240 && seen.max_w == 1600 && seen.max_h == 1200,
+          "hints %dx%d..%dx%d", seen.min_w, seen.min_h, seen.max_w, seen.max_h);
+    xdg_toplevel_set_min_size(tl_toplevel, 320, 240);
+    wl_surface_commit(tl_surface);
+    wl_display_roundtrip(dpy);
+    LOCKED(n = seen.hints_count);
+    CHECK(n == before + 1, "unchanged hints are not repeated");
+    xdg_toplevel_set_max_size(tl_toplevel, 0, 0);
+    wl_surface_commit(tl_surface);
+    wl_display_roundtrip(dpy);
+    CHECK(seen.max_w == 0 && seen.max_h == 0 && seen.min_w == 320, "max cleared, min kept");
+}
+
+/* xdg_popup.grab: a press inside the popup's tree leaves it; a press on
+ * the parent window, or on nothing (the desktop), dismisses it with
+ * popup_done — a nested pair topmost first. */
+static int pu_done_order[8], pu_done_n;
+static void pu_configure(void* d, struct xdg_popup* p, int32_t x, int32_t y, int32_t w, int32_t h) {
+    (void)d; (void)p; (void)x; (void)y; (void)w; (void)h;
+}
+static void pu_done(void* d, struct xdg_popup* p) {
+    (void)p;
+    if (pu_done_n < 8) pu_done_order[pu_done_n] = (int)(intptr_t)d;
+    pu_done_n++;
+}
+static void pu_repositioned(void* d, struct xdg_popup* p, uint32_t token) { (void)d; (void)p; (void)token; }
+static const struct xdg_popup_listener pu_listener = { pu_configure, pu_done, pu_repositioned };
+
+static uint32_t press_sid;
+static void task_press(void* arg) {
+    (void)arg;
+    wayland_server_pointer_button(server, press_sid, 1, 0x110, 1);
+    wayland_server_pointer_button(server, press_sid, 2, 0x110, 0);
+}
+static void task_press_outside(void* arg) { (void)arg; wayland_server_pointer_pressed_outside(server); }
+
+struct test_popup { struct wl_surface* s; struct xdg_surface* xs; struct xdg_popup* p; uint32_t sid; };
+static struct test_popup make_grabbed_popup(struct xdg_surface* parent, int tag) {
+    struct test_popup tp;
+    tp.s = wl_compositor_create_surface(compositor);
+    tp.xs = xdg_wm_base_get_xdg_surface(wm_base, tp.s);
+    xdg_surface_add_listener(tp.xs, &xs_listener, NULL);
+    struct xdg_positioner* pos = xdg_wm_base_create_positioner(wm_base);
+    xdg_positioner_set_size(pos, 100, 80);
+    xdg_positioner_set_anchor_rect(pos, 10, 10, 1, 1);
+    tp.p = xdg_surface_get_popup(tp.xs, parent, pos);
+    xdg_popup_add_listener(tp.p, &pu_listener, (void*)(intptr_t)tag);
+    xdg_popup_grab(tp.p, seat, 0);
+    xdg_positioner_destroy(pos);
+    int before; LOCKED(before = seen.popup_count);
+    wl_surface_commit(tp.s);
+    wl_display_roundtrip(dpy);
+    int after; LOCKED(after = seen.popup_count);
+    CHECK(after == before + 1, "popup announced to the shell");
+    tp.sid = seen.popup_id;
+    return tp;
+}
+static void destroy_test_popup(struct test_popup* tp) {
+    xdg_popup_destroy(tp->p);
+    xdg_surface_destroy(tp->xs);
+    wl_surface_destroy(tp->s);
+    wl_display_roundtrip(dpy);
+}
+static int wait_done(int n, int ms) {
+    struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
+    while (pu_done_n < n) {
+        wl_display_roundtrip(dpy);
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        long spent = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (spent > ms) break;
+        usleep(5000);
+    }
+    return pu_done_n >= n;
+}
+
+static void test_popup_grab(void) {
+    uint32_t tl_sid = seen.new_toplevel_id;
+
+    /* Inside: the press goes to the popup, which stays. */
+    pu_done_n = 0;
+    struct test_popup a = make_grabbed_popup(tl_xdg, 1);
+    press_sid = a.sid;
+    on_server(task_press, NULL);
+    CHECK(!wait_done(1, 150), "a press inside the grabbed popup does not dismiss it");
+    /* On the parent window: dismissed. */
+    press_sid = tl_sid;
+    on_server(task_press, NULL);
+    CHECK(wait_done(1, 500), "a press on the parent window sends popup_done");
+    destroy_test_popup(&a);
+
+    /* On nothing at all (the desktop, the dock): dismissed. */
+    pu_done_n = 0;
+    struct test_popup b = make_grabbed_popup(tl_xdg, 2);
+    on_server(task_press_outside, NULL);
+    CHECK(wait_done(1, 500), "a press outside every client surface sends popup_done");
+    destroy_test_popup(&b);
+
+    /* Nested: a submenu over its menu. A press on the menu keeps both (the
+     * client closes its own submenu); a press on the window drops both,
+     * the submenu first. */
+    pu_done_n = 0;
+    struct test_popup m = make_grabbed_popup(tl_xdg, 3);
+    struct test_popup sub = make_grabbed_popup(m.xs, 4);
+    press_sid = m.sid;
+    on_server(task_press, NULL);
+    CHECK(!wait_done(1, 150), "a press on the menu under a grabbed submenu dismisses nothing");
+    press_sid = tl_sid;
+    on_server(task_press, NULL);
+    CHECK(wait_done(2, 500), "a press on the window dismisses the whole tree (%d)", pu_done_n);
+    CHECK(pu_done_order[0] == 4 && pu_done_order[1] == 3, "submenu first, then the menu (%d, %d)",
+          pu_done_order[0], pu_done_order[1]);
+    destroy_test_popup(&sub);
+    destroy_test_popup(&m);
+
+    /* No grab: an outside press is nobody's business. */
+    pu_done_n = 0;
+    struct test_popup c;
+    c.s = wl_compositor_create_surface(compositor);
+    c.xs = xdg_wm_base_get_xdg_surface(wm_base, c.s);
+    xdg_surface_add_listener(c.xs, &xs_listener, NULL);
+    struct xdg_positioner* pos = xdg_wm_base_create_positioner(wm_base);
+    xdg_positioner_set_size(pos, 100, 80);
+    xdg_positioner_set_anchor_rect(pos, 10, 10, 1, 1);
+    c.p = xdg_surface_get_popup(c.xs, tl_xdg, pos);
+    xdg_popup_add_listener(c.p, &pu_listener, (void*)(intptr_t)5);
+    xdg_positioner_destroy(pos);
+    wl_surface_commit(c.s);
+    wl_display_roundtrip(dpy);
+    on_server(task_press_outside, NULL);
+    press_sid = tl_sid;
+    on_server(task_press, NULL);
+    CHECK(!wait_done(1, 150), "an ungrabbed popup (a tooltip) is left alone");
+    destroy_test_popup(&c);
+}
+
+/* wl_subsurface: a small subsurface of the window is placed for the shell
+ * to draw inside it, its buffer arriving under its own id with alpha kept;
+ * moving it re-places it; a buffer the size of the window's own is the
+ * window's content and routes up; a null buffer unmaps it. */
+static void test_subsurface(void) {
+    uint32_t tl_sid = seen.new_toplevel_id;
+    /* The window has real content again (the blur test left it a 4x4
+     * frame, against which any subsurface looks like the whole window). */
+    struct wl_buffer* frame = make_buffer(640, 480, WL_SHM_FORMAT_XRGB8888, NULL);
+    TRASH(frame);
+    wl_surface_attach(tl_surface, frame, 0, 0);
+    wl_surface_commit(tl_surface);
+    wl_display_roundtrip(dpy);
+    int placed0, unmapped0, shm0;
+    LOCKED(placed0 = seen.sub_placed; unmapped0 = seen.sub_unmapped; shm0 = seen.shm_count);
+
+    struct wl_surface* s = wl_compositor_create_surface(compositor);
+    struct wl_subsurface* ss = wl_subcompositor_get_subsurface(subcompositor, s, tl_surface);
+    wl_subsurface_set_position(ss, 40, 30);
+    struct wl_buffer* small = make_buffer(200, 100, WL_SHM_FORMAT_ARGB8888, NULL);
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    int placed, shm; LOCKED(placed = seen.sub_placed; shm = seen.shm_count);
+    CHECK(placed == placed0 + 1, "the subsurface was placed (%d)", placed - placed0);
+    CHECK(seen.sub_top == tl_sid, "under the toplevel's window");
+    CHECK(seen.sub_x == 40 && seen.sub_y == 30, "at its offset (%d,%d)", seen.sub_x, seen.sub_y);
+    CHECK(shm == shm0 + 1, "its buffer reached the shell (%d)", shm - shm0);
+    CHECK(seen.shm_surface == seen.sub_id, "under the subsurface's own id");
+    CHECK(seen.shm_w == 200 && seen.shm_h == 100, "at its own size %dx%d", seen.shm_w, seen.shm_h);
+    CHECK(seen.shm_keep_alpha, "with its alpha kept (a hover card is see-through)");
+
+    /* A frame at the same place: no new placement. */
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(placed = seen.sub_placed);
+    CHECK(placed == placed0 + 1, "a plain frame does not re-place it");
+
+    /* Moved. */
+    wl_subsurface_set_position(ss, 50, 60);
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(placed = seen.sub_placed);
+    CHECK(placed == placed0 + 2 && seen.sub_x == 50 && seen.sub_y == 60,
+          "moving it re-places it (%d at %d,%d)", placed - placed0, seen.sub_x, seen.sub_y);
+
+    /* The window's content (Waydroid's full-size subsurface over a dummy
+     * toplevel): routes up to the window, and the child is unmapped. */
+    struct wl_buffer* big = make_buffer(2000, 1500, WL_SHM_FORMAT_XRGB8888, NULL);
+    wl_surface_attach(s, big, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    int unmapped; LOCKED(unmapped = seen.sub_unmapped);
+    CHECK(unmapped == unmapped0 + 1, "a full-size buffer unmaps the child (%d)", unmapped - unmapped0);
+    CHECK(seen.shm_surface == tl_sid && seen.shm_w == 2000, "and is the window's content");
+
+    /* Small again: placed anew; then a null buffer unmaps it. */
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(placed = seen.sub_placed);
+    CHECK(placed == placed0 + 3, "a small buffer places it again");
+    wl_surface_attach(s, NULL, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(unmapped = seen.sub_unmapped);
+    CHECK(unmapped == unmapped0 + 2 && seen.sub_unmapped_id == seen.sub_id,
+          "a null buffer unmaps it (%d)", unmapped - unmapped0);
+
+    /* Placed once more, then the role and the surface go: unmapped once. */
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    wl_subsurface_destroy(ss);
+    wl_surface_destroy(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(unmapped = seen.sub_unmapped);
+    CHECK(unmapped == unmapped0 + 3, "destroying it unmaps it, once (%d)", unmapped - unmapped0);
+    wl_buffer_destroy(small);
+    wl_buffer_destroy(big);
+}
+
 static void test_unmap(void) {
     ftl_closed = 0;
     xdg_toplevel_destroy(tl_toplevel);
@@ -1750,6 +2026,8 @@ static void test_unmap(void) {
 }
 
 int main(void) {
+    /* The verdict must survive a sanitizer abort at exit. */
+    setvbuf(stdout, NULL, _IONBF, 0);
     char dir[] = "/tmp/starling-wl-test.XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
     setenv("XDG_RUNTIME_DIR", dir, 1);
@@ -1780,6 +2058,10 @@ int main(void) {
     wayland_server_on_drag_icon(server, cb_drag_icon, NULL);
     wayland_server_on_toplevel_drag(server, cb_tdrag, NULL);
     wayland_server_on_output_config(server, cb_outcfg, NULL);
+    wayland_server_on_toplevel_size_hints(server, cb_size_hints, NULL);
+    wayland_server_on_new_popup(server, cb_new_popup, NULL);
+    wayland_server_on_subsurface_placed(server, cb_sub_placed, NULL);
+    wayland_server_on_subsurface_unmapped(server, cb_sub_unmapped, NULL);
     pthread_create(&server_thread, NULL, server_main, NULL);
 
     dpy = wl_display_connect(wayland_server_get_socket_name(server));
@@ -1815,11 +2097,15 @@ int main(void) {
         test_image_copy_capture();
         test_security_context();
         test_session_lock();
+        test_size_hints();
+        test_popup_grab();
+        test_subsurface();
         test_unmap();
     } else {
         CHECK(0, "core globals missing; protocol tests skipped");
     }
 
+    for (int i = ntrash - 1; i >= 0; i--) wl_proxy_destroy(trash[i]);
     wl_display_disconnect(dpy);
     atomic_store(&server_stop, 1);
     pthread_join(server_thread, NULL);

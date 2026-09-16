@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /*
- * wayland_subcompositor.c — wl_subcompositor and wl_subsurface stubs
+ * wayland_subcompositor.c — wl_subcompositor and wl_subsurface
  *
- * Minimal implementation so clients like Chrome that require
- * wl_subcompositor (for tooltips/popups) don't crash on bind failure.
- * All wl_subsurface requests are no-ops.
+ * A subsurface is a surface drawn as part of another. Position is kept
+ * (set_position), and the commit path in wayland_compositor.c either routes
+ * its buffer up as the window's content (a full-size subsurface over a dummy
+ * toplevel — Waydroid) or hands it to the shell to draw inside the window
+ * at that offset (a video, a hover card). Stacking (place_above/below) and
+ * sync mode are not tracked: children draw in creation order, at their own
+ * commit.
  */
 
 #include "wayland_server_internal.h"
@@ -87,6 +91,12 @@ static void subsurface_resource_destroy(struct wl_resource* resource) {
         s->subsurface_resource = NULL;
         s->is_subsurface = 0;
         s->subsurface_parent = NULL;
+        /* No longer part of a window: the shell stops drawing it. */
+        if (s->sub_placed) {
+            s->sub_placed = 0;
+            if (s->server->cb.on_subsurface_unmapped)
+                s->server->cb.on_subsurface_unmapped(s->server->cb_ctx, s->id);
+        }
     }
 }
 
@@ -126,6 +136,9 @@ static void subcompositor_get_subsurface(struct wl_client* client,
         s->subsurface_x = 0;
         s->subsurface_y = 0;
         s->subsurface_resource = subsurface;
+        /* Its buffers are consumed — drawn inside the window, or routed up
+         * as the window's content — so they are released like a role's. */
+        s->had_role = 1;
     }
     /* Destructor, not NULL: destroying the wl_surface first while keeping
      * this object alive is a legal client ordering, and it also happens on

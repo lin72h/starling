@@ -26,11 +26,13 @@ class DesktopWindow: StatelessWidget {
                 child: content
             )
         }
-        // Nested native subwindows (VLC's reparented video output) composite
-        // INSIDE this window's content, at their offset in the content area,
-        // in this window's own z-band — clipped to the content so an oversized
-        // video surface (sized to the clip's native resolution) does not spill
-        // past the frame. Physical px from the server, scaled by the shell DPI.
+        // Nested surfaces — an X11 subwindow reparented into this window
+        // (VLC's video output) or a Wayland subsurface (a video, a hover
+        // card) — composite INSIDE this window's content, at their offset in
+        // the content area, in this window's own z-band, clipped to the
+        // content so an oversized video surface (sized to the clip's native
+        // resolution) does not spill past the frame. X11 places in physical
+        // px, scaled by the shell DPI here; a subsurface arrives in logical.
         if !windowInfo.childSurfaces.isEmpty {
             let dpi = currentShellDpi
             var layers: [Widget] = [Positioned(left: 0, top: 0, right: 0, bottom: 0, child: content)]
@@ -43,11 +45,11 @@ class DesktopWindow: StatelessWidget {
                         child: surf
                     )
                 }
+                let r = cs.logicalRect ?? Rect.fromLTWH(
+                    Double(cs.offsetXPhys) / dpi, Double(cs.offsetYPhys) / dpi,
+                    Double(cs.widthPhys) / dpi, Double(cs.heightPhys) / dpi)
                 layers.append(Positioned(
-                    left: Double(cs.offsetXPhys) / dpi,
-                    top: Double(cs.offsetYPhys) / dpi,
-                    width: Double(cs.widthPhys) / dpi,
-                    height: Double(cs.heightPhys) / dpi,
+                    left: r.left, top: r.top, width: r.width, height: r.height,
                     child: surf
                 ))
             }

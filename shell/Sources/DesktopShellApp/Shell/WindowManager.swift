@@ -11,14 +11,21 @@ import FlutterSwiftBridge
 /// toplevel window's content area (VLC's reparented video output). Offsets and
 /// sizes are physical px in the toplevel's coordinate space; the window widget
 /// scales them by the shell DPI.
+/// A surface drawn inside a window's content: an X11 subwindow reparented
+/// into it (VLC's video output), or a Wayland subsurface (a video, a hover
+/// card). The X11 kind is placed in physical pixels, which DesktopWindow
+/// scales by the shell DPI at build time; the Wayland kind arrives already
+/// in the shell's logical pixels, content-relative, as `logicalRect`.
 struct ChildSurface {
+    /// The X11 window id, or the Wayland surface id — whichever made it.
     let x11WindowId: UInt32
     let textureId: Int
-    var offsetXPhys: Int
-    var offsetYPhys: Int
-    var widthPhys: Int
-    var heightPhys: Int
+    var offsetXPhys: Int = 0
+    var offsetYPhys: Int = 0
+    var widthPhys: Int = 0
+    var heightPhys: Int = 0
     var flipY: Bool = true
+    var logicalRect: Rect? = nil
 }
 
 class WindowInfo {
@@ -58,6 +65,11 @@ class WindowInfo {
     var isMaximized: Bool { didSet { if oldValue != isMaximized { onStateChanged?() } } }
     var isFullscreen: Bool { didSet { if oldValue != isFullscreen { onStateChanged?() } } }
     var savedRect: Rect?
+    /// xdg_toplevel min/max size hints, as content logical pixels (the
+    /// frame adds the title bar). nil or 0 = the client set none; resizes
+    /// stay inside them.
+    var clientMinSize: (width: Double, height: Double)? = nil
+    var clientMaxSize: (width: Double, height: Double)? = nil
     /// wp_alpha_modifier: the client asked for its content at this opacity.
     /// The frame stays opaque; only the content area is drawn through it.
     var contentOpacity: Double = 1.0
@@ -825,19 +837,29 @@ class WindowManagerState {
             r += delta.dx; b += delta.dy
         }
 
-        // Enforce minimum size
-        if r - l < DesktopTheme.kMinWindowWidth {
-            if edge == .left || edge == .topLeft || edge == .bottomLeft {
-                l = r - DesktopTheme.kMinWindowWidth
-            } else {
-                r = l + DesktopTheme.kMinWindowWidth
-            }
+        // Enforce the size limits: the shell's floor, raised to the
+        // client's xdg_toplevel min size (content, so plus the title bar),
+        // and the client's max size as the ceiling. The edge being dragged
+        // is the one that gives.
+        let leftEdge = edge == .left || edge == .topLeft || edge == .bottomLeft
+        let topEdge = edge == .top || edge == .topLeft || edge == .topRight
+        let minW = max(DesktopTheme.kMinWindowWidth, win.clientMinSize?.width ?? 0)
+        let minH = max(DesktopTheme.kMinWindowHeight,
+                       (win.clientMinSize?.height ?? 0) + DesktopTheme.kTitleBarHeight)
+        if r - l < minW {
+            if leftEdge { l = r - minW } else { r = l + minW }
         }
-        if b - t < DesktopTheme.kMinWindowHeight {
-            if edge == .top || edge == .topLeft || edge == .topRight {
-                t = b - DesktopTheme.kMinWindowHeight
-            } else {
-                b = t + DesktopTheme.kMinWindowHeight
+        if b - t < minH {
+            if topEdge { t = b - minH } else { b = t + minH }
+        }
+        if let mx = win.clientMaxSize {
+            let maxW = mx.width > 0 ? max(mx.width, minW) : 0
+            let maxH = mx.height > 0 ? max(mx.height + DesktopTheme.kTitleBarHeight, minH) : 0
+            if maxW > 0, r - l > maxW {
+                if leftEdge { l = r - maxW } else { r = l + maxW }
+            }
+            if maxH > 0, b - t > maxH {
+                if topEdge { t = b - maxH } else { b = t + maxH }
             }
         }
 

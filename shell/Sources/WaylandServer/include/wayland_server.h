@@ -152,9 +152,22 @@ void wayland_server_on_shm_surface_commit(WaylandServer* server,
 void wayland_shm_pack_rgba(void* dst, const void* src, int width, int height,
                            int src_stride, int keep_alpha);
 
-/* Client set max/min size hint. */
-void wayland_server_on_toplevel_resize_request(WaylandServer* server,
-    void (*cb)(void* ctx, uint32_t surface_id, int width, int height), void* ctx);
+/* xdg_toplevel min/max size hints (surface coordinates, 0 = unset), applied
+ * on commit. The shell keeps its interactive resizes within them. */
+void wayland_server_on_toplevel_size_hints(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int32_t min_w, int32_t min_h,
+               int32_t max_w, int32_t max_h), void* ctx);
+
+/* A subsurface of a toplevel window with content of its own: draw it inside
+ * that window at (x, y) from the toplevel's surface origin. Fired before the
+ * subsurface's first buffer arrives through on_surface_commit /
+ * on_shm_surface_commit under the subsurface's own id, and again when the
+ * offset moves. `unmapped`: nothing to draw any more. */
+void wayland_server_on_subsurface_placed(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, uint32_t toplevel_id,
+               int32_t x, int32_t y), void* ctx);
+void wayland_server_on_subsurface_unmapped(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
 
 /* --- Text input (zwp_text_input_v3) — IME delivery --------------------- */
 
@@ -525,6 +538,11 @@ void wayland_server_pointer_motion(WaylandServer* server,
                                    uint32_t surface_id,
                                    uint32_t time_ms,
                                    double x, double y);
+
+/* A button went down on something that is no client surface at all (the
+ * desktop, the shell's own chrome, an X11 window). Only a grabbed popup
+ * cares: it is dismissed, as it would be by a press on another client. */
+void wayland_server_pointer_pressed_outside(WaylandServer* server);
 
 void wayland_server_pointer_button(WaylandServer* server,
                                    uint32_t surface_id,

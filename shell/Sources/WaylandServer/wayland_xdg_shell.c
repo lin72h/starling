@@ -262,12 +262,15 @@ static void xdg_toplevel_set_max_size_handler(struct wl_client* client,
     if (!surface)
         return;
 
-    /* Store max size — the compositor may use this as a hint */
-    struct WaylandServer* server = surface->server;
-    if (server->cb.on_toplevel_resize_request) {
-        server->cb.on_toplevel_resize_request(server->cb_ctx,
-                                                  surface->id, width, height);
+    /* Double-buffered: lands on the next commit (wayland_compositor.c). */
+    if (width < 0 || height < 0) {
+        wl_resource_post_error(resource, XDG_TOPLEVEL_ERROR_INVALID_SIZE,
+                               "max size must not be negative");
+        return;
     }
+    surface->pending_max_w = width;
+    surface->pending_max_h = height;
+    surface->size_hints_pending = 1;
 }
 
 static void xdg_toplevel_set_min_size_handler(struct wl_client* client,
@@ -277,12 +280,14 @@ static void xdg_toplevel_set_min_size_handler(struct wl_client* client,
     if (!surface)
         return;
 
-    /* Store min size — the compositor may use this as a hint */
-    struct WaylandServer* server = surface->server;
-    if (server->cb.on_toplevel_resize_request) {
-        server->cb.on_toplevel_resize_request(server->cb_ctx,
-                                                  surface->id, width, height);
+    if (width < 0 || height < 0) {
+        wl_resource_post_error(resource, XDG_TOPLEVEL_ERROR_INVALID_SIZE,
+                               "min size must not be negative");
+        return;
     }
+    surface->pending_min_w = width;
+    surface->pending_min_h = height;
+    surface->size_hints_pending = 1;
 }
 
 /* The client's own window-state requests. The shell owns the state: it
@@ -498,15 +503,68 @@ static void xdg_popup_destroy_handler(struct wl_client* client,
     wl_resource_destroy(resource);
 }
 
+/* xdg_popup.grab: the popup (a menu) wants the pointer until it is
+ * dismissed. The seat and serial are not checked — the request only ever
+ * arrives from the click that opened the menu. What matters is the other
+ * half of the contract: a press outside the popup's tree must dismiss it
+ * (popup_done), which the input path does through wayland_popup_grab_*. */
 static void xdg_popup_grab_handler(struct wl_client* client,
                                     struct wl_resource* resource,
                                     struct wl_resource* seat,
                                     uint32_t serial) {
-    (void)client;
-    (void)resource;
-    (void)seat;
-    (void)serial;
-    /* No-op — we don't track popup grabs. */
+    (void)client; (void)seat; (void)serial;
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (!surface || !surface->xdg_popup || surface->popup_grabbed) return;
+    surface->popup_grabbed = 1;
+    surface->server->popup_grab_count++;
+}
+
+static void popup_grab_release(struct WaylandSurface* surface) {
+    if (!surface->popup_grabbed) return;
+    surface->popup_grabbed = 0;
+    if (surface->server->popup_grab_count > 0)
+        surface->server->popup_grab_count--;
+}
+
+/* How deep a popup sits: 0 for one on a toplevel, 1 for a submenu... */
+static int popup_depth(struct WaylandServer* server, struct WaylandSurface* p) {
+    int d = 0;
+    uint32_t id = p->parent_surface_id;
+    while (d < 32) {
+        struct WaylandSurface* a = wayland_server_find_surface(server, id);
+        if (!a || !a->xdg_popup) break;
+        d++;
+        id = a->parent_surface_id;
+    }
+    return d;
+}
+
+int wayland_popup_grab_contains(struct WaylandServer* server, struct WaylandSurface* surface) {
+    struct WaylandSurface* s = surface;
+    int guard = 0;
+    while (s && s->xdg_popup && guard++ < 32) {
+        if (s->popup_grabbed) return 1;
+        s = wayland_server_find_surface(server, s->parent_surface_id);
+    }
+    return 0;
+}
+
+void wayland_popup_grab_dismiss_all(struct WaylandServer* server) {
+    /* Topmost first: a submenu's popup_done before its menu's, as the
+     * client would destroy them itself. */
+    while (server->popup_grab_count > 0) {
+        struct WaylandSurface* best = NULL;
+        int best_depth = -1;
+        struct WaylandSurface* s;
+        wl_list_for_each(s, &server->surfaces, link) {
+            if (!s->xdg_popup || !s->popup_grabbed) continue;
+            int d = popup_depth(server, s);
+            if (d > best_depth) { best = s; best_depth = d; }
+        }
+        if (!best) { server->popup_grab_count = 0; break; }
+        popup_grab_release(best);
+        xdg_popup_send_popup_done(best->xdg_popup);
+    }
 }
 
 static void xdg_popup_reposition_handler(struct wl_client* client,
@@ -531,6 +589,7 @@ static void xdg_popup_resource_destroy(struct wl_resource* resource) {
 
     if (surface->xdg_popup == resource) {
         struct WaylandServer* server = surface->server;
+        popup_grab_release(surface);
         /* Unmapping: the surface leaves the output (Chrome reuses popup
          * wl_surfaces across shows, so pair every enter with a leave). */
         wayland_output_send_leave(server, surface);

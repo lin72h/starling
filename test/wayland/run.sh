@@ -2,11 +2,13 @@
 # Build and run the compositor protocol test (see protocols-test.c).
 #
 #   test/wayland/run.sh [build-dir]    build + run; prints the checks' verdict
-#   STARLING_WL_SANITIZE=address,undefined test/wayland/run.sh
-#                                      the same, with the server and client
-#                                      built under the sanitizers — a
-#                                      use-after-free or an overflow in a
-#                                      request handler fails the run
+#
+# Both halves are built under AddressSanitizer, UndefinedBehaviorSanitizer
+# and the leak detector whenever the compiler has them — a use-after-free,
+# an overflow or a leak in a request handler fails the run, where a plain
+# build corrupts a heap somewhere later and passes. STARLING_WL_SANITIZE
+# names the sanitizers (default address,undefined); set it to "0" for a
+# plain build.
 #
 # The server is compiled from the tree's own sources; the client headers are
 # generated from the same XML the server's bindings were (the system's
@@ -54,9 +56,13 @@ gen wlr-virtual-pointer-unstable-v1             "$REPO/shell/protocols/wlr-virtu
 gen virtual-keyboard-unstable-v1                "$REPO/shell/protocols/virtual-keyboard-unstable-v1.xml"
 
 SAN=()
-if [ -n "${STARLING_WL_SANITIZE:-}" ]; then
-    SAN=(-fsanitize="$STARLING_WL_SANITIZE" -fno-omit-frame-pointer -g -fno-sanitize-recover=all)
+WANT="${STARLING_WL_SANITIZE:-address,undefined}"
+if [ "$WANT" != "0" ] && echo 'int main(void){return 0;}' \
+        | cc -fsanitize="$WANT" -x c - -o "$OUT/san-probe" 2>/dev/null; then
+    SAN=(-fsanitize="$WANT" -fno-omit-frame-pointer -g -fno-sanitize-recover=all)
 fi
+export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
+export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}"
 cc -O1 -std=gnu11 -Wall -Wno-unused-function -Wno-unused-parameter "${SAN[@]}" \
     -I"$SRV/include" -I"$SRV" -I"$OUT" -I/usr/include/libdrm -D_GNU_SOURCE \
     $(pkg-config --cflags wayland-server wayland-client) \

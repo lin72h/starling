@@ -2078,6 +2078,41 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
         }
 
+        wayland.onWindowSizeHints = { [weak self] (windowId: String, minW: Double, minH: Double, maxW: Double, maxH: Double) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+            win.clientMinSize = (minW > 0 || minH > 0) ? (width: minW, height: minH) : nil
+            win.clientMaxSize = (maxW > 0 || maxH > 0) ? (width: maxW, height: maxH) : nil
+        }
+
+        // A subsurface drawn inside its window's content (a video, a hover
+        // card), like an X11 child surface. Only placement changes come
+        // through here; frames update the texture directly.
+        wayland.onSubsurfaceChanged = { [weak self] (windowId: String, surfaceId: UInt32, textureId: Int, rect: Rect) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+            self.setState {
+                let surface = ChildSurface(x11WindowId: surfaceId, textureId: textureId,
+                                           flipY: true, logicalRect: rect)
+                if let i = win.childSurfaces.firstIndex(where: { $0.x11WindowId == surfaceId }) {
+                    win.childSurfaces[i] = surface
+                } else {
+                    win.childSurfaces.append(surface)
+                }
+                // The cached window widget is keyed on identity, not on its
+                // children — drop it or the new child is never built.
+                self._windowChildCache.removeValue(forKey: windowId)
+            }
+        }
+        wayland.onSubsurfaceRemoved = { [weak self] (windowId: String, surfaceId: UInt32) in
+            guard let self = self,
+                  let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+            self.setState {
+                win.childSurfaces.removeAll { $0.x11WindowId == surfaceId }
+                self._windowChildCache.removeValue(forKey: windowId)
+            }
+        }
+
         wayland.onPopupBufferResized = { [weak self] (popupId: String, logicalWidth: Int, logicalHeight: Int, geoX: Int, geoY: Int) in
             guard let self = self else { return }
             if popupId.hasPrefix("dragicon-"), self._dragIcon?.id == popupId {
@@ -4126,6 +4161,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         return Listener(
             onPointerDown: { [self] e in
                 _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
+                // Last in the hit path: a press that reached no client
+                // surface dismisses a grabbed menu (xdg_popup.grab).
+                waylandIntegration?.notePointerDown()
             },
             onPointerMove: { [self] e in
                 _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil

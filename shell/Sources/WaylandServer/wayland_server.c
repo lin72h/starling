@@ -197,6 +197,13 @@ void wayland_server_destroy(WaylandServer* server) {
         free(surface);
     }
 
+    /* Per-server state no client resource owned: a committed security
+     * context's listening socket outlives its object by design, and the
+     * workspace list is the shell's push. Both hold event sources, so they
+     * go while the event loop still exists. */
+    wayland_security_context_fini(server);
+    wayland_workspace_fini(server);
+
     if (server->extra_socket_path[0])
         unlink(server->extra_socket_path);
     if (server->deferred_input.source)
@@ -423,6 +430,12 @@ static void deferred_input_send_one(WaylandServer* server,
             ev->state == 0 && ev->surface_id == 0) {
             wayland_dnd_end(server, 1);
         }
+        /* A press on no client surface: a grabbed menu closes, as it does
+         * on every desktop when the user clicks the wallpaper or a panel. */
+        if (ev->seat == 0 && ev->type == WL_PTR_BUTTON && ev->state == 1 &&
+            ev->surface_id == 0 && server->popup_grab_count > 0) {
+            wayland_popup_grab_dismiss_all(server);
+        }
         return;
     }
 
@@ -484,6 +497,13 @@ static void deferred_input_send_one(WaylandServer* server,
         }
         break;
     case WL_PTR_BUTTON: {
+        /* xdg_popup.grab: a press anywhere but inside the grabbed popup's
+         * tree — the parent window, another window, a bar — dismisses the
+         * whole tree before the press is delivered where it landed. */
+        if (ev->seat == 0 && ev->state == 1 && server->popup_grab_count > 0 &&
+            !wayland_popup_grab_contains(server, surface)) {
+            wayland_popup_grab_dismiss_all(server);
+        }
         uint32_t serial = wl_display_next_serial(server->display);
         FOR_EACH_INPUT_OF_CLIENT(ir, &server->pointer_resources, target) {
             wl_pointer_send_button(ir->resource, serial,
@@ -598,6 +618,13 @@ void wayland_server_pointer_motion(WaylandServer* server,
     struct WaylandPointerEvent ev = {
         .type = WL_PTR_MOTION, .surface_id = surface_id,
         .time_ms = time_ms, .x = x, .y = y
+    };
+    deferred_input_enqueue(server, &ev);
+}
+
+void wayland_server_pointer_pressed_outside(WaylandServer* server) {
+    struct WaylandPointerEvent ev = {
+        .type = WL_PTR_BUTTON, .surface_id = 0, .button = 0x110, .state = 1
     };
     deferred_input_enqueue(server, &ev);
 }
@@ -793,7 +820,9 @@ DEF_CB_SETTER(toplevel_destroy)
 DEF_CB_SETTER(client_destroy)
 DEF_CB_SETTER(surface_commit)
 DEF_CB_SETTER(shm_surface_commit)
-DEF_CB_SETTER(toplevel_resize_request)
+DEF_CB_SETTER(toplevel_size_hints)
+DEF_CB_SETTER(subsurface_placed)
+DEF_CB_SETTER(subsurface_unmapped)
 DEF_CB_SETTER(move_request)
 DEF_CB_SETTER(interactive_resize_request)
 DEF_CB_SETTER(new_popup)
