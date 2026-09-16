@@ -1110,6 +1110,22 @@ func runHeadless() -> Never {
 // The RDP connection IS the display here: no DRM, no seat, no libinput. This
 // is the mode that runs where /dev/dri does not exist (WSL, containers,
 // cloud VMs). See docs/plans/rdp-wsl.md.
+// `--version`: what a tool that identifies the running compositor runs
+// (wmbench does, as `<compositor> --version`). Without this the fatalError
+// below answers with a trap, which reads as "Illegal instruction" from
+// outside. The build stamp beside the binary (git sha + build time, from
+// build/stage.sh) is the most honest version this tree has.
+if CommandLine.arguments.contains("--version") || CommandLine.arguments.contains("-v") {
+    var stamp = "unknown build"
+    let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+    let stampPath = exe.deletingLastPathComponent().appendingPathComponent("BUILD-STAMP").path
+    if let s = try? String(contentsOfFile: stampPath, encoding: .utf8) {
+        stamp = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    print("Starling desktop shell (\(stamp))")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--rdp") {
     runRdpDisplay()
 }

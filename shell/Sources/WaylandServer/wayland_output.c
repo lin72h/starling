@@ -140,6 +140,8 @@ void wayland_server_set_outputs(struct WaylandServer* server,
                 surface->outputs_mask &= ~(1u << i);
             }
         }
+        /* Layer surfaces are tied to their output: closed, not moved. */
+        wayland_layer_shell_output_removed(server, i);
         if (out->global) {
             wl_global_destroy(out->global);
             out->global = NULL;
@@ -184,6 +186,8 @@ void wayland_server_set_outputs(struct WaylandServer* server,
                 out->logical_x, out->logical_y, out->refresh_mhz);
     }
     server->output_count = count;
+    /* wlr-randr and kanshi see the new arrangement. */
+    wayland_output_management_outputs_changed(server);
 }
 
 /* ========================================================================== */
@@ -207,6 +211,18 @@ static void surface_output_crossing(struct WaylandSurface* surface,
     }
     fprintf(stderr, "[wayland_output] surface %u %s \"%s\"\n", surface->id,
             enter ? "entered" : "left", output->name);
+    /* Taskbars track which output a window is on. */
+    wayland_foreign_toplevel_output(surface, output, enter);
+}
+
+int wayland_output_index_of(struct WaylandServer* server,
+                            struct wl_resource* output_resource) {
+    if (!output_resource) return -1;
+    if (!wl_resource_instance_of(output_resource, &wl_output_interface, &output_impl))
+        return -1;
+    struct WaylandOutput* out = wl_resource_get_user_data(output_resource);
+    if (!out || out->server != server) return -1;
+    return out->index;
 }
 
 /* Apply a new outputs bitmask to a surface, diffing against the current one. */

@@ -243,6 +243,14 @@ static const struct wl_seat_interface seat_impl = {
     .release      = seat_release,
 };
 
+int wayland_seat_index_of(struct wl_resource* seat_resource) {
+    if (!seat_resource) return -1;
+    if (!wl_resource_instance_of(seat_resource, &wl_seat_interface, &seat_impl))
+        return -1;
+    struct WaylandSeatDesc* desc = wl_resource_get_user_data(seat_resource);
+    return desc ? desc->index : -1;
+}
+
 static void seat_bind(struct wl_client* client, void* data,
                       uint32_t version, uint32_t id) {
     struct WaylandSeatDesc* desc = data;
@@ -253,8 +261,14 @@ static void seat_bind(struct wl_client* client, void* data,
     /* WL_SEAT_CAPABILITY_POINTER (1) | WL_SEAT_CAPABILITY_KEYBOARD (2) */
     wl_seat_send_capabilities(resource, 3);
     if (version >= 2) {
-        wl_seat_send_name(resource, desc->index == 0 ? "seat0" : "seat-agent");
+        wl_seat_send_name(resource, desc->name ? desc->name
+                                    : (desc->index == 0 ? "seat0" : "seat-agent"));
     }
+}
+
+struct wl_global* wayland_seat_create_global(struct WaylandServer* server,
+                                             struct WaylandSeatDesc* desc) {
+    return wl_global_create(server->display, &wl_seat_interface, 9, desc, seat_bind);
 }
 
 void wayland_seat_init(struct WaylandServer* server) {
@@ -263,10 +277,10 @@ void wayland_seat_init(struct WaylandServer* server) {
     /* Two seats (Murmuration): the human's, and an agent seat whose
      * pointer/keyboard focus streams are fully independent — broker input
      * into agent-owned windows never disturbs what the human is doing. */
-    server->seat_descs[0] = (struct WaylandSeatDesc){ server, 0 };
-    server->seat_descs[1] = (struct WaylandSeatDesc){ server, 1 };
+    server->seat_descs[0] = (struct WaylandSeatDesc){ server, 0, "seat0" };
+    server->seat_descs[1] = (struct WaylandSeatDesc){ server, 1, "seat-agent" };
     server->seat_global = wl_global_create(server->display,
-        &wl_seat_interface, 7, &server->seat_descs[0], seat_bind);
+        &wl_seat_interface, 9, &server->seat_descs[0], seat_bind);
     server->seat_agent_global = wl_global_create(server->display,
-        &wl_seat_interface, 7, &server->seat_descs[1], seat_bind);
+        &wl_seat_interface, 9, &server->seat_descs[1], seat_bind);
 }

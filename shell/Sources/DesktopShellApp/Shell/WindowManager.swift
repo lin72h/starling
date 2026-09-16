@@ -58,6 +58,12 @@ class WindowInfo {
     var isMaximized: Bool { didSet { if oldValue != isMaximized { onStateChanged?() } } }
     var isFullscreen: Bool { didSet { if oldValue != isFullscreen { onStateChanged?() } } }
     var savedRect: Rect?
+    /// wp_alpha_modifier: the client asked for its content at this opacity.
+    /// The frame stays opaque; only the content area is drawn through it.
+    var contentOpacity: Double = 1.0
+    /// ext_background_effect: what is behind these content-local rects is
+    /// blurred under the (translucent) content.
+    var blurRects: [Rect] = []
     /// The floating rect remembered when tiling first captured this window;
     /// restored when the user switches back to the floating layout.
     var preTileRect: Rect? = nil
@@ -861,6 +867,28 @@ class WindowManagerState {
         onWindowsChanged?()
     }
 
+    /// Strips reserved by layer-shell surfaces with an exclusive zone (a
+    /// bar along an edge, in logical pixels) on the host output. Cut from
+    /// the work area on top of the shell's own bars, so a maximized window
+    /// stops at a third-party panel exactly as it stops at the dock.
+    var layerInsets: (top: Double, bottom: Double, left: Double, right: Double) = (0, 0, 0, 0)
+
+    /// The area a window on `ref`'s output may fill: the output less the
+    /// shell's reserved strips and any layer-shell exclusive zones. What
+    /// maximize fills, and what an xx-zones zone measures from.
+    func workArea(for ref: Rect, screenWidth: Double, screenHeight: Double) -> Rect {
+        _outputFillRect(for: ref, screenWidth: screenWidth, screenHeight: screenHeight)
+    }
+
+    /// The whole logical rect of the output that owns `ref`: what fullscreen
+    /// fills.
+    private func _outputFullRect(for ref: Rect, screenWidth: Double, screenHeight: Double) -> Rect {
+        if let dl = displayLayout {
+            return dl.owningOutput(ofRect: ref).logicalRect
+        }
+        return Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+    }
+
     /// The maximise/fullscreen fill rect for the output that OWNS `ref` (its
     /// logical rect minus the menu-bar strip). Falls back to the passed screen
     /// size when no display layout exists (non-DRM dev paths). At N=1 the owning
@@ -874,12 +902,30 @@ class WindowManagerState {
         // it ran its last 56pt underneath the bar.
         let bottomInset = shellMetrics.bottomInset
         let inset = topInset + bottomInset
+        var rect: Rect
+        var onHost = true
         if let dl = displayLayout {
             let o = dl.owningOutput(ofRect: ref)
-            return Rect.fromLTWH(o.logicalLeft, o.logicalTop + topInset,
+            onHost = o.isHost
+            rect = Rect.fromLTWH(o.logicalLeft, o.logicalTop + topInset,
                                  o.logicalWidth, o.logicalHeight - inset)
+        } else {
+            rect = Rect.fromLTWH(0, topInset, screenWidth, screenHeight - inset)
         }
-        return Rect.fromLTWH(0, topInset, screenWidth, screenHeight - inset)
+        // Layer surfaces are drawn on the host output only (see
+        // LayerSurfaces.swift), so only its work area feels them.
+        if onHost {
+            let li = layerInsets
+            let cut = Rect.fromLTRB(rect.left + li.left, rect.top + li.top,
+                                    rect.right - li.right, rect.bottom - li.bottom)
+            // A panel that eats the whole screen is a broken panel; the
+            // window keeps the output rather than vanishing.
+            if cut.width >= DesktopTheme.kMinWindowWidth &&
+               cut.height >= DesktopTheme.kMinWindowHeight {
+                rect = cut
+            }
+        }
+        return rect
     }
 
     func maximizeWindow(_ id: String, screenWidth: Double, screenHeight: Double) {
@@ -920,13 +966,15 @@ class WindowManagerState {
             exitFullscreenSpace(win)
             bringToFront(id)
         } else {
-            // macOS-style fullscreen: window sits BELOW the system status bar
-            // — the status-bar strip is reserved and not given to the app
-            // even when the bar is auto-hidden. The window's own title bar
-            // auto-hides and overlays within the window when revealed
-            // (handled in DesktopWindow).
+            // Fullscreen covers the WHOLE output, status-bar strip included
+            // — what xdg-shell's set_fullscreen promises and what a video or
+            // a game expects; the bar and the window's own title bar auto-hide
+            // and overlay the content when revealed (handled in DesktopWindow
+            // and the edge sensors). It used to stop 28 px short and leave a
+            // black strip, which every fullscreen pixel check reads as a
+            // window that never covered the screen.
             win.savedRect = win.rect
-            win.rect = _outputFillRect(for: win.rect, screenWidth: screenWidth, screenHeight: screenHeight)
+            win.rect = _outputFullRect(for: win.rect, screenWidth: screenWidth, screenHeight: screenHeight)
             win.isFullscreen = true
             win.isMaximized = false
             // The window gets its own transient space immediately to the

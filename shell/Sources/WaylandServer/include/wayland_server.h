@@ -134,12 +134,23 @@ void wayland_server_on_surface_commit(WaylandServer* server,
                uint32_t fourcc, uint64_t modifier,
                int first_commit, int buffer_scale), void* ctx);
 
-/* SHM surface commit. pixel_data is valid only for the duration of the callback. */
+/* SHM surface commit. pixel_data is valid only for the duration of the
+ * callback — copy it out (wayland_shm_pack_rgba) before returning; the
+ * buffer is released to the client the moment the callback returns.
+ * keep_alpha: the surface's role wants its alpha honoured (a popup, a layer
+ * surface) and the buffer carries one; toplevels get alpha forced opaque. */
 void wayland_server_on_shm_surface_commit(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id,
                const void* pixel_data,
                int width, int height, int stride,
-               uint32_t format, int first_commit, int buffer_scale), void* ctx);
+               uint32_t format, int first_commit, int buffer_scale,
+               int keep_alpha), void* ctx);
+
+/* B,G,R,A rows `src_stride` bytes apart -> tightly packed R,G,B,A, alpha
+ * forced to 0xFF unless keep_alpha. One vectorised pass; dst holds
+ * width*height*4 bytes. */
+void wayland_shm_pack_rgba(void* dst, const void* src, int width, int height,
+                           int src_stride, int keep_alpha);
 
 /* Client set max/min size hint. */
 void wayland_server_on_toplevel_resize_request(WaylandServer* server,
@@ -199,6 +210,241 @@ void wayland_server_on_fullscreen_request(WaylandServer* server,
 /* Client requested exit fullscreen (xdg_toplevel.unset_fullscreen). */
 void wayland_server_on_unfullscreen_request(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
+
+/* --------------------------------------------------------------------------
+ * Window state — owned by the shell, reported by the compositor
+ *
+ * The shell decides whether a window is maximized, fullscreen, minimized or
+ * focused and pushes that here; the compositor puts it in every xdg_toplevel
+ * configure and in every foreign-toplevel handle (what a taskbar sees). A
+ * client asking for a change — its own xdg_toplevel.set_maximized, a
+ * taskbar's unset_minimized, an xdg_activation.activate — arrives as an
+ * on_toplevel_request; the shell applies its policy and pushes the result.
+ * -------------------------------------------------------------------------- */
+
+enum {
+    WAYLAND_TOPLEVEL_MAXIMIZED  = 1u << 0,
+    WAYLAND_TOPLEVEL_FULLSCREEN = 1u << 1,
+    WAYLAND_TOPLEVEL_ACTIVATED  = 1u << 2,
+    WAYLAND_TOPLEVEL_MINIMIZED  = 1u << 3,
+    WAYLAND_TOPLEVEL_RESIZING   = 1u << 4,
+};
+
+enum {
+    WAYLAND_TOPLEVEL_REQUEST_ACTIVATE     = 0,
+    WAYLAND_TOPLEVEL_REQUEST_MAXIMIZE     = 1,
+    WAYLAND_TOPLEVEL_REQUEST_UNMAXIMIZE   = 2,
+    WAYLAND_TOPLEVEL_REQUEST_MINIMIZE     = 3,
+    WAYLAND_TOPLEVEL_REQUEST_UNMINIMIZE   = 4,
+    WAYLAND_TOPLEVEL_REQUEST_FULLSCREEN   = 5,
+    WAYLAND_TOPLEVEL_REQUEST_UNFULLSCREEN = 6,
+    WAYLAND_TOPLEVEL_REQUEST_CLOSE        = 7,
+};
+
+/* Record a toplevel's state bits. If a bit a configure carries changed
+ * (maximized, fullscreen, resizing) the last configure is re-sent with the
+ * new set, so a state-only change reaches the client without a resize;
+ * foreign-toplevel handles hear every change. Event-loop thread only. */
+void wayland_server_set_toplevel_state(WaylandServer* server,
+                                       uint32_t surface_id, uint32_t states);
+
+void wayland_server_on_toplevel_request(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int request), void* ctx);
+
+/* --------------------------------------------------------------------------
+ * Layer shell (zwlr_layer_shell_v1) — panels, bars, notifications, and
+ * anything else placed at a screen coordinate rather than managed.
+ * -------------------------------------------------------------------------- */
+
+typedef struct WaylandLayerSurfaceInfo {
+    int32_t  output_index;            /* index into the set_outputs array */
+    uint32_t layer;                   /* 0 background 1 bottom 2 top 3 overlay */
+    uint32_t anchor;                  /* bitfield: 1 top 2 bottom 4 left 8 right */
+    int32_t  margin_top, margin_right, margin_bottom, margin_left;
+    int32_t  width, height;           /* the size the client was configured to */
+    int32_t  exclusive_zone;          /* >0 reserve that many px on exclusive_edge */
+    uint32_t exclusive_edge;          /* one anchor bit, or 0 = reserves nothing */
+    uint32_t keyboard_interactivity;  /* 0 none 1 exclusive 2 on-demand */
+    char     namespace_[64];
+} WaylandLayerSurfaceInfo;
+
+/* Fired on the surface's first commit — the shell registers a texture and
+ * places it; the buffer follows through the ordinary commit callbacks. */
+void wayland_server_on_new_layer_surface(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id,
+               const WaylandLayerSurfaceInfo* info), void* ctx);
+void wayland_server_on_layer_surface_changed(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id,
+               const WaylandLayerSurfaceInfo* info), void* ctx);
+void wayland_server_on_layer_surface_destroy(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
+
+/* The work area of an output (its logical rect less any reserved strips —
+ * the shell's own bars and layer surfaces' exclusive zones), in global
+ * logical coordinates. Zones (xx-zones) are cut from it. Event-loop thread. */
+void wayland_server_set_work_area(WaylandServer* server, int output_index,
+                                  int32_t x, int32_t y, int32_t w, int32_t h);
+
+/* --------------------------------------------------------------------------
+ * wp_alpha_modifier_v1 — whole-surface opacity
+ * -------------------------------------------------------------------------- */
+
+/* alpha in [0,1]; fires on the commit that changes it. Popups and layer
+ * surfaces get it too. */
+void wayland_server_on_surface_alpha(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, double alpha), void* ctx);
+
+/* --------------------------------------------------------------------------
+ * wlr-screencopy — grim, wf-recorder, OBS
+ *
+ * The compositor validates the client's buffer and asks the shell for the
+ * presented pixels of one output region (device pixels). The shell reads
+ * them back from the engine and answers, on the event-loop thread, with
+ * deliver (pixels are BGRX top-down rows, `stride` bytes apart, w*h of them)
+ * or fail. A frame the client destroyed meanwhile is dropped silently.
+ * -------------------------------------------------------------------------- */
+
+void wayland_server_on_screencopy_request(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t frame_id, int output_index,
+               int32_t x, int32_t y, int32_t w, int32_t h), void* ctx);
+void wayland_server_screencopy_deliver(WaylandServer* server, uint32_t frame_id,
+                                       const void* bgrx, int32_t stride,
+                                       uint64_t time_ns);
+void wayland_server_screencopy_fail(WaylandServer* server, uint32_t frame_id);
+
+/* --------------------------------------------------------------------------
+ * xx-zones — explicit placement of managed toplevels
+ *
+ * A zone is an output's work area. A client asks for its window at (x,y) of
+ * the zone; the shell moves the window (clamping as it sees fit) and reports
+ * where it actually is — also whenever the user drags it. Positions are the
+ * window FRAME's top-left (title bar included), relative to the work area.
+ * -------------------------------------------------------------------------- */
+
+void wayland_server_on_toplevel_position_request(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int output_index,
+               int32_t x, int32_t y), void* ctx);
+/* Report a toplevel's frame position relative to its output's work area.
+ * Cheap and diff-guarded: call it for every Wayland window whose rect
+ * changed; a window with no zone item ignores it. Event-loop thread. */
+void wayland_server_toplevel_position(WaylandServer* server, uint32_t surface_id,
+                                      int32_t x, int32_t y);
+void wayland_server_toplevel_position_failed(WaylandServer* server,
+                                             uint32_t surface_id);
+/* The frame the shell draws around a toplevel, in logical pixels. */
+void wayland_server_set_frame_extents(WaylandServer* server, int32_t top,
+                                      int32_t bottom, int32_t left, int32_t right);
+
+/* --------------------------------------------------------------------------
+ * Small protocols
+ * -------------------------------------------------------------------------- */
+
+/* xdg_system_bell_v1: a client rang the bell (surface_id 0 = no surface). */
+void wayland_server_on_system_bell(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
+
+/* 1 when the surface's client holds a keyboard-shortcuts inhibitor for it:
+ * the shell should pass its chords through instead of acting on them.
+ * Event-loop thread only; the shell tracks the callback instead. */
+int wayland_server_shortcuts_inhibited(WaylandServer* server, uint32_t surface_id);
+
+/* ext_session_lock_v1: the session locked (1) or unlocked (0). Lock
+ * surfaces arrive through the layer-surface callbacks as overlay surfaces
+ * with namespace "session-lock" and exclusive keyboard interactivity; while
+ * locked the shell must show nothing else — black where an output has no
+ * lock surface yet. */
+void wayland_server_on_session_lock(WaylandServer* server,
+    void (*cb)(void* ctx, int locked), void* ctx);
+
+/* --------------------------------------------------------------------------
+ * ext-workspace — the shell's spaces, for panels
+ * -------------------------------------------------------------------------- */
+
+typedef struct WaylandWorkspaceDesc {
+    uint32_t id;          /* the shell's space id, stable for its lifetime */
+    char     name[64];
+    int      active;
+} WaylandWorkspaceDesc;
+
+/* Replace the advertised workspace list (in display order). Diffed against
+ * the previous push; every bound manager hears the changes + done. */
+void wayland_server_set_workspaces(WaylandServer* server,
+                                   const WaylandWorkspaceDesc* list, int count);
+
+enum {
+    WAYLAND_WORKSPACE_REQUEST_ACTIVATE   = 0,
+    WAYLAND_WORKSPACE_REQUEST_DEACTIVATE = 1,
+    WAYLAND_WORKSPACE_REQUEST_REMOVE     = 2,
+    WAYLAND_WORKSPACE_REQUEST_CREATE     = 3,   /* workspace_id 0, name set */
+};
+void wayland_server_on_workspace_request(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t workspace_id, int request, const char* name),
+    void* ctx);
+
+/* --------------------------------------------------------------------------
+ * ext-background-effect — blur behind a surface region
+ * -------------------------------------------------------------------------- */
+
+/* rects: count quads of x,y,w,h in surface-local logical coordinates; count
+ * 0 clears. Fires on the commit that changes the region. */
+void wayland_server_on_surface_blur(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, const int32_t* rects, int count),
+    void* ctx);
+
+/* --------------------------------------------------------------------------
+ * Virtual input (wlr-virtual-pointer, virtual-keyboard) and pointer warp
+ * -------------------------------------------------------------------------- */
+
+/* One frame of a virtual pointer: has_abs says (ax, ay) are fractions
+ * [0,1] of output `output_index`; otherwise (dx, dy) are a relative move in
+ * logical pixels. `buttons` is the pointer's button state as Flutter's
+ * mask (1 primary, 2 secondary, 4 middle); wheel deltas in pixels. */
+void wayland_server_on_virtual_pointer(WaylandServer* server,
+    void (*cb)(void* ctx, int output_index, int has_abs, double ax, double ay,
+               double dx, double dy, uint32_t buttons,
+               double wheel_dx, double wheel_dy), void* ctx);
+/* One key from a virtual keyboard, decoded through its own keymap. */
+void wayland_server_on_virtual_key(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t evdev_key, uint32_t keysym,
+               const char* utf8, int pressed), void* ctx);
+/* wp_pointer_warp: a client wants the pointer at (x, y) of its surface. */
+void wayland_server_on_pointer_warp(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, double x, double y), void* ctx);
+
+/* --------------------------------------------------------------------------
+ * Drag-and-drop (wl_data_device.start_drag) and xdg-toplevel-drag
+ * -------------------------------------------------------------------------- */
+
+/* The drag icon surface to draw at the pointer (its buffers arrive through
+ * the ordinary commit callbacks), 0 when the drag ends. */
+void wayland_server_on_drag_icon(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int active), void* ctx);
+/* A toplevel attached to the drag: keep its content origin at the pointer
+ * minus (x_off, y_off) while active; active 0 = the drag ended. */
+void wayland_server_on_toplevel_drag(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int32_t x_off, int32_t y_off,
+               int active), void* ctx);
+/* The pointer's button was released somewhere no client surface saw it
+ * (the shell's own chrome): a drag in progress ends there. Any thread. */
+void wayland_server_pointer_global_release(WaylandServer* server);
+
+/* --------------------------------------------------------------------------
+ * wlr-output-management apply
+ * -------------------------------------------------------------------------- */
+
+/* A client applied a configuration that only changes the host output's
+ * scale (anything else is refused before this fires). The shell applies
+ * it and answers with wayland_server_output_config_result. */
+void wayland_server_on_output_config(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t config_id, double host_scale), void* ctx);
+void wayland_server_output_config_result(WaylandServer* server,
+                                         uint32_t config_id, int ok);
+
+/* zwp_keyboard_shortcuts_inhibit: a surface gained (1) or lost (0) an
+ * inhibitor. While one holds, the shell forwards every key — its own
+ * chords included — to that surface. */
+void wayland_server_on_shortcuts_inhibit(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int inhibited), void* ctx);
 
 /* --------------------------------------------------------------------------
  * Event loop

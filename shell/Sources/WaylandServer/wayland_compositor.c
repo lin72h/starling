@@ -163,7 +163,7 @@ static void surface_commit(struct wl_client* client,
          * stalls after a couple of frames and the popup stays translucent. */
         if (surface->committed_buffer) {
             wl_list_remove(&surface->committed_buffer_destroy_listener.link);
-            if (surface->had_role &&
+            if (surface->had_role && !surface->committed_buffer_released &&
                 surface->committed_buffer != surface->pending.buffer) {
                 wl_buffer_send_release(surface->committed_buffer);
             }
@@ -173,6 +173,7 @@ static void surface_commit(struct wl_client* client,
         if (surface->pending.buffer)
             wl_list_remove(&surface->pending_buffer_destroy_listener.link);
         surface->committed_buffer = surface->pending.buffer;
+        surface->committed_buffer_released = 0;
         if (surface->committed_buffer) {
             surface->committed_buffer_destroy_listener.notify =
                 committed_buffer_destroyed;
@@ -181,6 +182,26 @@ static void surface_commit(struct wl_client* client,
         }
         surface->pending.buffer = NULL;
         surface->pending.buffer_set = 0;
+    }
+
+    /* The other double-buffered state on this surface: a layer surface's
+     * arrangement (which also answers the initial commit with a configure),
+     * the alpha multiplier, and a zone item's membership and position. */
+    wayland_layer_shell_commit(server, surface);
+    wayland_alpha_modifier_commit(server, surface);
+    wayland_zones_commit(server, surface);
+    wayland_background_effect_commit(server, surface);
+
+    /* A popup whose parent never arrived through the layer shell: the
+     * shell has not heard of it at all yet, so tell it now, parentless. */
+    if (surface->xdg_popup && surface->popup_parent_pending) {
+        surface->popup_parent_pending = 0;
+        if (server->cb.on_new_popup) {
+            server->cb.on_new_popup(server->cb_ctx, surface->id,
+                                    surface->parent_surface_id,
+                                    surface->popup_x, surface->popup_y,
+                                    surface->popup_w, surface->popup_h);
+        }
     }
 
     /* Apply pending frame callback — move to active. */
@@ -238,12 +259,17 @@ static void surface_commit(struct wl_client* client,
     }
 
     /* Notify compositor if we have a buffer and the target has a role. */
-    if (surface->committed_buffer && (target->xdg_toplevel || target->xdg_popup)) {
+    if (surface->committed_buffer &&
+        (target->xdg_toplevel || target->xdg_popup || target->layer ||
+         target->is_drag_icon)) {
         enum WaylandBufferType* type_ptr =
             wl_resource_get_user_data(surface->committed_buffer);
         if (type_ptr) {
             int first = !target->first_commit_done;
             target->first_commit_done = 1;
+            /* Mapped: the taskbars (foreign-toplevel lists) announce it. */
+            if (target->xdg_toplevel && !target->mapped)
+                wayland_foreign_toplevel_map(server, target);
 
             /* Remember what this surface drew for itself, so the routing rule
              * above can tell a full-size content subsurface from a small
@@ -279,6 +305,13 @@ static void surface_commit(struct wl_client* client,
                 struct ShmBuffer* buf = (struct ShmBuffer*)type_ptr;
                 if (server->cb.on_shm_surface_commit && buf->pool && buf->pool->data) {
                     const void* pixel_data = (const char*)buf->pool->data + buf->offset;
+                    /* Toplevels routinely commit alpha 0 on an ARGB buffer,
+                     * which composites the window away; only a popup (its
+                     * shadow) or a layer surface (a translucent bar) means
+                     * its alpha. */
+                    int keep_alpha = buf->format == WL_SHM_FORMAT_ARGB8888 &&
+                                     (target->xdg_popup || target->layer ||
+                                      target->is_drag_icon || target->blur_count > 0);
                     server->cb.on_shm_surface_commit(
                         server->cb_ctx,
                         target->id,
@@ -286,11 +319,29 @@ static void surface_commit(struct wl_client* client,
                         buf->width, buf->height,
                         buf->stride, buf->format,
                         first,
-                        surface->buffer_scale);
+                        surface->buffer_scale,
+                        keep_alpha);
                 }
             }
         }
     }
+    /* An shm buffer's pixels were copied out of the pool inside the
+     * callback above, so the client may reuse it NOW — released here rather
+     * than when the next buffer replaces it. A client that recycles a
+     * buffer only once it is released (wmbench, weston-simple-shm, any
+     * single- or double-buffered software client) otherwise waits a whole
+     * frame for it — and a popup that is created, shown once and destroyed
+     * never got its buffer back at all. dma-buf stays held until replaced:
+     * the GPU reads it for as long as it is on screen. */
+    if (surface->committed_buffer && !surface->committed_buffer_released &&
+        surface->had_role) {
+        enum WaylandBufferType* t = wl_resource_get_user_data(surface->committed_buffer);
+        if (t && *t == BUFFER_TYPE_SHM) {
+            wl_buffer_send_release(surface->committed_buffer);
+            surface->committed_buffer_released = 1;
+        }
+    }
+
     /* Frame pacing. Primary: real page flips (wayland_server_on_present)
      * fire frame callbacks + presentation feedback with kernel scanout
      * timestamps. The per-surface timer is the FALLBACK for commits that
@@ -302,7 +353,9 @@ static void surface_commit(struct wl_client* client,
      * mapped role surface — not just ones that requested a frame callback. */
     if (surface->frame_done_timer &&
         (surface->frame_callback ||
-         ((surface->xdg_toplevel || surface->xdg_popup) && surface->committed_buffer))) {
+         ((surface->xdg_toplevel || surface->xdg_popup || surface->layer ||
+           surface->is_drag_icon) &&
+          surface->committed_buffer))) {
         wl_event_source_timer_update(surface->frame_done_timer,
                                      server->saw_flip ? 100 : 16);
     }
@@ -444,6 +497,20 @@ static void surface_destroy_resource(struct wl_resource* resource) {
     if (surface->subsurface_resource) {
         wl_resource_set_user_data(surface->subsurface_resource, NULL);
     }
+    if (surface->alpha_resource) {
+        wl_resource_set_user_data(surface->alpha_resource, NULL);
+    }
+    /* Role and helper objects that keep a raw pointer to this surface: a
+     * layer surface goes inert, the zone item is closed, the taskbars hear
+     * the window is gone, a shortcuts inhibitor forgets its surface. */
+    wayland_layer_shell_surface_destroyed(surface->server, surface);
+    wayland_foreign_toplevel_unmap(surface->server, surface);
+    wayland_xdg_foreign_surface_destroyed(surface->server, surface);
+    wayland_dnd_surface_destroyed(surface->server, surface);
+    if (surface->background_effect_resource)
+        wl_resource_set_user_data(surface->background_effect_resource, NULL);
+    wayland_zones_surface_destroyed(surface->server, surface);
+    wayland_shortcuts_inhibit_surface_destroyed(surface->server, surface);
 
     /* Children hold a raw pointer to us. Destroying a parent while a
      * subsurface still references it left that pointer dangling, and the
@@ -466,12 +533,21 @@ static void surface_destroy_resource(struct wl_resource* resource) {
      * zwp_text_input_v3.enter. */
     wayland_text_input_surface_destroyed(surface->server, surface);
 
-    /* Clean up buffer destroy listeners. */
+    /* Clean up buffer destroy listeners — and hand the buffers back. A
+     * surface that dies with a buffer attached or on screen is done with
+     * it; a client that pools its buffers (every toolkit, wmbench) counts
+     * one as busy until release, and a popup surface made and destroyed
+     * per menu leaked its pool one buffer at a time. */
     if (surface->committed_buffer) {
         wl_list_remove(&surface->committed_buffer_destroy_listener.link);
+        if (!surface->committed_buffer_released &&
+            surface->committed_buffer != surface->pending.buffer) {
+            wl_buffer_send_release(surface->committed_buffer);
+        }
     }
     if (surface->pending.buffer) {
         wl_list_remove(&surface->pending_buffer_destroy_listener.link);
+        wl_buffer_send_release(surface->pending.buffer);
     }
 
     /* Discard any pending presentation feedback for this surface so the
@@ -530,6 +606,9 @@ static void compositor_create_surface(struct wl_client* client,
     surface->buffer_scale = 1;
     surface->committed_buffer = NULL;
     surface->frame_callback = NULL;
+    surface->alpha = 1.0;
+    surface->pending_alpha = 1.0;
+    wl_list_init(&surface->foreign_handles);
     surface->frame_done_timer = wl_event_loop_add_timer(
         server->event_loop, frame_done_timer_cb, surface);
 
@@ -548,7 +627,14 @@ static void region_destroy(struct wl_client* client,
 
 static void region_add(struct wl_client* client, struct wl_resource* resource,
                        int32_t x, int32_t y, int32_t width, int32_t height) {
-    (void)client; (void)resource; (void)x; (void)y; (void)width; (void)height;
+    (void)client;
+    struct WaylandRegion* reg = wl_resource_get_user_data(resource);
+    if (!reg || reg->count >= WAYLAND_MAX_REGION_RECTS || width <= 0 || height <= 0) return;
+    reg->rects[reg->count][0] = x;
+    reg->rects[reg->count][1] = y;
+    reg->rects[reg->count][2] = width;
+    reg->rects[reg->count][3] = height;
+    reg->count++;
 }
 
 static void region_subtract(struct wl_client* client, struct wl_resource* resource,
@@ -562,16 +648,25 @@ static const struct wl_region_interface region_impl = {
     .subtract = region_subtract,
 };
 
+static void region_resource_destroyed(struct wl_resource* resource) {
+    free(wl_resource_get_user_data(resource));
+}
+
 static void compositor_create_region(struct wl_client* client,
                                      struct wl_resource* resource,
                                      uint32_t id) {
+    /* The rects a client adds are kept: a blur region
+     * (ext-background-effect) reads them. Opaque/input regions are still
+     * ignored — the shell composites whole surfaces. */
+    struct WaylandRegion* reg = calloc(1, sizeof(*reg));
     struct wl_resource* region = wl_resource_create(client,
         &wl_region_interface, wl_resource_get_version(resource), id);
-    if (!region) {
+    if (!region || !reg) {
+        free(reg);
         wl_resource_post_no_memory(resource);
         return;
     }
-    wl_resource_set_implementation(region, &region_impl, NULL, NULL);
+    wl_resource_set_implementation(region, &region_impl, reg, region_resource_destroyed);
 }
 
 /*
@@ -593,6 +688,6 @@ static void compositor_bind(struct wl_client* client, void* data,
 
 void wayland_compositor_init(struct WaylandServer* server) {
     server->compositor_global = wl_global_create(
-        server->display, &wl_compositor_interface, 5,
+        server->display, &wl_compositor_interface, 6,
         server, compositor_bind);
 }

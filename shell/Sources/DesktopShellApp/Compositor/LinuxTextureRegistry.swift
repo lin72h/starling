@@ -149,6 +149,9 @@ private class TextureEntry {
     /// (translucent backgrounds) and should NOT have their format overridden
     /// to XBGR. Toplevel surfaces have unused alpha (0x00) and need XBGR.
     var isPopupSurface: Bool = false
+    /// A toplevel that asked to be seen through (a blur region): its
+    /// alpha is imported as-is instead of being forced opaque.
+    var keepsAlpha: Bool = false
 
     deinit {
         pixelData?.deallocate()
@@ -296,6 +299,12 @@ class LinuxTextureRegistry: @unchecked Sendable {
     func markAsPopupSurface(id: Int64) {
         lock.lock()
         entries[id]?.isPopupSurface = true
+        lock.unlock()
+    }
+
+    func setKeepsAlpha(id: Int64, _ keeps: Bool) {
+        lock.lock()
+        entries[id]?.keepsAlpha = keeps
         lock.unlock()
     }
 
@@ -466,6 +475,36 @@ class LinuxTextureRegistry: @unchecked Sendable {
         FlutterEngineScheduleFrame(engine)
     }
 
+    /// Like updatePixelData, but the entry takes ownership of `buffer`
+    /// (allocated with UnsafeMutableRawPointer.allocate, width*height*4
+    /// bytes of R,G,B,A) instead of copying it. The wl_shm path's frame is
+    /// already a private copy, so copying it again bought nothing but a
+    /// memcpy of every software client's frame. Freed here if the entry is
+    /// gone.
+    func adoptPixelData(
+        engine: OpaquePointer,
+        id: Int64,
+        buffer: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int
+    ) {
+        lock.lock()
+        guard let entry = entries[id] else {
+            lock.unlock()
+            buffer.deallocate()
+            return
+        }
+        entry.pixelData?.deallocate()
+        entry.pixelData = buffer
+        entry.width = width
+        entry.height = height
+        entry.dirty = true
+        lock.unlock()
+        RecordingService.noteSourceContentChanged(textureId: id)
+        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        FlutterEngineScheduleFrame(engine)
+    }
+
     // ─── GL Texture Population (raster thread) ──────────────────────────
 
     /// Called by the engine's raster thread via the texture frame callback.
@@ -579,7 +618,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
                 // causing the "ghost window" effect if alpha blending is applied.
                 // Popup surfaces keep ABGR — they use premultiplied alpha for
                 // translucent backgrounds, drop shadows, and rounded corners.
-                let isPopup = entry.isPopupSurface
+                let isPopup = entry.isPopupSurface || entry.keepsAlpha
                 var importFourcc = dmaFourcc
                 if isWayland && !isPopup {
                     let DRM_FORMAT_ABGR8888: UInt32 = 0x34324241

@@ -254,7 +254,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    private var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool)] = [:]
 
     /// macOS-style fullscreen auto-hide: when a fullscreen window is on top,
     /// the desktop status bar and the window's title bar are hidden until the
@@ -268,6 +268,30 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // Popup tracking: popupId → (textureId, parentSurfaceId, x, y, width, height, mapped)
     // mapped=false until first buffer commit (Hyprland-style: don't render until content ready)
     var popups: [String: (textureId: Int, parentSurfaceId: UInt32, x: Double, y: Double, width: Double, height: Double, mapped: Bool)] = [:]
+    /// wp_alpha_modifier on a popup's surface (popupId → opacity).
+    var popupAlpha: [String: Double] = [:]
+    /// zwlr_layer_shell_v1 surfaces on the host output — see LayerSurfaces.swift.
+    var layerSurfaces: [UInt32: LayerSurfaceEntry] = [:]
+    /// The layer surface holding the keyboard: exclusive interactivity, or
+    /// on-demand after a click on it. nil = the focused window has it.
+    var _layerKeyboardSurface: UInt32? = nil
+    /// The overlay layers' own states (OverlayLayers.swift): a popup or a
+    /// layer-surface change rebuilds these, not the whole desktop.
+    var _popupLayerState: PopupLayerState? = nil
+    /// wl_data_device drag: the icon surface riding the pointer
+    /// (DragAndDrop.swift). Size arrives with its first buffer.
+    var _dragIcon: (id: String, textureId: Int, width: Double, height: Double)? = nil
+    /// xdg_toplevel_drag: the window following the pointer, and the offset
+    /// its content origin keeps from it.
+    var _toplevelDrag: (windowId: String, xOff: Int, yOff: Int)? = nil
+    /// The last relative-motion base for a virtual pointer, until the
+    /// injected event has come back through the root listener.
+    var _injectedPointer: Offset? = nil
+    var _layerSurfaceLayerStates: [String: LayerSurfacesLayerState] = [:]
+    /// ext_session_lock: a locker holds the session. The desktop draws its
+    /// lock surfaces over black and nothing else, and no key or click
+    /// reaches anything but them — until the locker unlocks.
+    var _sessionLocked = false
 
 
     // Screen dimensions — the logical size of the HOST output, i.e. the panel
@@ -397,7 +421,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     // Windows currently playing the scale-effect minimize (flying into
     // their dock icon). The actual minimize is deferred until it lands.
-    private var _minimizingWindows: Set<String> = []
+    var _minimizingWindows: Set<String> = []
 
     // Frame tick for tooling (tools/shell-drive.py): SIGRTMIN+2 requests a
     // *presented* frame. Screenshots and the recording toggle are consumed
@@ -485,6 +509,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// sees motion over windows and panes too rather than only the parts of
     /// the wallpaper nothing claimed. Recording zoom centres on it.
     var _lastPointer: Offset = Offset(0, 0)
+    /// The Flutter button mask as of the last root pointer event.
+    var _lastButtons: Int = 0
 
     /// `_lastPointer` as fractions of the screen — the coordinates the
     /// recording zoom consumes (`stepZoom` at the key, follow in the pump).
@@ -1121,7 +1147,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The DRM embedder emits only down/up; typematic repeat is synthesized
     // here (vsync Ticker) and routed like a real key. Wayland clients are
     // excluded — they run their own repeat from wl_keyboard repeat_info.
-    private var _keyRouter: ((KeyData) -> Bool)?
+    var _keyRouter: ((KeyData) -> Bool)?
     private var _heldKeyForRepeat: KeyData?
     private var _repeatTicker: Ticker?
     private var _repeatsFired = 0
@@ -1314,6 +1340,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 tick = true
                 rebuild = true
             }
+            if waylandIntegration?.needsFramePump == true {
+                tick = true
+                rebuild = true
+            }
             // Recording rides the same pump: presents carry the engine's
             // start/stop requests AND feed the frame mailbox, so it runs
             // from the start tap until the engine confirms the stop. An
@@ -1389,6 +1419,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         recordingService?.onFramePumpNeedChanged = pokePump
         screenCastService?.onFramePumpNeedChanged = pokePump
         rdpService?.onFramePumpNeedChanged = pokePump
+        // wlr-screencopy: a frame in flight needs presents like a recording.
+        waylandIntegration?.onFramePumpNeedChanged = pokePump
         _reevaluateFramePump()
 
         // WiFi state: monitor-driven while idle, plus a 5s re-read while the
@@ -1805,6 +1837,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     ownerId = wsId
                     isWorkspaceWindow = true
                 }
+                // A new window from the client whose fullscreen window was on
+                // screen joins that window's space (macOS: an app's new window
+                // opens in its own fullscreen space). addWindow hopped to a
+                // user desktop, which yanked the fullscreen window off the
+                // screen the moment its app opened a dialog — and left a
+                // client's fullscreen surface uncovered for good once the
+                // dialog went, because nothing ever hopped back.
+                if ownerId == nil,
+                   case .fullscreen(let fsId) = self.windowManager.spaces[spaceBefore].kind,
+                   let fsClient = wayland.clientId(forWindowId: fsId), fsClient == clientId,
+                   let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
+                    win.spaceId = self.windowManager.spaces[spaceBefore].id
+                    if self.windowManager.activeSpaceIndex != spaceBefore {
+                        self.windowManager.switchToSpace(spaceBefore)
+                    }
+                    self.windowManager.bringToFront(windowId)
+                }
                 if let ownerId,
                    let win = self.windowManager.windows.first(where: { $0.id == windowId }) {
                     win.ownerAgentId = ownerId
@@ -1929,7 +1978,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         wayland.onNewPopup = { [weak self] (surfaceId: UInt32, textureId: Int, parentSurfaceId: UInt32, x: Int, y: Int, width: Int, height: Int) -> String in
             guard let self = self else { return "" }
             let popupId = "popup-\(surfaceId)"
-            self.setState {
+            do {
                 // Dismiss stale sibling popups (same parent) and their descendants.
                 // Chrome never destroys popups because we don't send popup_done,
                 // so stale entries accumulate. Clean them up when a new sibling arrives.
@@ -1960,14 +2009,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                          width: Double(width), height: Double(height),
                                          mapped: false)
             }
+            self._popupsDidChange()
             return popupId
         }
 
         wayland.onPopupDestroyed = { [weak self] (popupId: String) in
             guard let self = self else { return }
-            self.setState {
-                self.popups.removeValue(forKey: popupId)
-            }
+            self.popups.removeValue(forKey: popupId)
+            self.popupAlpha.removeValue(forKey: popupId)
+            self._popupsDidChange()
         }
 
         // Client-initiated interactive move/resize (xdg_toplevel.move/resize —
@@ -2030,6 +2080,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
         wayland.onPopupBufferResized = { [weak self] (popupId: String, logicalWidth: Int, logicalHeight: Int, geoX: Int, geoY: Int) in
             guard let self = self else { return }
+            if popupId.hasPrefix("dragicon-"), self._dragIcon?.id == popupId {
+                self._dragIcon?.width = Double(logicalWidth)
+                self._dragIcon?.height = Double(logicalHeight)
+                self._popupsDidChange()
+                return
+            }
             if var popup = self.popups[popupId] {
                 popup.width = Double(logicalWidth)
                 popup.height = Double(logicalHeight)
@@ -2038,9 +2094,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 popup.x -= Double(geoX)
                 popup.y -= Double(geoY)
                 popup.mapped = true
-                self.setState {
-                    self.popups[popupId] = popup
-                }
+                self.popups[popupId] = popup
+                self._popupsDidChange()
             }
         }
 
@@ -2101,15 +2156,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             guard let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
             guard !win.isFullscreen else { return }  // already fullscreen
             guard let surfId = wayland.surfaceId(forWindowId: windowId) else { return }
+            var finalRect: Rect? = nil
             self.setState {
-                self._fullscreenWithZoom(windowId)
+                finalRect = self._fullscreenWithZoom(windowId)
             }
-            // Fullscreen: window sits below the system status bar (reserved
-            // top strip). The title bar overlays the content on demand so
-            // the wayland client renders into the full window height.
-            let contentW = Int(self.screenWidth)
-            let contentH = Int(self.screenHeight - DesktopTheme.kStatusBarHeight)
-            wayland.sendFullscreenResize(surfaceId: surfId, width: contentW, height: contentH)
+            // Fullscreen: the whole output. The title bar overlays the
+            // content on demand, so the client renders into the full height.
+            guard let full = finalRect else { return }
+            wayland.sendFullscreenResize(surfaceId: surfId,
+                                         width: Int(full.width), height: Int(full.height))
         }
 
         wayland.onUnfullscreenRequest = { [weak self] (windowId: String) in
@@ -2128,6 +2183,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let contentH = Int(restored.height - DesktopTheme.kTitleBarHeight)
             wayland.sendExitFullscreen(surfaceId: surfId, width: contentW, height: contentH)
         }
+
+        // Window state, layer shell, alpha, zones, screencopy's frame pump.
+        _wireWaylandProtocols(wayland)
 
         }  // end Wayland-specific callbacks
 
@@ -2153,6 +2211,35 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if self._screensaverActive {
                 if keyData.type == .down || keyData.type == .repeat {
                     self._screensaverInputWake()
+                }
+                return true
+            }
+
+            // A layer surface holding the keyboard (a launcher, a lock
+            // screen — exclusive interactivity, or on-demand after a click)
+            // gets every key; the desktop's own chords wait.
+            if let wl = waylandIntegration, let target = self._layerKeyboardSurface,
+               wl.isLayerSurface(target) {
+                if keyData.type == .down || keyData.type == .up {
+                    wl.sendKeyEvent(physical: keyData.physical, logical: keyData.logical,
+                                    isDown: keyData.type == .down, targetSurface: target)
+                }
+                return true
+            }
+            // Locked: only a lock surface may hear keys, and it was handled
+            // above (exclusive interactivity). Everything else is swallowed.
+            if self._sessionLocked { return true }
+            // A client holding a keyboard-shortcuts inhibitor for the focused
+            // window (a VM viewer, a remote desktop) gets the chords too.
+            if let wl = waylandIntegration,
+               let fid = self.windowManager.focusedWindowId,
+               let win = self.windowManager.windows.first(where: { $0.id == fid }),
+               win.appId.hasPrefix("wayland-"),
+               let sid = wl.surfaceId(forWindowId: fid),
+               wl.shortcutsInhibited(surfaceId: sid) {
+                if keyData.type == .down || keyData.type == .up {
+                    wl.sendKeyEvent(physical: keyData.physical, logical: keyData.logical,
+                                    isDown: keyData.type == .down, targetSurface: sid)
                 }
                 return true
             }
@@ -3750,15 +3837,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 if request == 1 || request == 2 {
                     self._popupRaiseSerial += 1
                     let z = self._popupRaiseSerial
-                    self.setState { self._popupZ[popupId] = z }
+                    self._popupZ[popupId] = z
+                    self._popupsDidChange()
                 } else if request == 10 || request == 11 {
                     // _NET_WM_STATE_ABOVE on a free-standing window: a
                     // notification popup, a benchmark's watched pattern —
                     // it stays above its peers however often they raise.
-                    self.setState {
-                        if request == 10 { self._popupAbove.insert(popupId) }
-                        else { self._popupAbove.remove(popupId) }
-                    }
+                    if request == 10 { self._popupAbove.insert(popupId) }
+                    else { self._popupAbove.remove(popupId) }
+                    self._popupsDidChange()
                 }
                 return
             }
@@ -3858,22 +3945,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // Already parent-relative (the server differenced it), so this is
             // just a device-px → logical conversion; the renderer adds the
             // parent window's position and title bar.
-            self.setState {
-                self.popups[popupId] = (textureId: textureId,
-                                         parentSurfaceId: parentWindowId,
-                                         x: Double(x) / dpi, y: Double(y) / dpi,
-                                         width: Double(width) / dpi,
-                                         height: Double(height) / dpi,
-                                         mapped: true)
-            }
+            self.popups[popupId] = (textureId: textureId,
+                                     parentSurfaceId: parentWindowId,
+                                     x: Double(x) / dpi, y: Double(y) / dpi,
+                                     width: Double(width) / dpi,
+                                     height: Double(height) / dpi,
+                                     mapped: true)
+            self._popupsDidChange()
             return popupId
         }
 
         x11.onPopupDestroyed = { [weak self] (popupId: String) in
             guard let self = self else { return }
-            self.setState {
-                self.popups.removeValue(forKey: popupId)
-            }
+            self.popups.removeValue(forKey: popupId)
+            self._popupsDidChange()
         }
 
         // A nested native subwindow (VLC's reparented video output). Composite
@@ -3924,7 +4009,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let w = Double(physWidth) / dpi, h = Double(physHeight) / dpi
             if p.width == w && p.height == h { return }
             p.width = w; p.height = h
-            self.setState { self.popups[popupId] = p }
+            self.popups[popupId] = p
+            self._popupsDidChange()
         }
 
         x11.onWindowBufferResized = { [weak self] (windowId: String, physWidth: Int, physHeight: Int) in
@@ -4002,17 +4088,54 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         #endif
     }
 
+    /// STARLING_BUILD_LOG=<ms>: one stderr line per shell rebuild slower
+    /// than that many milliseconds ("1" = 1 ms), with the cost. A rebuild is
+    /// the whole desktop tree, so this is the number every "why is X slow"
+    /// question about the shell starts at.
+    nonisolated(unsafe) static let _buildLogThresholdMs: Double? = {
+        guard let v = ProcessInfo.processInfo.environment["STARLING_BUILD_LOG"],
+              let ms = Double(v) else { return nil }
+        return ms
+    }()
+    nonisolated(unsafe) static var _buildLog: Bool { _buildLogThresholdMs != nil }
+    nonisolated(unsafe) static var _buildCount = 0
+
     override func build(_ context: any BuildContext) -> Widget {
+        let t0 = Self._buildLog ? DispatchTime.now().uptimeNanoseconds : 0
+        defer {
+            if Self._buildLog {
+                Self._buildCount += 1
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                if ms > (Self._buildLogThresholdMs ?? 4) {
+                    FileHandle.standardError.write(Data(String(
+                        format: "[build] #%d %.1f ms (%d windows, %d popups)\n",
+                        Self._buildCount, ms, windowManager.windows.count, popups.count).utf8))
+                }
+            }
+        }
         // Pointer tap for the recording zoom. Translucent so it only
         // observes: it sits in the hit path of everything below and consumes
         // nothing, which is the pattern the overlay note in CLAUDE.md
         // settles on (a ColoredBox here would swallow the desktop).
         // Deliberately NOT setState — this feeds a crop, and rebuilding the
         // whole shell on every mouse move would be absurd.
+        // The same tap steers a drag-and-drop (DragAndDrop.swift): Flutter
+        // keeps routing a held button to the window it went down on, so a
+        // drag crossing windows is followed from here, the one Listener
+        // that sees every move.
         return Listener(
-            onPointerDown: { [self] e in _lastPointer = e.position },
-            onPointerMove: { [self] e in _lastPointer = e.position },
-            onPointerHover: { [self] e in _lastPointer = e.position },
+            onPointerDown: { [self] e in
+                _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
+            },
+            onPointerMove: { [self] e in
+                _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
+                _dragPointerMoved(e.position)
+            },
+            onPointerUp: { [self] e in
+                _lastPointer = e.position; _lastButtons = 0; _injectedPointer = nil
+                _dragPointerReleased(e.position)
+            },
+            onPointerHover: { [self] e in _lastPointer = e.position; _injectedPointer = nil },
             behavior: .translucent,
             child: _buildShellRoot(context))
     }
@@ -4027,6 +4150,23 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if let dl = displayLayout, dl.outputs.count > 1,
            secondaryViewOutputs.isEmpty {
             return _buildVirtualDesktopOverview(dl)
+        }
+
+        // A locked session shows the locker's surfaces and black — never
+        // the desktop, not even for a frame while the locker is still
+        // drawing. The pointer stops at the black; keys stop in routeKey.
+        if _sessionLocked {
+            _layoutLayerSurfaces()
+            var locked: [Widget] = [
+                Positioned(fill: (), child: Listener(
+                    onPointerHover: { _ in DesktopCursor.setShape(.default) },
+                    behavior: .opaque,
+                    child: ColoredBox(color: Color(0xFF000000), child: SizedBox(expand: ()))))
+            ]
+            locked.append(Positioned(fill: (), child: LayerSurfacesLayer(
+                shell: self, layers: [3], slot: "lock", namespace: "session-lock")))
+            _syncWaylandWindowState()
+            return Stack(key: ValueKey("session-lock"), fit: .expand, children: locked)
         }
 
         // Build window widgets sorted by z-index
@@ -4132,6 +4272,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             _dockRevealed = false
         }
 
+        // [0.75] Layer surfaces below the windows: background and bottom.
+        // Placed from the buffers committed so far; popups rooted at the
+        // top/overlay layers are collected during the popup pass and drawn
+        // with their layer.
+        _layoutLayerSurfaces()
+        if !(_missionControlOpen && mcIsOnHost) {
+            children.append(Positioned(fill: (), child: LayerSurfacesLayer(
+                shell: self, layers: [0, 1], slot: "below")))
+        }
+
         // [1..N] Visible windows — both spaces' windows during a slide,
         // each offset by its layer's dx. None while Mission Control is up:
         // every window renders exactly once, inside the exposé.
@@ -4182,6 +4332,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     onBringToFront: { [self] in
                         setState {
                             windowManager.bringToFront(winId)
+                            _layerKeyboardSurface = nil
                         }
                     },
                     onMove: { [self] (delta: Offset) in
@@ -4246,227 +4397,6 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // Evict closed windows from cache
         _windowChildCache = _windowChildCache.filter { liveWindowIds.contains($0.key) }
 
-        // [N+1..] Popups (rendered on top of windows, no decorations)
-        // Sort by nesting depth so children render on top of parents.
-        // Collected here, appended AFTER the status bar and dock below: a
-        // menu is above the chrome on every desktop (macOS, GNOME), and a
-        // dropdown opened near the bottom must not vanish under the dock. X
-        // says the same for a raised override-redirect window, which covers
-        // panels — wmbench's off-screen check puts one over our clock and
-        // reads the clock's white glyphs as the window's pixels otherwise.
-        var popupChildren: [Widget] = []
-        #if os(Linux)
-        let sortedPopups = (_missionControlOpen && mcIsOnHost) ? [] : popups.sorted { a, b in
-            // Count nesting depth by walking parent chain
-            func depth(_ p: (key: String, value: (textureId: Int, parentSurfaceId: UInt32, x: Double, y: Double, width: Double, height: Double, mapped: Bool))) -> Int {
-                var d = 0
-                var sid = p.value.parentSurfaceId
-                while let parent = popups["popup-\(sid)"] ?? popups["x11popup-\(sid)"] {
-                    d += 1
-                    sid = parent.parentSurfaceId
-                }
-                return d
-            }
-            let da = depth(a), db = depth(b)
-            if da != db { return da < db }
-            let aa = _popupAbove.contains(a.key), ab = _popupAbove.contains(b.key)
-            if aa != ab { return !aa }   // keep-above sorts last (topmost)
-            return (_popupZ[a.key] ?? 0) < (_popupZ[b.key] ?? 0)
-        }
-        for (popupId, popup) in sortedPopups {
-            if !popup.mapped { continue }
-            // Walk the parent chain to compute absolute popup position.
-            // For nested popups (submenu of a menu), accumulate positions up to the toplevel.
-            // Also track the immediate parent popup's absolute position for flip.
-            var absX = popup.x
-            var absY = popup.y
-            var parentSurfaceId = popup.parentSurfaceId
-            var immediateParentAbsX = 0.0
-            var immediateParentWidth = 0.0
-            var isFirstParent = true
-            var popupSpaceId: Int? = nil
-            while true {
-                // Check if parent is another popup (a submenu's menu)
-                if let parentPopup = popups["popup-\(parentSurfaceId)"]
-                                  ?? popups["x11popup-\(parentSurfaceId)"] {
-                    if isFirstParent {
-                        // Compute the immediate parent's absolute position (recursively)
-                        // by noting we'll add its x to absX next.
-                        immediateParentWidth = parentPopup.width
-                        isFirstParent = false
-                    }
-                    absX += parentPopup.x
-                    absY += parentPopup.y
-                    parentSurfaceId = parentPopup.parentSurfaceId
-                    continue
-                }
-                // Parent is a toplevel window — add window position. The id is a
-                // Wayland surface id or, for an X11 menu, an X11 window id.
-                var parentWinIdOpt: String? = waylandIntegration?.windowId(forSurfaceId: parentSurfaceId)
-                if parentWinIdOpt == nil {
-                    parentWinIdOpt = x11Integration?.shellWindowId(forX11Window: parentSurfaceId)
-                }
-                if let parentWinId = parentWinIdOpt,
-                   let parentWin = windowManager.windows.first(where: { $0.id == parentWinId }) {
-                    absX += parentWin.rect.left
-                    absY += parentWin.rect.top + DesktopTheme.kTitleBarHeight
-                    popupSpaceId = parentWin.spaceId
-                    if isFirstParent {
-                        // Direct child of toplevel — no flip needed for x
-                        immediateParentAbsX = parentWin.rect.left
-                        immediateParentWidth = parentWin.rect.width
-                    }
-                }
-                break
-            }
-
-            // Popups live on their toplevel's space: a menu opened on space 1
-            // must not float over space 2 after a switch.
-            if let sid = popupSpaceId, sid != windowManager.activeSpace.id { continue }
-
-            // Compute immediate parent popup's absolute x for flip.
-            if !isFirstParent {
-                immediateParentAbsX = absX - popup.x
-            }
-
-            // Constraint adjustment: keep popups within screen bounds — a
-            // MENU's; a free-standing override-redirect X11 window (parent
-            // 0) is placed by its client, root-absolute, and may hang off
-            // an edge on purpose (a bar, a benchmark's offscreen check).
-            let rootAnchored = popupId.hasPrefix("x11popup-") && popup.parentSurfaceId == 0
-            if !rootAnchored {
-                if absX + popup.width > screenWidth {
-                    if !isFirstParent {
-                        // Nested popup (submenu): flip to left side of parent popup.
-                        absX = immediateParentAbsX - popup.width
-                    } else {
-                        // Direct child of toplevel: slide left to fit.
-                        absX = screenWidth - popup.width
-                    }
-                }
-                if absX < 0 { absX = 0 }
-                if absY + popup.height > screenHeight {
-                    absY = screenHeight - popup.height
-                }
-                if absY < 0 { absY = 0 }
-            }
-
-            let isX11Popup = popupId.hasPrefix("x11popup-")
-            let texture: Widget = TextureWidget(textureId: popup.textureId, filterQuality: .none)
-            // Both need the flip: Wayland surfaces arrive bottom-up, and an X11
-            // menu is a DMA-BUF from Vulkan/GL exactly like its toplevels, which
-            // pass flipTextureY: true. A solid-colour test popup looks identical
-            // either way — only real content (mirrored menu labels) shows it.
-            let flipped: Widget = Transform(
-                transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
-                alignment: Alignment.center,
-                child: texture
-            )
-
-            // Wrap in Listener to forward pointer events to popup surface.
-            let popupChild: Widget
-            if isX11Popup,
-               let x11 = x11Integration,
-               let x11WinId = UInt32(popupId.dropFirst("x11popup-".count)) {
-                // Menus are only useful if you can click them. Same physical-px
-                // conversion the X11 toplevel path does.
-                let toPhys = currentShellDpi
-                popupChild = Listener(
-                    onPointerDown: { event in
-                        x11.sendPointerEvent(windowId: x11WinId, phase: 2,
-                                             x: event.localPosition.dx * toPhys,
-                                             y: event.localPosition.dy * toPhys,
-                                             buttons: Int64(event.buttons))
-                    },
-                    onPointerMove: { event in
-                        x11.sendPointerEvent(windowId: x11WinId, phase: 3,
-                                             x: event.localPosition.dx * toPhys,
-                                             y: event.localPosition.dy * toPhys,
-                                             buttons: Int64(event.buttons))
-                    },
-                    onPointerUp: { event in
-                        x11.sendPointerEvent(windowId: x11WinId, phase: 1,
-                                             x: event.localPosition.dx * toPhys,
-                                             y: event.localPosition.dy * toPhys,
-                                             buttons: 0)
-                    },
-                    onPointerHover: { event in
-                        x11.sendPointerEvent(windowId: x11WinId, phase: 6,
-                                             x: event.localPosition.dx * toPhys,
-                                             y: event.localPosition.dy * toPhys,
-                                             buttons: 0)
-                    },
-                    child: flipped
-                )
-            } else if let wl = waylandIntegration,
-               let surfaceId = wl.surfaceId(forWindowId: popupId) {
-                popupChild = Listener(
-                    onPointerDown: { event in
-                        wl.sendPointerEvent(
-                            surfaceId: surfaceId,
-                            phase: 2,
-                            x: event.localPosition.dx,
-                            y: event.localPosition.dy,
-                            buttons: Int64(event.buttons)
-                        )
-                    },
-                    onPointerMove: { event in
-                        wl.sendPointerEvent(
-                            surfaceId: surfaceId,
-                            phase: 3,
-                            x: event.localPosition.dx,
-                            y: event.localPosition.dy,
-                            buttons: Int64(event.buttons)
-                        )
-                    },
-                    onPointerUp: { event in
-                        wl.sendPointerEvent(
-                            surfaceId: surfaceId,
-                            phase: 1,
-                            x: event.localPosition.dx,
-                            y: event.localPosition.dy,
-                            buttons: 0
-                        )
-                    },
-                    onPointerHover: { event in
-                        wl.sendPointerEvent(
-                            surfaceId: surfaceId,
-                            phase: 6,
-                            x: event.localPosition.dx,
-                            y: event.localPosition.dy,
-                            buttons: 0
-                        )
-                    },
-                    onPointerSignal: { event in
-                        if let scroll = event as? PointerScrollEvent {
-                            wl.sendScrollEvent(
-                                surfaceId: surfaceId,
-                                x: scroll.localPosition.dx,
-                                y: scroll.localPosition.dy,
-                                scrollDeltaX: scroll.scrollDelta.dx,
-                                scrollDeltaY: scroll.scrollDelta.dy
-                            )
-                        }
-                    },
-                    behavior: .opaque,
-                    child: flipped
-                )
-            } else {
-                popupChild = flipped
-            }
-
-            popupChildren.append(
-                Positioned(
-                    key: ValueKey(popupId),
-                    left: absX,
-                    top: absY,
-                    width: popup.width,
-                    height: popup.height,
-                    child: popupChild
-                )
-            )
-        }
-        #endif
 
         // Status bar renders ON TOP of windows. In fullscreen, the reserved
         // top strip is filled with solid black (matching the status-bar
@@ -4482,18 +4412,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 Positioned(fill: (), child: _buildMissionControl(context))
             )
         } else if isFullscreenMode {
-            if DesktopTheme.kStatusBarHeight > 0 {
-                children.append(
-                    Positioned(
-                        left: 0, top: 0, right: 0,
-                        height: DesktopTheme.kStatusBarHeight,
-                        child: ColoredBox(
-                            color: Color(0xFF000000),
-                            child: SizedBox(expand: ())
-                        )
-                    )
-                )
-            }
+            // The window covers the strip; the bar comes back over it while
+            // the top edge holds the pointer.
             if _topBarRevealed, let bar = topBarWidget {
                 children.append(bar)
             }
@@ -4531,10 +4451,30 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 children.append(over)
             }
         }
-        // Client popups (menus, tooltips, free-standing override-redirect
-        // X windows) sit above the bar and the dock; the shell's own
-        // overlays appended below stay above them.
-        children.append(contentsOf: popupChildren)
+        // [N+1..] Client popups (menus, tooltips, free-standing override-
+        // redirect X windows) sit above the bar and the dock: a menu is
+        // above the chrome on every desktop (macOS, GNOME), and a dropdown
+        // opened near the bottom must not vanish under the dock. X says the
+        // same for a raised override-redirect window, which covers panels —
+        // wmbench's off-screen check puts one over our clock and reads the
+        // clock's white glyphs as the window's pixels otherwise. They draw
+        // from a layer with a state of its own (OverlayLayers.swift): a menu
+        // appearing or vanishing rebuilds that layer, not the desktop.
+        // Popups rooted at a top/overlay layer surface are drawn by that
+        // layer's group below, so the layer sits above; the shell's own
+        // overlays appended after stay above them all.
+        children.append(Positioned(fill: (), child: PopupLayer(shell: self)))
+
+        // [N+2] The top and overlay layers, above the bars and the dock. A
+        // wlroots desktop's own bar IS a top-layer surface, made first, so a
+        // notification or a launcher in that layer lands above it; the
+        // shell's chrome takes the same place. Overlay above all, for lock
+        // screens. (wmbench photographs its windows here and compares
+        // pixels; a dock over the corner of one reads as a stale frame.)
+        if !(_missionControlOpen && mcIsOnHost) {
+            children.append(Positioned(fill: (), child: LayerSurfacesLayer(
+                shell: self, layers: [2, 3], slot: "above")))
+        }
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
         // mode, three translucent Listeners sit on top of everything:
@@ -4827,6 +4767,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // events that hit anything inside it and consumes nothing, so this is
         // observation only; `.translucent` keeps it out of the way of the
         // wallpaper's own right-click handling.
+        // Everything above has settled focus, minimize and maximize for
+        // this frame: the compositor's window state (configures, taskbars)
+        // and frame positions (zones) follow, diff-guarded.
+        _syncWaylandWindowState()
+
         return Listener(
             onPointerDown: { [self] _ in notePointerOutput(displayLayout?.host.id ?? 0) },
             onPointerHover: { [self] _ in notePointerOutput(displayLayout?.host.id ?? 0) },
@@ -8078,7 +8023,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         let rCast = screenCastService?.needsFramePump == true
         let rRdp = rdpService?.needsFramePump == true
         let rCap = fl_drm_view_capture_active() != 0
-        let riding = rRec || rCast || rRdp || rCap
+        // A wlr-screencopy frame in flight: the engine's capture mirror
+        // refills only from presents, so an idle desktop must be ticked.
+        let rShot = waylandIntegration?.needsFramePump == true
+        let riding = rRec || rCast || rRdp || rCap || rShot
         if Self._pumpLog, riding != _pumpRunning {
             FileHandle.standardError.write(Data(
                 ("[pump] \(riding ? "arm" : "stop") rec=\(rRec) cast=\(rCast)"

@@ -193,6 +193,20 @@ step "unit tests: terminal auto-answer (live pty)"
  || fails=$((fails + 1))
 rm -rf "$AA_DIR"
 
+# The compositor's protocol layer (docs/plans/wayland-protocols.md): the C
+# server linked into one process with a libwayland client, every protocol the
+# shell relies on driven end to end. No GPU, no display. It catches the
+# failure this codebase has had twice — a protocol declared, generated and
+# dispatched that does nothing because one link in the chain was never made.
+step "unit tests: wayland protocols"
+WL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/starling-wltest.XXXXXX")
+("$REPO/test/wayland/run.sh" "$WL_DIR" 2>/dev/null | tail -1 \
+     | grep -qE "all wayland protocol checks passed|SKIPPED" \
+     && echo "  ✔ wayland protocols: every protocol the shell speaks answers" \
+     || { "$REPO/test/wayland/run.sh" "$WL_DIR" 2>&1 | grep -E "FAIL|error" | head -20; false; }) \
+     || fails=$((fails + 1))
+rm -rf "$WL_DIR"
+
 step "unit tests: registry"
 (cd "$REPO/registry" && as_user "$SWIFT" test 2>&1 \
     | grep -vE "libxml2.so.2: no version information" \
