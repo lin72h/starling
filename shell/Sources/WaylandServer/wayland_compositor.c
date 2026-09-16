@@ -163,7 +163,16 @@ static void surface_commit(struct wl_client* client,
          * stalls after a couple of frames and the popup stays translucent. */
         if (surface->committed_buffer) {
             wl_list_remove(&surface->committed_buffer_destroy_listener.link);
-            if (surface->had_role &&
+            /* A subsurface never gets an xdg role, so had_role stayed 0 and
+             * its buffers were never released. Firefox draws its whole
+             * content into a full-size subsurface with a four-buffer
+             * WebRender swapchain: after four frames it had nothing to draw
+             * into, showed a blank page, ignored every click and key it was
+             * correctly receiving, and spun its main loop on roundtrips
+             * waiting for a release that never came. The destroy listener
+             * already covers a buffer freed early, so releasing on
+             * replacement is as safe here as for a toplevel. */
+            if ((surface->had_role || surface->is_subsurface) &&
                 surface->committed_buffer != surface->pending.buffer) {
                 wl_buffer_send_release(surface->committed_buffer);
             }
