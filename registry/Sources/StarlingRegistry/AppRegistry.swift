@@ -138,8 +138,17 @@ public final class AppRegistry: @unchecked Sendable {
 
     /// The app a window belongs to, from the `app_id` it reported over
     /// `xdg_toplevel.set_app_id`.
+    ///
+    /// A window can match two records: a curated catalog entry that names the
+    /// app but is not installed (Telegram and GIMP ship a native `host` record
+    /// whose `WmClass` list includes the Flatpak's app_id) and the Flatpak
+    /// record that is actually on disk. Prefer the installed one — it is the
+    /// manifestation the window really belongs to, and it is the one that
+    /// carries the exported icon, so the dock shows the real icon instead of a
+    /// generic tile and never draws the two as separate apps.
     public func app(forAppId appId: String) -> AppRecord? {
-        apps.first { $0.matches(appId: appId) }
+        let matching = apps.filter { $0.matches(appId: appId) }
+        return matching.first { $0.installed } ?? matching.first
     }
 
     /// The app a window belongs to, by title — only for records that declare
@@ -445,6 +454,10 @@ public final class AppRegistry: @unchecked Sendable {
                         }
                         if iconPath == nil {
                             iconPath = DesktopEntry.resolveIcon(icon, in: DesktopEntry.dataDirs())
+                            // The shell decodes PNG only. An .svg hit here would win
+                            // over the store's cached PNG below and draw as a generic
+                            // tile — Discord and Spotify export only SVG.
+                            if let p = iconPath, p.lowercased().hasSuffix(".svg") { iconPath = nil }
                         }
                         // Many Flatpaks export only an SVG, which the engine
                         // cannot decode. The App Store caches Flathub's PNG of
