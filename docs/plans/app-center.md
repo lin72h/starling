@@ -89,3 +89,44 @@ software (~240% CPU vs ~9% on the same clip).
   become `AppRecord`s of kind `flatpak`, so the store's rows, install cluster
   and `pkexec app-install --flatpak` plumbing are reused unchanged; Open goes
   through `app-run --flatpak`. `curl` is now a package dependency.
+
+## Flathub-first (2026-09-16)
+
+Decision: Flathub is the store's source for third-party apps; the hand-picked
+catalog is retired for anything Flathub carries. Evidence from the two
+surveys (2026-09-15): 21 of 24 Flathub apps ran unchanged, video and audio
+verified, with the runtime's own up-to-date Mesa — where the hand recipes
+(Telegram tarball, Zoom .deb, Spotify/Slack/Discord/Teams vendor repos,
+apt GIMP/Blender) needed per-app maintenance and, for the VLC snap, three
+X server fixes to reach software rendering.
+
+What changed:
+- `registry/catalog.d`: blender, discord, gimp, slack, spotify, teams,
+  telegram, zoom removed, with their `app-install` and `app-run` recipes.
+  Kept: first-party apps; Chrome, VS Code, IntelliJ (host installs — the
+  workspace/agent features drive them directly and sandboxed editors cannot
+  see host toolchains); Android (Netflix, YouTube); WeChat; App Center.
+- App Store: **Flathub only**, same layout as before — a sidebar with
+  Discover (search, popular, trending), Installed, and one shelf per Flathub
+  category (Audio & Video, Development, Education, Games, Graphics,
+  Internet, Office, Science, System, Utilities — Flathub's
+  `collection/category/<id>` endpoint, fetched on first open). The catalog's
+  remaining host entries (Chrome, VS Code, IntelliJ, App Center) are
+  launcher/dock entries installed from the command line (`app-install <id>`),
+  not store items.
+- Registry: a Flatpak record carries the URL schemes its `.desktop` entry
+  claims (`MimeType=x-scheme-handler/tg;…`), so deep links route to the
+  Flathub app the way the catalog's `UrlSchemes=` did. Process liveness for
+  Flatpaks reads `/proc/<pid>/root/.flatpak-info` (`name=` under
+  `[Application]`) — a sandboxed exe is a path in its own namespace and can
+  never match a host `Bins=` path.
+- Functional tier: the real third-party app is the Flathub GIMP
+  (`app-install --flatpak org.gimp.GIMP`, registry id `flatpak-org.gimp.GIMP`);
+  the decoy fixture names the same Flatpak instead of sharing a binary.
+
+Costs, known: Flathub runtimes are large (24 test apps pulled ~4 GB of
+shared runtimes; a first install is slow), and sandboxed apps use the portal
+on the regular user bus — on a clean Starling install our portal backend
+must serve that bus (file chooser, ScreenCast for Zoom/OBS screen sharing,
+Background) or those features are missing. That is the follow-up.
+

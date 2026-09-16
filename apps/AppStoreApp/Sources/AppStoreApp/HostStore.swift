@@ -44,17 +44,6 @@ let kOnStarlingImage: Bool = {
 
 extension AppRecord {
 
-    /// Everything the store shows comes from the app registry — the same
-    /// records the shell's launcher and dock read, so the two cannot disagree
-    /// about what exists or what is installed. See registry/catalog.d.
-    static var storeCatalog: [AppRecord] {
-        // What this store can actually install: first-party apps ship with
-        // the desktop and WeChat is a host install, so neither belongs here.
-        AppRegistry.shared.apps.filter {
-            $0.installRecipe != nil || $0.debURL != nil
-        }
-    }
-
     /// How this app installs on this machine. On the sealed image there is no
     /// apt, so a catalog entry that names an official .deb is extracted into
     /// the installed-apps layer instead.

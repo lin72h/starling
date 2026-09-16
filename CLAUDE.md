@@ -243,9 +243,23 @@ dies with `libflutter_engine.so: cannot open shared object file`.
 
 ## Apps are data, not code
 
-Adding an app is **one file**: `registry/catalog.d/<id>.app` (plus a launch
-recipe in `build/app-run.sh` and an install recipe in `build/app-install.sh`
-if it is a third-party host app). Never add an app id to a table in the shell
+**The App Store is Flathub, and shows nothing else.** Its pages — Discover
+(search, popular, trending), Installed, and one shelf per Flathub category —
+are all filled from Flathub, and it installs through `app-install --flatpak`; the shell discovers what is installed from the
+Flatpak exports directory. Do not add a catalog record plus hand-written
+apt/deb/tarball recipes for an app that is on Flathub — that was the old
+model, and its recipes rotted. The catalog is now our own apps, Android apps,
+WeChat, and a few host entries the store does NOT list: Chrome, VS Code,
+IntelliJ (the workspace and agent features drive them directly, and a
+sandboxed editor cannot see host toolchains) and Ubuntu's App Center. Those
+are launcher and dock entries, installed from the command line with
+`app-install <id>`. Follow-up: sandboxed apps reach the portal on the regular
+user bus, so our portal backend has to serve that bus for file dialogs and
+screen sharing to work on a clean install.
+
+Adding a curated app is **one file**: `registry/catalog.d/<id>.app` (plus a
+launch recipe in `build/app-run.sh` and an install recipe in
+`build/app-install.sh` if it is a third-party host app). Never add an app id to a table in the shell
 or the store — there are no such tables any more, and reintroducing one is how
 this drifted the first time: an app was in seven tables and missing from two,
 so it launched but had no dock icon and no real icon.
