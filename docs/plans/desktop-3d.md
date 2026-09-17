@@ -7,8 +7,8 @@ a live texture on a pane of glass, facing the viewer, lit and shadowed by the
 scene behind it. Turning 3D off folds the scene back into the flat wallpaper
 and the windows settle back onto their 2D rectangles.
 
-Branch: `desktop-3d`. **Phase 0 is built and passed on the dev box
-(2026-09-16)** — see its results under the phase. This note records what the
+Branch: `desktop-3d`. **Phases 0 and 1 are built and verified on the dev
+box (2026-09-16)** — see the results under each phase. This note records what the
 tree already gives us, what has been tried before and why it failed, the
 design that avoids those failures, and the spike that proves the primitive.
 
@@ -291,6 +291,60 @@ Also learned, none of it 3D's fault:
   centre; persisted per desktop.
 - In 2D the output must be **bit-identical** to today's: screenshot-diff it
   in the functional tier.
+
+#### Results (2026-09-16, dev box)
+
+All four items landed. `EnvironmentRenderer` (Compositor/) draws the room
+into the wallpaper's texture slot on the raster thread; `Desktop3D.swift`
+carries the mode, the camera, the poses and the persistence.
+
+- **The unfold is geometric, not a cross-fade.** Every vertex holds both
+  its flat position — a quad that exactly fills the view — and its
+  wrapped one, and the vertex shader mixes them by `t`. So `t = 0` IS the
+  flat wallpaper rather than something that merely resembles it, and
+  entering grows the room out of what was already on screen.
+- **`_desktop3DT` is the one number everything reads**, tweened 600 ms
+  both ways by a single controller: the window poses scale with it, the
+  room unfolds with it, the parallax fades with it. That is what makes
+  the end of a leave *exactly* the flat desktop instead of a
+  near-identity that resamples every window for a frame.
+- **The 2D contract holds, measured.** `test/functional.py`'s "3D
+  desktop" check drives the toggle and screenshot-diffs it: entering
+  moves the picture by ~20, leaving restores the flat desktop at a diff
+  of **0.00**. Four consecutive runs.
+- **Reachable four ways**: the desktop context menu, a control centre
+  tile, Ctrl+Shift+3, and the broker's `desktop_3d` op (which also
+  answers `query`). The choice persists like tiling — globally, not yet
+  per desktop.
+- Per-window depth (`WindowPose3D`) sits beside `rect`, never derived
+  from it; a scroll on a title bar pushes a window back or pulls it in.
+  Pointer parallax moves the eye (a translation, not a rotation — a
+  rotation shifts everything equally and nothing slides against
+  anything), quantised to 40 steps per axis so a still pointer means a
+  still camera, and only on hover so a drag stays predictable.
+
+**What is not right yet: the room reads too much like the wallpaper.**
+At the shared 1.5-screen-width lens the wall covers only ~50° of arc, so
+the wrap is nearly imperceptible and the floor is a thin band at the
+bottom edge. It is geometrically a room and photographs as one in the
+renderer's own dump (`STARLING_3D_DUMP=<path>` writes the environment
+texture as a PPM, without the desktop drawn over it), but on screen it
+does not yet *feel* like a place. That is art direction, not plumbing:
+the knobs are `kWrapOverscan`, `kWallLift`, `kFloorReach` and
+`kFloorReflect` at the top of `EnvironmentRenderer`. Tune them against
+the bundled wallpaper before Phase 2 adds depth on top.
+
+Two traps paid for:
+
+- **GL's row 0 is the BOTTOM of an engine external texture.** The first
+  build flipped y in the projection "so row 0 is the top" and drew the
+  room upside down. The engine wraps these bottom-left up; measure,
+  don't assume.
+- **A varying's precision must match across stages** in GLSL ES 1.00, or
+  the program fails to link with no compile error — `uniform float uT`
+  in the vertex stage against `precision mediump float` in the fragment
+  stage was enough. Always read the program info log; the shader logs
+  are silent on this.
 
 ### Phase 2 — depth, light, and windows that rest in the scene
 
