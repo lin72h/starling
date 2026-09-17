@@ -117,12 +117,12 @@ def broker_path() -> str:
     sys.exit("no starling-agent.sock — is the shell running?")
 
 
-def ask(op: str, timeout: float = 5.0) -> dict:
+def ask(op: str, timeout: float = 5.0, **args) -> dict:
     """One request/response against the broker."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     sock.connect(broker_path())
-    sock.send(json.dumps({"op": op, "id": 1}).encode() + b"\n")
+    sock.send(json.dumps({"op": op, "id": 1, **args}).encode() + b"\n")
     buf = b""
     while b"\n" not in buf:
         chunk = sock.recv(65536)
@@ -1306,6 +1306,47 @@ def check_tiling_toggle() -> None:
     wait_for(lambda: not apps()["files"]["window"], "Files to close")
 
 
+@check("3D desktop: entering changes the picture, leaving puts every pixel back")
+def check_desktop_3d_roundtrip() -> None:
+    """The 3D desktop's 2D contract is bit-identity: a window slot under an
+    identity Transform takes the plain-translation paint path and the
+    wallpaper slot shows the plain texture, so leaving 3D must reproduce the
+    flat desktop exactly — not a near-identity that resamples every window.
+    The pointer parks in one place for all three shots (parallax and the
+    dock's magnification both follow it); the clock strip is cropped off."""
+    assert not apps()["files"]["window"], "Files already running; quit it first"
+    was_on = ask("desktop_3d", query=True)["on"]
+    drive("move 300 300", "dock files", "click")
+    wait_for(lambda: apps()["files"]["window"], "a window for the arc")
+    park = "move 1100 400"
+    shots = [tempfile.mktemp(suffix=".png") for _ in range(3)]
+    try:
+        ask("desktop_3d", on=False)
+        time.sleep(1.2)
+        # Throwaway: the first capture after a shell start can come back
+        # stale (an idle desktop presents rarely), which would compare two
+        # copies of the same frame and call the feature a no-op.
+        drive(park, "sleep 0.5", f"shot {tempfile.mktemp(suffix='.png')}")
+        drive(park, "sleep 0.5", f"shot {shots[0]}")
+        ask("desktop_3d", on=True)
+        wait_for(lambda: ask("desktop_3d", query=True)["t"] == 1, "the room to unfold")
+        time.sleep(0.5)
+        drive(park, "sleep 0.5", f"shot {shots[1]}")
+        ask("desktop_3d", on=False)
+        wait_for(lambda: ask("desktop_3d", query=True)["t"] == 0, "the room to fold away")
+        time.sleep(0.5)
+        drive(park, "sleep 0.5", f"shot {shots[2]}")
+        entered = _png_diff(shots[0], shots[1], skip_top=60)
+        assert entered > 1.0, f"entering 3D changed the picture by only {entered:.2f}"
+        left = _png_diff(shots[0], shots[2], skip_top=60)
+        assert left == 0.0, f"leaving 3D did not restore the flat desktop (diff {left:.3f})"
+        log(f"enter moved the picture by {entered:.1f}, leave restored it exactly")
+    finally:
+        ask("desktop_3d", on=was_on)
+        quit_app("FileExplorerApp")
+    wait_for(lambda: not apps()["files"]["window"], "Files to close")
+
+
 @check("style: switching desktop style moves the chrome, not just its colours")
 def check_desktop_style() -> None:
     """A style is a SHAPE, so a colour-only regression has to fail here.
@@ -1802,10 +1843,14 @@ def _yavg(*ffmpeg_args: str) -> list[float]:
 _PRINT = "metadata=print:key=lavfi.signalstats.YAVG:file=-"
 
 
-def _png_diff(a: str, b: str) -> float:
-    """Mean absolute difference between two stills, 0 = identical."""
+def _png_diff(a: str, b: str, skip_top: int = 0) -> float:
+    """Mean absolute difference between two stills, 0 = identical.
+    `skip_top` crops that many rows off both first — the status bar's clock
+    is not part of what a desktop-level comparison is about."""
+    crop = (f"[0]crop=iw:ih-{skip_top}:0:{skip_top}[a];"
+            f"[1]crop=iw:ih-{skip_top}:0:{skip_top}[b];[a][b]") if skip_top else ""
     vals = _yavg("-i", a, "-i", b, "-filter_complex",
-                 f"blend=all_mode=difference,signalstats,{_PRINT}")
+                 f"{crop}blend=all_mode=difference,signalstats,{_PRINT}")
     assert vals, f"could not compare {a} and {b}"
     return vals[0]
 

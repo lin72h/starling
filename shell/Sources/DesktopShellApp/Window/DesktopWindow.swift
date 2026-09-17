@@ -171,6 +171,8 @@ class DesktopWindow: StatelessWidget {
     let onClose: (() -> Void)?
     /// macOS-style: double-click on the title bar toggles maximized state.
     let onTitleBarDoubleTap: (() -> Void)?
+    /// A scroll on the title bar (the 3D desktop's push/pull).
+    let onDepthScroll: ((Double) -> Void)?
 
     init(
         windowInfo: WindowInfo,
@@ -183,7 +185,8 @@ class DesktopWindow: StatelessWidget {
         onMinimize: (() -> Void)? = nil,
         onMaximize: (() -> Void)? = nil,
         onClose: (() -> Void)? = nil,
-        onTitleBarDoubleTap: (() -> Void)? = nil
+        onTitleBarDoubleTap: (() -> Void)? = nil,
+        onDepthScroll: ((Double) -> Void)? = nil
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -196,6 +199,7 @@ class DesktopWindow: StatelessWidget {
         self.onMaximize = onMaximize
         self.onClose = onClose
         self.onTitleBarDoubleTap = onTitleBarDoubleTap
+        self.onDepthScroll = onDepthScroll
     }
 
     override func build(_ context: any BuildContext) -> Widget {
@@ -215,7 +219,8 @@ class DesktopWindow: StatelessWidget {
             onMinimize: onMinimize,
             onMaximize: onMaximize,
             onClose: onClose,
-            onDoubleTap: onTitleBarDoubleTap
+            onDoubleTap: onTitleBarDoubleTap,
+            onDepthScroll: onDepthScroll
         ))
 
         let windowBody: Widget

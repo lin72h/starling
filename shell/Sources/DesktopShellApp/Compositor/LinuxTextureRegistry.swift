@@ -319,6 +319,39 @@ class LinuxTextureRegistry: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// A CPU-uploaded texture's GL name and size, for a GLRenderer that
+    /// wants to sample it — the 3D desktop's environment reads the wallpaper
+    /// this way. Raster thread only, GL context current (call it from
+    /// renderToTexture). Uploads the pixels first if the engine has never
+    /// sampled this texture itself, which is exactly the case while the
+    /// environment stands in the wallpaper's slot. nil = no pixels yet.
+    func sourceTexture(id: Int64) -> (name: UInt32, width: Int, height: Int)? {
+        ensureGLLoaded()
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries[id], let pixels = entry.pixelData,
+              entry.width > 0, entry.height > 0 else { return nil }
+        if entry.glTextureName == 0 {
+            var texName: UInt32 = 0
+            _glGenTextures(1, &texName)
+            entry.glTextureName = texName
+        }
+        if entry.dirty || entry.glTexWidth != entry.width || entry.glTexHeight != entry.height {
+            _glBindTexture(GL_TEXTURE_2D, entry.glTextureName)
+            _glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+            _glTexImage2D(GL_TEXTURE_2D, 0, Int32(GL_RGBA),
+                          Int32(entry.width), Int32(entry.height), 0,
+                          GL_RGBA, GL_UNSIGNED_BYTE, pixels)
+            _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            _glBindTexture(GL_TEXTURE_2D, 0)
+            entry.glTexWidth = entry.width
+            entry.glTexHeight = entry.height
+            entry.dirty = false
+        }
+        return (entry.glTextureName, entry.width, entry.height)
+    }
+
     /// Marks a GL-rendered texture as needing a re-render and tells the
     /// engine the texture has new content.
     func markGLTextureDirty(engine: OpaquePointer, id: Int64) {

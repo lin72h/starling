@@ -21,6 +21,8 @@ class WindowTitleBar: StatefulWidget {
     let onClose: (() -> Void)?
     /// macOS-style double-click to toggle maximized state.
     let onDoubleTap: (() -> Void)?
+    /// A scroll on the bar: the 3D desktop's push/pull.
+    let onDepthScroll: ((Double) -> Void)?
 
     init(
         title: String,
@@ -31,7 +33,8 @@ class WindowTitleBar: StatefulWidget {
         onMinimize: (() -> Void)? = nil,
         onMaximize: (() -> Void)? = nil,
         onClose: (() -> Void)? = nil,
-        onDoubleTap: (() -> Void)? = nil
+        onDoubleTap: (() -> Void)? = nil,
+        onDepthScroll: ((Double) -> Void)? = nil
     ) {
         self.title = title
         self.isFocused = isFocused
@@ -42,6 +45,7 @@ class WindowTitleBar: StatefulWidget {
         self.onMaximize = onMaximize
         self.onClose = onClose
         self.onDoubleTap = onDoubleTap
+        self.onDepthScroll = onDepthScroll
     }
 
     override func createState() -> State<StatefulWidget> {
@@ -104,6 +108,11 @@ class _WindowTitleBarState: State<StatefulWidget> {
             },
             onPointerHover: { _ in
                 DesktopCursor.setShape(.default)
+            },
+            onPointerSignal: { [self] event in
+                if let scroll = event as? PointerScrollEvent {
+                    w.onDepthScroll?(scroll.scrollDelta.dy)
+                }
             },
             behavior: .opaque,
             child: SizedBox(

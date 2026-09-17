@@ -128,6 +128,9 @@ struct TitleBarParams {
     /// through `onDoubleTap` — registering that kills tap AND double-tap on
     /// the DRM embedder.
     let onDoubleTap: (() -> Void)?
+    /// A scroll on the bar: the 3D desktop pushes the window away or pulls
+    /// it closer (positive = away). nil when nothing listens.
+    var onDepthScroll: ((Double) -> Void)? = nil
 }
 
 // MARK: - ShellChrome
@@ -272,7 +275,8 @@ enum ShellStyles {
                 onMinimize: p.onMinimize,
                 onMaximize: p.onMaximize,
                 onClose: p.onClose,
-                onDoubleTap: p.onDoubleTap
+                onDoubleTap: p.onDoubleTap,
+                onDepthScroll: p.onDepthScroll
             )
         },
         makeChrome: { MacosChrome(shell: $0) }
@@ -299,7 +303,8 @@ enum ShellStyles {
                 onMinimize: p.onMinimize,
                 onMaximize: p.onMaximize,
                 onClose: p.onClose,
-                onDoubleTap: p.onDoubleTap
+                onDoubleTap: p.onDoubleTap,
+                onDepthScroll: p.onDepthScroll
             )
         },
         makeChrome: { FluentChrome(shell: $0) }

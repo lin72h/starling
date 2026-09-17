@@ -89,8 +89,9 @@ class GLRenderer {
     /// GL proc address resolver (must be set before first render).
     var glProcAddressResolver: ((UnsafePointer<CChar>) -> UnsafeMutableRawPointer?)?
 
-    /// Whether animation state has changed since last render.
-    private(set) var dirty = true
+    /// Whether animation state has changed since last render. Subclasses
+    /// (EnvironmentRenderer) set it from their own main-thread updates.
+    var dirty = true
 
     init(width: Int, height: Int) {
         self.width = width

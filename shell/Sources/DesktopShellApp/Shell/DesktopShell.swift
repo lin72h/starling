@@ -649,16 +649,27 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// flight, short enough that a stop request is consumed promptly.
     static let kPumpFloorTicks = 8
 
-    /// Phase 0 of the 3D desktop (docs/plans/desktop-3d.md, Desktop3D.swift):
-    /// every UNFOCUSED window on the host is lifted onto a perspective arc
-    /// facing the viewer; the focused one is drawn untransformed,
-    /// pixel-exact. The wallpaper stays flat and there is no environment
-    /// yet — this exists to prove that a live client composites, hit-tests
-    /// and drags correctly under a perspective Transform. Ctrl+Shift+3
-    /// toggles it, the broker's `desktop_3d` op sets it, and
-    /// STARLING_3D_SPIKE=1 starts in it.
-    var _desktop3D: Bool =
-        (ProcessInfo.processInfo.environment["STARLING_3D_SPIKE"] ?? "") == "1"
+    // ── The 3D desktop (docs/plans/desktop-3d.md, Desktop3D.swift) ───────
+    // Every UNFOCUSED window on the host is lifted onto a perspective arc
+    // facing the viewer; the focused one is drawn untransformed,
+    // pixel-exact; the wallpaper becomes an environment rendered by
+    // EnvironmentRenderer into `environmentTextureId`. `_desktop3DOn` is
+    // the user's choice (persisted), `_desktop3DT` the tween between the
+    // flat desktop (0) and the room (1) that everything reads. Toggles:
+    // Ctrl+Shift+3, the context menu, the control centre, the broker's
+    // `desktop_3d` op; STARLING_3D_SPIKE=1 starts in it.
+    var _desktop3DOn = false
+    var _desktop3DT: Double = 0
+    var _desktop3DController: AnimationController? = nil
+    var _desktop3DCurve: CurvedAnimation? = nil
+    /// One camera per output, keyed by output id. Pointer parallax writes
+    /// the host's; the arc and the environment read it.
+    var _cameras3D: [Int: Camera3D] = [:]
+    var _cameraQuantum3D: (Int, Int) = (0, 0)
+    #if os(Linux)
+    var _environment: EnvironmentRenderer? = nil
+    #endif
+    var environmentTextureId: Int64 = -1
 
     var _missionControlOpen = false
     /// The monitor Mission Control was invoked on — its windows, its space
@@ -1230,6 +1241,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         #if os(Linux)
         linuxProcessAppManager?.currentLayoutIsTiling = windowManager.tilingEnabled
         #endif
+        _loadDesktop3DPreference()
         // Wallpaper choice persists the same way.
         if let s = try? String(contentsOfFile: Self._wallpaperFile, encoding: .utf8),
            let raw = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -2592,7 +2604,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 // Ctrl+Shift+3 — the 3D desktop spike (docs/plans/desktop-3d.md,
                 // Phase 0). Shift-gated like the others.
                 if phys == 0x20 && self._shiftPressed && keyData.type == .down {
-                    self.setState { self._desktop3D.toggle() }
+                    self._setDesktop3D(!self._desktop3DOn)
                     return true
                 }
             }
@@ -4265,6 +4277,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 let echo = _isInjectEcho(e.position)
                 _lastPointer = e.position; _injectedPointer = nil
                 _constraintPointerMoved(e.position, echo: echo)
+                _desktop3DPointerHover(e.position)
             },
             behavior: .translucent,
             child: _buildShellRoot(context))
@@ -4323,7 +4336,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         func makeWallpaper() -> Widget {
             let wallpaperWidget: Widget
             #if os(Linux)
-            if wallpaperPreset == .still, wallpaperTextureId >= 0 {
+            if _desktop3DT > 0, wallpaperPreset == .still, wallpaperTextureId >= 0,
+               _ensureEnvironment() {
+                // The room, or the wallpaper mid-unfold: the environment
+                // renderer's texture stands in the wallpaper's slot.
+                wallpaperWidget = TextureWidget(textureId: Int(environmentTextureId), filterQuality: .low)
+            } else if wallpaperPreset == .still, wallpaperTextureId >= 0 {
                 wallpaperWidget = TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low)
             } else {
                 wallpaperWidget = DesktopBackground(preset: wallpaperPreset)
@@ -4447,11 +4465,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // An edge-drag-carried window ignores the slide offset: it
             // stays pinned under the cursor while the desktop slides.
             let windowDx = win.id == _spaceSlide?.carried ? 0 : layerDx
-            // 3D spike: an unfocused window's pose on the arc, from where
-            // it sits on screen right now. nil = flat (focused, fullscreen,
-            // off the host, or past the near plane).
-            let pose = (_desktop3D && !isFocused && !win.isFullscreen)
-                ? _desktop3DPose(rect: win.rect.translate(windowDx, 0)) : nil
+            // 3D desktop: an unfocused window's pose on the arc, from where
+            // it sits on screen right now, eased by the enter/leave tween
+            // and seen from this output's camera. nil = flat (focused,
+            // fullscreen, off the host, past the near plane, or 2D).
+            let pose = (_desktop3DT > 0 && !isFocused && !win.isFullscreen)
+                ? _desktop3DPose(rect: win.rect.translate(windowDx, 0),
+                                 t: _desktop3DT,
+                                 camera: _cameras3D[displayLayout?.host.id ?? 0] ?? Camera3D(),
+                                 depth: win.pose3D.depth)
+                : nil
             let tilted = pose != nil
 
             // Reuse cached widget when only position changed (drag).
@@ -4499,6 +4522,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     onClose: { [self] in requestWindowClose(winId) },
                     onTitleBarDoubleTap: { [self] in
                         requestWindowTitleBarDoubleTap(winId)
+                    },
+                    onDepthScroll: { [self] (delta: Double) in
+                        _desktop3DScroll(winId, delta: delta)
                     }
                 )
                 _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted)
@@ -5089,7 +5115,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 setState {
                     windowManager.maximizeWindow(winId, screenWidth: screenWidth, screenHeight: screenHeight)
                 }
-            })
+            },
+            onDepthScroll: { [self] (delta: Double) in _desktop3DScroll(winId, delta: delta) })
     }
 
     // MARK: - Status Bar (macOS menu bar style, top)
@@ -6465,6 +6492,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
                 _openMissionControl(pickRecordTarget: true)
             },
+            // The 3D desktop: the wallpaper becomes a room, unfocused
+            // windows float in it. docs/plans/desktop-3d.md.
+            _ccToggleTile(icon: CupertinoIcons.cube, label: "3D Desktop",
+                          active: _desktop3DOn) { [self] in
+                _setDesktop3D(!_desktop3DOn)
+            },
         ]
         var children: [Widget] = [
             Row(children: [tiles[0], SizedBox(width: Self.kCcGap), tiles[1]]),
@@ -6472,6 +6505,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             Row(children: [tiles[2], SizedBox(width: Self.kCcGap), tiles[3]]),
             SizedBox(height: Self.kCcGap),
             Row(children: [tiles[4], SizedBox(width: Self.kCcGap), tiles[5]]),
+            SizedBox(height: Self.kCcGap),
+            Row(children: [tiles[6], SizedBox(width: Self.kCcGap),
+                           SizedBox(width: Self.kCcTileW, height: Self.kCcTileH)]),
             SizedBox(height: 14),
             _ccSliderRow(icon: CupertinoIcons.speaker_2_fill,
                          value: min(_ccAudio.volume, 1.0) * 100,
@@ -7662,6 +7698,14 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     setState { contextMenuPosition = nil }
                     _setAppearance(dark: !shellTheme.isDark)
                 }
+            ),
+            MacosMenuItem(
+                text: "3D Desktop",
+                onPressed: { [self] in
+                    setState { contextMenuPosition = nil }
+                    _setDesktop3D(!_desktop3DOn)
+                },
+                isSelected: _desktop3DOn
             ),
             MacosMenuSeparator(),
         ]

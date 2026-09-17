@@ -63,6 +63,12 @@ class WindowInfo {
         }
     }
     var zIndex: Int
+    /// The window's place in the 3D desktop, kept beside `rect` and never
+    /// derived from it: leaving 3D changes nothing here, re-entering finds
+    /// it again. The arc position itself follows `rect` (a flat drag is
+    /// the same arrangement seen from the front); this is what only 3D
+    /// knows — how far back the window sits.
+    var pose3D = WindowPose3D()
     var isMinimized: Bool { didSet { if oldValue != isMinimized { onStateChanged?() } } }
     var isMaximized: Bool { didSet { if oldValue != isMaximized { onStateChanged?() } } }
     var isFullscreen: Bool { didSet { if oldValue != isFullscreen { onStateChanged?() } } }

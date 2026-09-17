@@ -399,6 +399,9 @@ struct SecondaryOutputScreen {
                     onClose: { _shellState?.requestWindowClose(winId) },
                     onTitleBarDoubleTap: {
                         _shellState?.requestWindowTitleBarDoubleTap(winId)
+                    },
+                    onDepthScroll: { delta in
+                        _shellState?._desktop3DScroll(winId, delta: delta)
                     })))
         }
         return widgets

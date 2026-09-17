@@ -512,7 +512,7 @@ final class AgentBroker: @unchecked Sendable {
         if op == "control_center_state" {
             let icon = shell.statusItemCenter(.controlCenter)
             let tileIds = ["wifi", "dark", "tiling", "mute", "record",
-                           "recordapp"]
+                           "recordapp", "3d"]
             var tiles: [[String: Any]] = []
             for (i, tid) in tileIds.enumerated() {
                 let c = shell.controlCenterTileCenter(i)
@@ -555,9 +555,13 @@ final class AgentBroker: @unchecked Sendable {
         // from tooling. The chord needs a real keyboard, and the drive
         // tool's injected keys do not reach the shell on every box.
         if op == "desktop_3d" {
-            let on = (req["on"] as? Bool) ?? !shell._desktop3D
-            shell.setState { shell._desktop3D = on }
-            conn.send(["id": id, "ok": true, "on": on])
+            if let on = req["on"] as? Bool {
+                shell._setDesktop3D(on)
+            } else if req["query"] as? Bool != true {
+                shell._setDesktop3D(!shell._desktop3DOn)
+            }
+            conn.send(["id": id, "ok": true, "on": shell._desktop3DOn,
+                       "t": shell._desktop3DT])
             return
         }
 
