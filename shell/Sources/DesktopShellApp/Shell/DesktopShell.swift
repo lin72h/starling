@@ -254,7 +254,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?)] = [:]
+    /// The wallpaper as a coarse colour grid — the 3D desktop's light
+    /// source, since the room's back wall is the picture itself.
+    var _wallpaperLight: (cells: [Color], cols: Int, rows: Int)? = nil
 
     /// macOS-style fullscreen auto-hide: when a fullscreen window is on top,
     /// the desktop status bar and the window's title bar are hidden until the
@@ -1592,8 +1595,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 // picture behind it. Free here — the pixels are already
                 // decoded and in hand.
                 let tint = _DesktopShellState._averageColor(rgba: cropped.data)
+                // And the same pixels reduced to a grid, which is what the
+                // 3D desktop asks for the light behind each window.
+                let light = _DesktopShellState._lightGrid(
+                    rgba: cropped.data, width: cropped.width, height: cropped.height)
                 shell.setState {
                     shell.wallpaperTextureId = texId
+                    shell._wallpaperLight = light
                     shellMica = tint
                     // The palette is a FUNCTION of this, so re-resolve it —
                     // the theme built at launch was the untinted fallback.
@@ -1606,6 +1614,55 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             }
         }
         #endif
+    }
+
+    /// The wallpaper reduced to a coarse grid of average colours: the
+    /// lookup behind "what light is this window sitting in" on the 3D
+    /// desktop, where the room's back wall IS the picture, so a window's
+    /// light comes from the part of it the window floats in front of.
+    ///
+    /// Rows arrive bottom-up (what `_centerCrop` emits, matching GL's
+    /// convention); the grid is stored top-down so it indexes the way the
+    /// picture reads. 48x30 cells is far more than the answer needs and
+    /// costs a few kilobytes, once.
+    static func _lightGrid(rgba: Data, width: Int, height: Int)
+        -> (cells: [Color], cols: Int, rows: Int)? {
+        let cols = 48, rows = 30
+        guard width >= cols, height >= rows,
+              rgba.count >= width * height * 4 else { return nil }
+        var cells = [Color](repeating: Color(0xFF000000), count: cols * rows)
+        rgba.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            guard let base = src.baseAddress else { return }
+            for gy in 0..<rows {
+                let y0 = height - (gy + 1) * height / rows
+                let y1 = height - gy * height / rows
+                for gx in 0..<cols {
+                    let x0 = gx * width / cols, x1 = (gx + 1) * width / cols
+                    let ys = max(1, (y1 - y0) / 8), xs = max(1, (x1 - x0) / 8)
+                    var r = 0, g = 0, b = 0, n = 0
+                    var y = y0
+                    while y < y1 {
+                        var x = x0
+                        while x < x1 {
+                            let p = base + (y * width + x) * 4
+                            r += Int(p.load(fromByteOffset: 0, as: UInt8.self))
+                            g += Int(p.load(fromByteOffset: 1, as: UInt8.self))
+                            b += Int(p.load(fromByteOffset: 2, as: UInt8.self))
+                            n += 1
+                            x += xs
+                        }
+                        y += ys
+                    }
+                    guard n > 0 else { continue }
+                    cells[gy * cols + gx] = Color(
+                        alpha: 1.0,
+                        red: Double(r) / Double(n) / 255,
+                        green: Double(g) / Double(n) / 255,
+                        blue: Double(b) / Double(n) / 255)
+                }
+            }
+        }
+        return (cells, cols, rows)
     }
 
     /// The mean colour of raw RGBA pixels — Mica's ingredient.
@@ -4476,6 +4533,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                                  depth: win.pose3D.depth)
                 : nil
             let tilted = pose != nil
+            // The light it floats in: the part of the picture behind it,
+            // and the haze its distance earns. Quantised, so a pointer
+            // move does not rebuild every window's subtree.
+            let roomLight = tilted
+                ? _desktop3DRoomLight(rect: win.rect.translate(windowDx, 0),
+                                      t: _desktop3DT, depth: win.pose3D.depth)
+                : nil
 
             // Reuse cached widget when only position changed (drag).
             // updateChild's identity check (===) skips the entire subtree rebuild.
@@ -4486,7 +4550,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                cached.height == win.rect.height,
                cached.isFullscreen == win.isFullscreen,
                cached.isTopBarRevealed == windowTopBarRevealed,
-               cached.isTilted == tilted {
+               cached.isTilted == tilted,
+               cached.roomLight == roomLight {
                 window = cached.widget
             } else {
                 window = DesktopWindow(
@@ -4525,9 +4590,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     },
                     onDepthScroll: { [self] (delta: Double) in
                         _desktop3DScroll(winId, delta: delta)
-                    }
+                    },
+                    roomLight: roomLight
                 )
-                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted)
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight)
             }
 
             // Open zoom plays only when the window is genuinely appearing

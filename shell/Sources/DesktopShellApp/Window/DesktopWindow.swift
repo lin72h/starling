@@ -173,6 +173,12 @@ class DesktopWindow: StatelessWidget {
     let onTitleBarDoubleTap: (() -> Void)?
     /// A scroll on the title bar (the 3D desktop's push/pull).
     let onDepthScroll: ((Double) -> Void)?
+    /// The light this window floats in on the 3D desktop, nil in 2D and
+    /// for the focused window (which stays pixel-exact by rule). It veils
+    /// the pane toward the room's colour with distance, leans the glass
+    /// toward the light actually behind it, and gives the pane a shadow
+    /// so it reads as off the wall rather than painted on it.
+    let roomLight: RoomLight?
 
     init(
         windowInfo: WindowInfo,
@@ -186,7 +192,8 @@ class DesktopWindow: StatelessWidget {
         onMaximize: (() -> Void)? = nil,
         onClose: (() -> Void)? = nil,
         onTitleBarDoubleTap: (() -> Void)? = nil,
-        onDepthScroll: ((Double) -> Void)? = nil
+        onDepthScroll: ((Double) -> Void)? = nil,
+        roomLight: RoomLight? = nil
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -200,6 +207,20 @@ class DesktopWindow: StatelessWidget {
         self.onClose = onClose
         self.onTitleBarDoubleTap = onTitleBarDoubleTap
         self.onDepthScroll = onDepthScroll
+        self.roomLight = roomLight
+    }
+
+    /// The glass tint, leaned toward the light behind the window when the
+    /// room is open — Mica's idea resolved per window instead of once for
+    /// the whole desktop.
+    private var glassTint: Color {
+        let base = shellTheme.windowGlassTint
+        guard let light = roomLight else { return base }
+        let k = _DesktopShellState.k3DGlassRoomMix
+        return Color(alpha: base.a,
+                     red: base.r + (light.color.r - base.r) * k,
+                     green: base.g + (light.color.g - base.g) * k,
+                     blue: base.b + (light.color.b - base.b) * k)
     }
 
     override func build(_ context: any BuildContext) -> Widget {
@@ -289,7 +310,7 @@ class DesktopWindow: StatelessWidget {
                             child: BackdropFilter(
                                 filter: ShellPalette.frostFilter(blurSigma: 18),
                                 child: ColoredBox(
-                                    color: shellTheme.windowGlassTint,
+                                    color: glassTint,
                                     child: SizedBox(expand: ())
                                 )
                             )
@@ -307,6 +328,31 @@ class DesktopWindow: StatelessWidget {
                     fill: (),
                     child: IgnorePointer(
                         child: _WindowBorder(color: borderColor, cornerRadius: cornerRadius)
+                    )
+                )
+            )
+        }
+
+        // Aerial perspective: a window further into the room is veiled
+        // toward the colour of the room behind it. It is the one depth cue
+        // that works on a flat screen with one eye and a still head, which
+        // is why painters have used it for six centuries and visionOS
+        // recedes its background windows the same way. Over the whole pane,
+        // chrome and border included, so the window recedes as one object.
+        // IgnorePointer because a ColoredBox hit-tests opaque even at alpha
+        // 0 and would eat every click meant for the client.
+        if let light = roomLight, light.haze > 0, !isFullscreen {
+            stackChildren.append(
+                Positioned(
+                    fill: (),
+                    child: IgnorePointer(
+                        child: ColoredBox(
+                            color: Color(alpha: light.haze,
+                                         red: light.color.r,
+                                         green: light.color.g,
+                                         blue: light.color.b),
+                            child: SizedBox(expand: ())
+                        )
                     )
                 )
             )
@@ -338,15 +384,39 @@ class DesktopWindow: StatelessWidget {
             )
         )
 
+        var pane: Widget = ClipRRect(
+            borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
+            child: Stack(children: stackChildren)
+        )
+        // A shadow, only in the room. It is a SCREEN-space drop shadow, not
+        // a cast one, and that is deliberate: a real shadow thrown onto the
+        // wall behind a floating window projects SMALLER than the window
+        // itself (the wall is further from the eye), so the window hides it
+        // completely — measured, see the plan's Phase 2a. What reads as
+        // "this floats in front of that" is the UI convention, drawn
+        // outside the clip so it spills onto the room and onto the windows
+        // below. In 2D there is no shadow at all and nothing here runs, so
+        // the flat desktop is untouched.
+        if let light = roomLight, light.separation > 0, !isFullscreen {
+            let s = light.separation
+            pane = DecoratedBox(
+                decoration: BoxDecoration(
+                    borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
+                    boxShadow: [
+                        BoxShadow(color: Color(alpha: 0.42 * s, red: 0, green: 0, blue: 0),
+                                  offset: Offset(0, 16 * s),
+                                  blurRadius: 44 * s),
+                    ]
+                ),
+                child: pane
+            )
+        }
         return Listener(
             onPointerDown: { [self] _ in
                 onBringToFront?()
             },
             behavior: .deferToChild,
-            child: ClipRRect(
-                borderRadius: BorderRadius.all(Radius(circular: cornerRadius)),
-                child: Stack(children: stackChildren)
-            )
+            child: pane
         )
     }
 }

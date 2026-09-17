@@ -36,6 +36,31 @@ struct WindowPose3D: Equatable {
     static let range: ClosedRange<Double> = 0.6...2.5
 }
 
+/// The light one window sits in, and how far off the room it reads as
+/// floating. Resolved per window from the wallpaper itself: the room's
+/// back wall IS the picture, so "what is behind this window" is a region
+/// of it. nil in 2D and for the focused window, which stays pixel-exact.
+///
+/// This is the whole of what can be done to marry a window to the room at
+/// a desktop lens, and the two things it does NOT do were both measured
+/// out rather than skipped — see `docs/plans/desktop-3d.md`, Phase 2a:
+/// a floor reflection lands off the bottom of the screen for any window a
+/// person would actually use, and a shadow cast onto the wall behind is
+/// always SMALLER on screen than the window casting it, so the window
+/// hides it completely. Haze, tint and a screen-space drop shadow are
+/// what is left, and they are what painters and visionOS both use.
+struct RoomLight: Equatable {
+    /// The average colour of the picture behind the window.
+    var color: Color
+    /// How much of that colour veils the window. Aerial perspective: the
+    /// depth cue that works on a flat screen, because it does not need
+    /// two eyes or a moving head.
+    var haze: Double
+    /// How far off the room the window reads as floating, 0 to 1 with the
+    /// enter/leave tween. Scales the drop shadow.
+    var separation: Double
+}
+
 /// The viewer, per output. Pointer parallax moves the eye a little; the
 /// arc and the environment both read it, so they move together.
 struct Camera3D: Equatable {
@@ -113,6 +138,75 @@ extension _DesktopShellState {
             if row3.x * x + row3.y * y + row3.w <= 0.05 { return nil }
         }
         return (m, pivot)
+    }
+
+    // MARK: The light
+
+    /// How much of the room's colour a window at the back of its range
+    /// takes. Enough that distance reads; not so much that a window you
+    /// might want to glance at stops being legible.
+    static let k3DHazeMax = 0.30
+    /// How far a tilted window's glass leans from the theme's tint toward
+    /// the light actually behind it.
+    static let k3DGlassRoomMix = 0.55
+
+    /// The light behind one window: the average colour of the part of the
+    /// picture it floats in front of, plus the haze its distance earns.
+    ///
+    /// The sampling point needs no world-space maths at all. The window
+    /// and the wall point behind it lie on the SAME ray from the eye, and
+    /// the picture covers `kRoomCover` of the view — so the wall point
+    /// behind a window is simply its on-screen position divided by the
+    /// cover, less the picture's lift. Windows near the screen's edge
+    /// project past the picture onto the side walls, which carry the
+    /// picture's own edge colours anyway, so clamping is not an
+    /// approximation there, it is the right answer.
+    ///
+    /// Quantised, because this feeds `_windowChildCache`: an unrounded
+    /// colour would miss the cache on every pointer move and rebuild
+    /// every window's subtree for a change nobody can see.
+    func _desktop3DRoomLight(rect: Rect, t: Double, depth: Double) -> RoomLight? {
+        #if os(Linux)
+        guard t > 0, let grid = _wallpaperLight, grid.cols > 0, grid.rows > 0 else { return nil }
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        guard host.width > 0, host.height > 0 else { return nil }
+        // The same w the perspective divide uses, so this is the window's
+        // real distance from the eye rather than its depth knob.
+        let w = 1 + (1 / Self.k3DNeighbourScale - 1) * depth * t
+        let cx = host.center.dx + (rect.center.dx - host.center.dx) / w
+        let cy = host.center.dy + (rect.center.dy - host.center.dy) / w
+        let cover = EnvironmentRenderer.kRoomCover
+        let lift = EnvironmentRenderer.kRoomLift
+        let nx = (cx - host.center.dx) / (host.width / 2)
+        let ny = -(cy - host.center.dy) / (host.height / 2)
+        let u = 0.5 + (nx / cover) / 2
+        let v = 0.5 - ((ny - lift * cover) / cover) / 2
+        let hu = (rect.width / w) / host.width / cover / 2
+        let hv = (rect.height / w) / host.height / cover / 2
+
+        func cell(_ a: Double, _ n: Int) -> Int {
+            min(n - 1, max(0, Int(a * Double(n))))
+        }
+        let x0 = cell(u - hu, grid.cols), x1 = cell(u + hu, grid.cols)
+        let y0 = cell(v - hv, grid.rows), y1 = cell(v + hv, grid.rows)
+        var r = 0.0, g = 0.0, b = 0.0, n = 0.0
+        for gy in y0...y1 {
+            for gx in x0...x1 {
+                let c = grid.cells[gy * grid.cols + gx]
+                r += c.r; g += c.g; b += c.b; n += 1
+            }
+        }
+        guard n > 0 else { return nil }
+        func q(_ x: Double) -> Double { (x * 24).rounded() / 24 }
+        let haze = min(Self.k3DHazeMax, (w - 1) * 0.28)
+        return RoomLight(
+            color: Color(alpha: 1.0, red: q(r / n), green: q(g / n), blue: q(b / n)),
+            haze: (haze * 40).rounded() / 40,
+            separation: (t * 20).rounded() / 20)
+        #else
+        return nil
+        #endif
     }
 
     // MARK: The mode

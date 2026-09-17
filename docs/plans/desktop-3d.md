@@ -384,10 +384,59 @@ What this settled, and is worth not re-deriving:
   arriving — a screenshot alone is a bad judge of whether a fade is
   applied.
 
-What is still not right: **the windows do not touch the room.** They are
-opaque slabs over it — no shadow on the floor, no reflection, no tint
-from the light behind them. That is Phase 2, and it is now the thing
-between this and looking real.
+### Phase 2a — the windows take the room's light (2026-09-16)
+
+Three cues, all on the window and all only while it is tilted, so the
+flat desktop and the focused window's pixel-exactness are untouched:
+
+- **Aerial haze.** A window further into the room is veiled toward the
+  colour of the room behind it — 12% at the front of the arc, up to 30%
+  at the back of its depth range. It is the one depth cue that works on
+  a flat screen with one eye and a still head, which is why painters
+  have used it for six centuries and visionOS recedes its background
+  windows the same way.
+- **Glass that takes the local light.** `windowGlassTint` was one colour
+  for the whole desktop (the wallpaper's average, Mica's ingredient).
+  For a tilted window it now leans 55% toward the part of the picture
+  that window actually floats in front of.
+- **A drop shadow**, in screen space, spilling outside the window onto
+  the room and onto the windows below.
+
+**The sampling point needs no world-space maths.** A window and the wall
+point behind it lie on the same ray from the eye, and the picture covers
+`kRoomCover` of the view — so the wall behind a window is just its
+on-screen position divided by the cover, less the picture's lift. The
+wallpaper is kept as a 48×30 grid of average colours when it decodes
+(`_lightGrid`, a few kilobytes, built from the same pixels Mica already
+uses), so a lookup is free and nothing is read back from the GPU. The
+light is quantised before it reaches `_windowChildCache`, or a pointer
+move would rebuild every window's subtree for a change nobody can see.
+
+**Two things in the phase list were measured out rather than built, and
+both should stay unbuilt at this geometry:**
+
+- **A floor reflection lands off the bottom of the screen.** Mirror a
+  window in the floor plane and the reflection appears at
+  `(2·floorY − y)/(d·ty)` — for a window at the front of the arc that is
+  −1.40 in NDC, well past the screen's edge, and it only crosses −1.0
+  when the window is pushed nearly to the back wall. Windows float about
+  a third of the way from the eye to the wall and sit well above the
+  floor, so there is almost no floor between them and the viewer to
+  reflect in. Correct, and invisible.
+- **A shadow cast onto the wall behind is hidden by the window casting
+  it.** The wall is further from the eye than the window, so the shadow
+  projects SMALLER: 60% of the window's on-screen width at the front of
+  the arc, 77% at the back. It lands entirely behind the window. Only a
+  wildly oblique light would bring it out, and that draws a detached
+  dark rectangle, not a shadow. This is why UI drop shadows are screen
+  space, and why the one added here is too.
+
+Both are worth revisiting only if windows ever sit ON the floor or right
+against the wall, which no arrangement here does.
+
+What is still not right: nothing reflects, nothing occludes. A window is
+still in front of every part of the room, however deep it claims to be.
+Tier 1's depth relief would give the room something to occlude with.
 
 Three traps paid for:
 
@@ -406,11 +455,14 @@ Three traps paid for:
 
 ### Phase 2 — depth, light, and windows that rest in the scene
 
+- ~~Window shadows and floor reflections in the environment texture~~ —
+  done as far as the geometry allows, which is a screen-space shadow and
+  no reflection at all. See Phase 2a's results for why the physical
+  versions of both are invisible here.
+- ~~Per-window glass tint from the scene's light buffer~~ — done, and
+  with no light buffer: the wallpaper's own pixels answer it on the CPU.
 - Precomputed depth map for the bundled wallpaper; the relief mesh.
 - The optional depth helper for user wallpapers, run at set time.
-- Window shadows and floor reflections in the environment texture, from the
-  poses and texture names the renderer is handed.
-- Per-window glass tint from the scene's light buffer.
 
 ### Phase 3 — camera moves and layers
 
