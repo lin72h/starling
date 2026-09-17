@@ -57,7 +57,10 @@ extension _DesktopShellState {
     /// pane, and the focused one is pixel-exact by rule.
     static let k3DNeighbourScale = 0.7
     /// The eye's full parallax travel, as a fraction of the screen width.
-    static let k3DEyeTravel = 0.02
+    /// The same eye the room moves (`EnvironmentRenderer.kEyeTravel`), so
+    /// windows and room slide against each other by their real depths —
+    /// change one and change the other.
+    static let k3DEyeTravel = 0.03
     /// Parallax steps across the screen, per axis. Quantised so a still
     /// pointer means a still camera — every step is a full recomposite.
     static let k3DParallaxSteps = 40

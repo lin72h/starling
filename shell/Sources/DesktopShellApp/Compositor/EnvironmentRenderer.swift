@@ -6,19 +6,34 @@ import Foundation
 
 // MARK: - EnvironmentRenderer (the 3D desktop's tier-0 environment)
 //
-// The wallpaper becomes a place: a wall wrapped part-way around the viewer,
-// its edges continued and darkened past the picture, and a wet floor
-// reflecting its lower third. It renders into the texture the wallpaper's
+// The wallpaper becomes a place: the picture recedes to the far wall of a
+// box, and the floor, ceiling and side walls grow out of its four edges
+// and come toward the viewer, carrying the picture's own colours, blurred
+// and falling away into the dark. The room is made OUT of the picture
+// rather than framing it. It renders into the texture the wallpaper's
 // widget slot shows while 3D is on, on the raster thread inside the
 // engine's external-texture callback (GLRenderer's contract), reading the
 // wallpaper's own uploaded GL texture as its one source.
 //
 // The unfold is geometric: every vertex carries two positions — where it
-// sits on a flat quad that exactly fills the view, and where it sits on
-// the cylinder — and the vertex shader mixes them by `t`. At t = 0 the
-// output is the flat wallpaper (so entering starts from what was on
-// screen), at t = 1 it is the room. The floor collapses onto the wall's
-// bottom edge at t = 0 and grows out of it.
+// sits on a flat quad that exactly fills the view, and where it sits in
+// the room — and the vertex shader mixes them by `t`. At t = 0 the output
+// IS the flat wallpaper: the back wall fills the view undimmed and the
+// other four surfaces have collapsed onto the quad's edges, where they
+// are zero-area and rasterise nothing.
+//
+// Why a box and not the cylinder this started as: a cylinder centred on
+// the eye is depth-flat by construction — every point on it is exactly R
+// from the viewer, so it has no parallax and no perspective, and through
+// a desktop lens it is indistinguishable from the flat picture it was
+// made from. No amount of tuning fixes that. A box has surfaces at
+// genuinely different distances, which is the only thing that reads as
+// depth on a monitor.
+//
+// The room is defined against the frustum rather than in world units, so
+// what reaches the screen does not depend on the lens or on the wall's
+// distance: `kRoomCover` — how much of the view the picture still fills
+// once the room is open — is the knob that changes the picture.
 //
 // GL state: the engine calls resetContext(kAll_GrBackendState) after every
 // external-texture callback, so nothing set here leaks into Skia's cache;
@@ -113,25 +128,49 @@ final class EnvironmentRenderer: GLRenderer {
     /// The lens, shared with the windows' arc so the two agree on where
     /// "straight ahead" converges: tan(fovX/2) = 0.5 / k3DFocalScreens.
     static let kTanHalfFovX = 0.5 / 1.5
-    /// How much wider than the view the wrapped wallpaper is: > 1 leaves
-    /// wall for the parallax to reveal, < 2 keeps it from reading as a zoom.
-    static let kWrapOverscan = 1.35
-    /// Radius of the cylinder the wall wraps onto (the flat quad is at 1).
-    static let kWallRadius = 1.0
-    /// The wall's vertical centre, as a fraction of its own height above
-    /// the eye line — leaves room under it for the floor.
-    static let kWallLift = 0.18
-    /// How far the floor comes toward the eye, as a fraction of the radius.
-    static let kFloorReach = 0.85
-    /// Fraction of the wallpaper's height the floor reflects.
+    /// How far away the picture hangs. Only sets the scale: the room is
+    /// built against the frustum, so the same image reaches the screen at
+    /// any distance. It fixes what "world units" mean for the eye travel,
+    /// and where the windows' arc sits relative to the wall (an unfocused
+    /// window at depth 1 lands at 1/kNeighbourScale ≈ 1.43, comfortably
+    /// in front of it).
+    static let kWallDistance = 2.4
+    /// How much of the view the picture still fills once the room is
+    /// open. 1.0 would be the flat wallpaper and no room at all; much
+    /// below 0.55 and the wallpaper stops being the subject of its own
+    /// desktop. This is THE art-direction knob.
+    static let kRoomCover = 0.66
+    /// The picture's centre above the eye line, as a fraction of its own
+    /// half-height: the eye sits low in the picture, so there is more
+    /// floor than ceiling — which is what standing in a room looks like.
+    static let kRoomLift = 0.14
+    /// Where the room stops short of the eye, as a fraction of the wall's
+    /// distance. Everything this near is far off the edges of the screen.
+    static let kRoomNear = 0.02
+
+    // Each surface other than the picture is (lit, fade, blur base, blur
+    // reach): its brightness where it meets the picture, how fast it
+    // falls into the dark as it comes toward the viewer, and the mip bias
+    // it samples the picture with at the wall and at the near end. `lit`
+    // near 1 matters — a surface that meets the picture at half
+    // brightness draws a hard frame around it, and the picture stops
+    // opening into the room and starts hanging on a wall.
+    static let kFloorShade = (0.92, 2.6, 1.5, 3.0)
+    static let kCeilShade = (0.75, 3.6, 2.5, 3.0)
+    static let kSideShade = (0.92, 3.2, 2.0, 3.0)
+    /// Fraction of the picture each surface mirrors as it comes forward:
+    /// the floor shows its bottom band, the ceiling its top, the side
+    /// walls their own columns.
     static let kFloorReflect = 0.34
-    /// Past the picture, the wall carries on this far (in wallpaper widths)
-    /// as the picture's own edge, blurred and darkened.
-    static let kEdgeExtend = 0.35
-    /// The eye's full parallax travel, in world units: 2% of the flat
-    /// quad's width per unit of pan (the wall at distance 1 shifts by that;
-    /// the floor's near edge, much closer, by several times more).
-    static let kEyeTravel = 0.02 * 2 * kTanHalfFovX
+    static let kCeilReflect = 0.20
+    static let kSideReflect = 0.22
+    /// The eye's full parallax travel, in world units: 3% of the flat
+    /// quad's width per unit of pan. The wall at 2.4 shifts by a hundredth
+    /// of that; the floor a step in front of the viewer, by half as much
+    /// again — and that difference is the whole point. Matches
+    /// `k3DEyeTravel`, which moves the windows by the same eye: an
+    /// unfocused window sits at 1.43, between the two.
+    static let kEyeTravel = 0.03 * 2 * kTanHalfFovX
 
     /// Called on the raster thread with the GL context current: the
     /// wallpaper's texture name and size, or nil while it is not uploaded.
@@ -139,7 +178,9 @@ final class EnvironmentRenderer: GLRenderer {
 
     private let cameraLock = NSLock()
     private var _camera = EnvironmentCamera()
-    /// Rebuild the meshes when the source's aspect changes.
+    /// Rebuild the room when the VIEW's aspect changes. The source's own
+    /// aspect does not enter: the shell crops the wallpaper to the view,
+    /// so the picture is the view's shape at t = 0 and must stay it.
     private var meshAspect: Double = 0
 
     // GL objects (raster thread only)
@@ -150,7 +191,8 @@ final class EnvironmentRenderer: GLRenderer {
     private var fbo: UInt32 = 0
     private var vertexCount: Int32 = 0
     private var mipmapped: Set<UInt32> = []
-    private var aPosFlat: Int32 = -1, aPosWrap: Int32 = -1, aUV: Int32 = -1, aKind: Int32 = -1
+    private var aPosFlat: Int32 = -1, aPosRoom: Int32 = -1, aUV: Int32 = -1
+    private var aFar: Int32 = -1, aShade: Int32 = -1
     private var uProj: Int32 = -1, uView: Int32 = -1, uT: Int32 = -1, uTex: Int32 = -1
     private var uMip: Int32 = -1
 
@@ -241,8 +283,8 @@ final class EnvironmentRenderer: GLRenderer {
         _glClear(GL_COLOR_BUFFER_BIT)
 
         if let src = sourceTexture?(), src.width > 0, src.height > 0 {
-            let aspect = Double(src.width) / Double(src.height)
-            if aspect != meshAspect { buildMesh(sourceAspect: aspect); meshAspect = aspect }
+            let aspect = Double(width) / Double(height)
+            if aspect != meshAspect { buildMesh(viewAspect: aspect); meshAspect = aspect }
 
             _glActiveTexture(GL_TEXTURE0)
             _glBindTexture(GL_TEXTURE_2D, src.name)
@@ -264,14 +306,15 @@ final class EnvironmentRenderer: GLRenderer {
             _glUseProgram(program)
             _glBindVertexArray?(vao)
             _glBindBuffer(GL_ARRAY_BUFFER, vbo)
-            let stride = Int32(9 * MemoryLayout<Float>.size)
+            let stride = Int32(Self.kFloatsPerVertex * MemoryLayout<Float>.size)
             func attrib(_ loc: Int32, _ n: Int32, _ offsetFloats: Int) {
                 guard loc >= 0 else { return }
                 _glEnableVertexAttribArray(UInt32(loc))
                 _glVertexAttribPointer(UInt32(loc), n, GL_FLOAT, 0, stride,
                                        UnsafeRawPointer(bitPattern: offsetFloats * MemoryLayout<Float>.size))
             }
-            attrib(aPosFlat, 3, 0); attrib(aPosWrap, 3, 3); attrib(aUV, 2, 6); attrib(aKind, 1, 8)
+            attrib(aPosFlat, 3, 0); attrib(aPosRoom, 3, 3); attrib(aUV, 2, 6)
+            attrib(aFar, 1, 8); attrib(aShade, 4, 9)
 
             var proj = Self.projection(aspect: Double(width) / Double(height))
             var view = Self.view(panX: cam.panX * cam.t, panY: cam.panY * cam.t)
@@ -340,73 +383,90 @@ final class EnvironmentRenderer: GLRenderer {
         return m
     }
 
-    /// The wall (flat → cylinder) and the floor (a line → a plane), as
-    /// interleaved triangles: posFlat(3) posWrap(3) uv(2) kind(1).
-    private func buildMesh(sourceAspect: Double) {
+    /// Vertices are posFlat(3) posRoom(3) uv(2) far(1) shade(4).
+    static let kFloatsPerVertex = 13
+
+    /// The room: a box whose back wall is the picture, with the floor,
+    /// ceiling and two side walls growing out of its edges toward the
+    /// viewer. Every vertex carries where it sits on the flat quad that
+    /// fills the view AND where it sits in the room; the vertex shader
+    /// mixes the two by `t`. At t = 0 the four side surfaces have
+    /// collapsed onto the quad's own edges — zero area, so they rasterise
+    /// nothing — and the back wall is the flat wallpaper exactly.
+    ///
+    /// `far` is 1 where a surface meets the picture and falls to 0 at the
+    /// viewer; the fragment shader dims and blurs by it, so the room
+    /// leaves the picture at full brightness and sinks into the dark as
+    /// it arrives. `uv` mirrors the picture's own edge forward, which is
+    /// what makes the floor read as wet and the walls as lit by it.
+    private func buildMesh(viewAspect: Double) {
         let tx = Self.kTanHalfFovX
-        let viewAspect = Double(width) / Double(height)
         let ty = tx / viewAspect
-        // The wallpaper is cropped to the view's aspect by the shell, so the
-        // flat quad IS the view: x ∈ [-tx, tx], y ∈ [-ty, ty] at z = -1.
-        let R = Self.kWallRadius
-        let arc = 2 * tx * Self.kWrapOverscan          // radians of wall the picture covers
-        let wallH = arc * R / sourceAspect            // keeps the picture's aspect on the arc
-        let wallC = wallH * Self.kWallLift            // vertical centre of the wall
-        let ext = Self.kEdgeExtend
+        let dist = Self.kWallDistance
+        let pw = Self.kRoomCover * dist * tx      // the picture, on the wall
+        let ph = Self.kRoomCover * dist * ty
+        let cy = Self.kRoomLift * ph              // its centre, above the eye
+        let nz = Self.kRoomNear
+        /// z of a side surface at `s`: 0 at the wall, 1 at the near end.
+        func zAt(_ s: Double) -> Double { -dist * (1 - s * (1 - nz)) }
+        func farAt(_ s: Double) -> Double { 1 - s * (1 - nz) }
+
+        typealias Vert = ((Double, Double, Double), (Double, Double, Double),
+                          (Double, Double), Double, (Double, Double, Double, Double))
         var v: [Float] = []
-        v.reserveCapacity(20000)
-        func push(_ pf: (Double, Double, Double), _ pw: (Double, Double, Double), _ uv: (Double, Double), _ kind: Double) {
-            v += [Float(pf.0), Float(pf.1), Float(pf.2), Float(pw.0), Float(pw.1), Float(pw.2),
-                  Float(uv.0), Float(uv.1), Float(kind)]
+        v.reserveCapacity(24000)
+        func push(_ q: Vert) {
+            v += [Float(q.0.0), Float(q.0.1), Float(q.0.2),
+                  Float(q.1.0), Float(q.1.1), Float(q.1.2),
+                  Float(q.2.0), Float(q.2.1), Float(q.3),
+                  Float(q.4.0), Float(q.4.1), Float(q.4.2), Float(q.4.3)]
         }
-        // Wall: u from -ext to 1+ext (past the picture on both sides),
-        // 96 columns, 24 rows.
-        let cols = 96, rows = 24
-        func wallVertex(_ i: Int, _ j: Int) -> ((Double, Double, Double), (Double, Double, Double), (Double, Double)) {
-            let u = -ext + (1 + 2 * ext) * Double(i) / Double(cols)
-            let vv = Double(j) / Double(rows)                       // 0 = top
-            // Flat: the picture fills the view; the extension continues past it.
-            let fx = (u - 0.5) * 2 * tx
-            let fy = (0.5 - vv) * 2 * ty
-            // Wrapped: angle across the arc, height on the cylinder.
-            let ang = (u - 0.5) * arc
-            let wx = R * sin(ang), wz = -R * cos(ang)
-            let wy = wallC + (0.5 - vv) * wallH
-            return ((fx, fy, -1.0), (wx, wy, wz), (u, vv))
-        }
-        for j in 0..<rows {
-            for i in 0..<cols {
-                let a = wallVertex(i, j), b = wallVertex(i + 1, j)
-                let c = wallVertex(i, j + 1), d = wallVertex(i + 1, j + 1)
-                push(a.0, a.1, a.2, 0); push(b.0, b.1, b.2, 0); push(c.0, c.1, c.2, 0)
-                push(b.0, b.1, b.2, 0); push(d.0, d.1, d.2, 0); push(c.0, c.1, c.2, 0)
+        /// A surface over (a, b) ∈ [0,1]², as two triangles per cell.
+        func grid(_ cols: Int, _ rows: Int, _ f: (Double, Double) -> Vert) {
+            for j in 0..<rows {
+                let b0 = Double(j) / Double(rows), b1 = Double(j + 1) / Double(rows)
+                for i in 0..<cols {
+                    let a0 = Double(i) / Double(cols), a1 = Double(i + 1) / Double(cols)
+                    let p00 = f(a0, b0), p10 = f(a1, b0), p01 = f(a0, b1), p11 = f(a1, b1)
+                    push(p00); push(p10); push(p01)
+                    push(p10); push(p11); push(p01)
+                }
             }
         }
-        // Floor: from the wall's bottom edge toward the eye. kind = 1 + reach
-        // (0 at the wall, 1 nearest the eye) so the fragment shader can fade.
-        let floorY = wallC - wallH / 2
-        let frows = 16
-        func floorVertex(_ i: Int, _ j: Int) -> ((Double, Double, Double), (Double, Double, Double), (Double, Double), Double) {
-            let u = -ext + (1 + 2 * ext) * Double(i) / Double(cols)
-            let reach = Double(j) / Double(frows)                  // 0 = at the wall
-            let ang = (u - 0.5) * arc
-            let radius = R * (1 - reach * Self.kFloorReach)
-            let wx = radius * sin(ang), wz = -radius * cos(ang)
-            // Flat: collapsed onto the quad's bottom edge.
-            let fx = (u - 0.5) * 2 * tx
-            // Reflection: the wall's lower part, mirrored.
-            let vv = 1.0 - reach * Self.kFloorReflect
-            return ((fx, -ty, -1.0), (wx, floorY, wz), (u, vv), 1 + reach)
+
+        // The picture, on the back wall. `w` runs down from its top.
+        grid(4, 4) { u, w in
+            (((u - 0.5) * 2 * tx, (0.5 - w) * 2 * ty, -1.0),
+             ((u - 0.5) * 2 * pw, cy + (0.5 - w) * 2 * ph, -dist),
+             (u, w), 1.0, (1.0, 0.0, 0.0, 0.0))
         }
-        for j in 0..<frows {
-            for i in 0..<cols {
-                let a = floorVertex(i, j), b = floorVertex(i + 1, j)
-                let c = floorVertex(i, j + 1), d = floorVertex(i + 1, j + 1)
-                push(a.0, a.1, a.2, a.3); push(b.0, b.1, b.2, b.3); push(c.0, c.1, c.2, c.3)
-                push(b.0, b.1, b.2, b.3); push(d.0, d.1, d.2, d.3); push(c.0, c.1, c.2, c.3)
+        // The floor, out of the picture's bottom edge: its lower band
+        // mirrored forward, dimming as it comes.
+        grid(24, 16) { u, s in
+            let far = farAt(s)
+            return (((u - 0.5) * 2 * tx, -ty, -1.0),
+                    ((u - 0.5) * 2 * pw, cy - ph, zAt(s)),
+                    (u, 1 - (1 - far) * Self.kFloorReflect), far, Self.kFloorShade)
+        }
+        // The ceiling, out of its top edge.
+        grid(24, 16) { u, s in
+            let far = farAt(s)
+            return (((u - 0.5) * 2 * tx, ty, -1.0),
+                    ((u - 0.5) * 2 * pw, cy + ph, zAt(s)),
+                    (u, (1 - far) * Self.kCeilReflect), far, Self.kCeilShade)
+        }
+        // The side walls, out of its left and right edges.
+        for sgn in [-1.0, 1.0] {
+            grid(16, 16) { s, w in
+                let far = farAt(s)
+                let edge = (1 - far) * Self.kSideReflect
+                return ((sgn * tx, (0.5 - w) * 2 * ty, -1.0),
+                        (sgn * pw, cy + (0.5 - w) * 2 * ph, zAt(s)),
+                        (sgn < 0 ? edge : 1 - edge, w), far, Self.kSideShade)
             }
         }
-        vertexCount = Int32(v.count / 9)
+
+        vertexCount = Int32(v.count / Self.kFloatsPerVertex)
         _glBindBuffer(GL_ARRAY_BUFFER, vbo)
         v.withUnsafeBytes { buf in
             _glBufferData(GL_ARRAY_BUFFER, buf.count, buf.baseAddress, GL_STATIC_DRAW)
@@ -419,21 +479,24 @@ final class EnvironmentRenderer: GLRenderer {
     private static let vertexSource = """
     #version 100
     attribute vec3 aPosFlat;
-    attribute vec3 aPosWrap;
+    attribute vec3 aPosRoom;
     attribute vec2 aUV;
-    attribute float aKind;
+    attribute float aFar;
+    attribute vec4 aShade;
     uniform mat4 uProj;
     uniform mat4 uView;
     // Shared with the fragment stage, so the precision must match it
-    // (GLSL ES 1.00 refuses to link otherwise).
+    // (GLSL ES 1.00 refuses to link otherwise, with no compile error).
     uniform mediump float uT;
     varying vec2 vUV;
-    varying float vKind;
+    varying float vFar;
+    varying vec4 vShade;
     void main() {
-        vec3 p = mix(aPosFlat, aPosWrap, uT);
+        vec3 p = mix(aPosFlat, aPosRoom, uT);
         gl_Position = uProj * uView * vec4(p, 1.0);
         vUV = aUV;
-        vKind = aKind;
+        vFar = aFar;
+        vShade = aShade;
     }
     """
 
@@ -444,21 +507,19 @@ final class EnvironmentRenderer: GLRenderer {
     uniform float uT;
     uniform float uMip;
     varying vec2 vUV;
-    varying float vKind;
+    varying float vFar;
+    varying vec4 vShade;
     void main() {
-        // Past the picture's sides: its own edge, blurred and darkened.
-        float beyond = max(0.0, max(-vUV.x, vUV.x - 1.0));
         // The wallpaper texture's row 0 is the picture's BOTTOM (the same
         // bottom-left convention the engine shows it with), so v runs up.
         vec2 uv = vec2(clamp(vUV.x, 0.0, 1.0), 1.0 - clamp(vUV.y, 0.0, 1.0));
-        float isFloor = step(1.0, vKind);
-        float reach = clamp(vKind - 1.0, 0.0, 1.0);
-        float bias = uMip * (beyond * 14.0 + isFloor * (2.5 + reach * 3.0)) * uT;
+        float far = clamp(vFar, 0.0, 1.0);
+        // (lit, fade, blur base, blur reach). The picture itself is
+        // (1, 0, 0, 0) at far = 1, so it comes through untouched.
+        float lit = vShade.x * pow(max(far, 0.002), vShade.y);
+        float bias = (vShade.z + (1.0 - far) * vShade.w) * uT * uMip;
         vec4 c = texture2D(uTex, uv, bias);
-        float sideDark = 1.0 - smoothstep(0.0, 0.3, beyond) * 0.85 * uT;
-        // The wet floor: dim, and fading to dark toward the viewer.
-        float floorShade = mix(1.0, 0.55 * (1.0 - reach * 0.9), isFloor * uT);
-        gl_FragColor = vec4(c.rgb * sideDark * floorShade, 1.0);
+        gl_FragColor = vec4(c.rgb * mix(1.0, lit, uT), 1.0);
     }
     """
 
@@ -563,9 +624,10 @@ final class EnvironmentRenderer: GLRenderer {
         }
         program = prog
         aPosFlat = _glGetAttribLocation(prog, "aPosFlat")
-        aPosWrap = _glGetAttribLocation(prog, "aPosWrap")
+        aPosRoom = _glGetAttribLocation(prog, "aPosRoom")
         aUV = _glGetAttribLocation(prog, "aUV")
-        aKind = _glGetAttribLocation(prog, "aKind")
+        aFar = _glGetAttribLocation(prog, "aFar")
+        aShade = _glGetAttribLocation(prog, "aShade")
         uProj = _glGetUniformLocation(prog, "uProj")
         uView = _glGetUniformLocation(prog, "uView")
         uT = _glGetUniformLocation(prog, "uT")

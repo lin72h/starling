@@ -108,14 +108,21 @@ Three tiers. Each is a strict improvement on the one below and each
 degrades to it when its input is missing, so the feature ships at tier 0
 and gets better without changing shape.
 
-**Tier 0 — the wrap.** The wallpaper is mapped onto a cylinder segment of
-about 120° around the camera, at a distance a few screen-widths away. The
-rest of the sphere is the wallpaper's own edges, blurred and darkened, the
-way visionOS fades a panorama that does not cover 360°. The floor is the
-wallpaper's lower third reflected, blurred and dimmed: a wet floor the
-windows will stand over. Panning the camera produces parallax between the
-near floor and the far wall. Works for any still, and is all a video
-wallpaper (`AerialPlayer`) will ever get.
+**Tier 0 — the alcove.** The wallpaper hangs on the far wall of a box,
+filling about two thirds of the view; the floor, ceiling and two side
+walls grow out of its four edges and come toward the viewer, carrying the
+picture's own colours mirrored forward, blurred, and falling into the
+dark as they arrive. The floor is the wallpaper's lower band reflected: a
+wet floor the windows will stand over. Panning the eye produces parallax
+between the near floor and the far wall. Works for any still, and is all
+a video wallpaper (`AerialPlayer`) will ever get.
+
+This started as a **wrap** — the wallpaper on a cylinder segment of about
+120° around the camera — and that does not work on a monitor: a cylinder
+centred on the eye is the same distance away everywhere, so it has no
+depth to show, and the part that curves is off the edges of the screen
+anyway. A headset gets away with it because the environment *is* the
+display and you turn your head. See Phase 1.5.
 
 **Tier 1 — depth.** A depth map turns the wall into a relief: a 256×135
 grid displaced in the vertex shader by the depth texture, so a camera move
@@ -323,19 +330,70 @@ carries the mode, the camera, the poses and the persistence.
   anything), quantised to 40 steps per axis so a still pointer means a
   still camera, and only on hover so a drag stays predictable.
 
-**What is not right yet: the room reads too much like the wallpaper.**
-At the shared 1.5-screen-width lens the wall covers only ~50° of arc, so
-the wrap is nearly imperceptible and the floor is a thin band at the
-bottom edge. It is geometrically a room and photographs as one in the
-renderer's own dump (`STARLING_3D_DUMP=<path>` writes the environment
-texture as a PPM, without the desktop drawn over it), but on screen it
-does not yet *feel* like a place. That is art direction, not plumbing:
-the knobs are `kWrapOverscan`, `kWallLift`, `kFloorReach` and
-`kFloorReflect` at the top of `EnvironmentRenderer`. Tune them against
-the bundled wallpaper before Phase 2 adds depth on top.
+**What was not right, and why no knob could fix it.** As first built the
+room read almost exactly like the flat wallpaper. The diagnosis in the
+tuning knobs was wrong: **a cylinder centred on the eye is depth-flat by
+construction.** Every point on it is the same distance R from the viewer,
+so it has no parallax and no perspective — only a slight barrel remap of
+the texture, and through a 37°-wide desktop lens that is invisible. No
+value of `kWrapOverscan`, `kWallLift` or `kFloorReach` changes that, and
+widening the arc only pushes the curved part off the edges of the screen.
 
-Two traps paid for:
+### Phase 1.5 — the room becomes a box (2026-09-16)
 
+The wrap is now an **alcove**: the picture recedes to the far wall of a
+box, and the floor, ceiling and two side walls grow out of its four edges
+and come toward the viewer, carrying the picture's own colours mirrored
+forward, blurred and falling into the dark. Depth reads because the
+surfaces are at genuinely different distances — the near floor is a third
+as far as the wall — which is the only thing that reads as depth on a
+monitor.
+
+What this settled, and is worth not re-deriving:
+
+- **The room is defined against the frustum, not in world units**, so
+  what reaches the screen does not depend on the lens or on how far away
+  the wall is. That was worth knowing: the first look-dev pass concluded
+  the shared 1.5-screen lens had to be shortened, and it does not. The
+  windows' arc is untouched.
+- **One knob decides the art direction: `kRoomCover`**, how much of the
+  view the picture still fills once the room is open. 1.0 is the flat
+  wallpaper; below about 0.55 the wallpaper stops being the subject of
+  its own desktop. It ships at **0.66**.
+- **The surfaces must meet the picture at nearly full brightness**
+  (`lit` ≈ 0.9, falling off steeply with distance). A surface that meets
+  it at half brightness draws a hard frame around the picture, and the
+  effect stops being a room and becomes a poster hung on a dark wall.
+  That one number is the difference between the two readings.
+- The picture itself is never dimmed or blurred at any `t`, so the 2D
+  contract is now structural rather than tuned: at t = 0 the back wall
+  fills the view untouched and the other four surfaces have collapsed
+  onto the quad's own edges, where they are zero-area and rasterise
+  nothing. The functional check still measures it — leave restores the
+  flat desktop at a diff of 0.00.
+- Pointer parallax went from 2% to 3% of the screen width
+  (`kEyeTravel` and `k3DEyeTravel`, which are the same eye and must move
+  together). The wall shifts ~42 px across a full pointer sweep at 2560
+  wide and the floor under the viewer ~68 px; that difference is what
+  the cylinder could not produce at all.
+- **Look-dev was done offline.** `~/tmp/room/room.py` (not in the tree)
+  ray-traces the same geometry from the same wallpaper, so the art
+  direction was settled by looking at pictures in seconds instead of
+  rebuilding the shell. The live renderer then matched it to within a
+  few percent per row, which is also how the shading was confirmed to be
+  arriving — a screenshot alone is a bad judge of whether a fade is
+  applied.
+
+What is still not right: **the windows do not touch the room.** They are
+opaque slabs over it — no shadow on the floor, no reflection, no tint
+from the light behind them. That is Phase 2, and it is now the thing
+between this and looking real.
+
+Three traps paid for:
+
+- **An eye-centred cylinder cannot show depth.** See above. If a surface
+  is meant to read as far away or near, check that its distance from the
+  eye actually varies across the screen before tuning anything.
 - **GL's row 0 is the BOTTOM of an engine external texture.** The first
   build flipped y in the projection "so row 0 is the top" and drew the
   room upside down. The engine wraps these bottom-left up; measure,
