@@ -227,17 +227,91 @@ The screencopy path now logs a capture that waited out its deadline, so
 the next time it happens the log says whether the frame was old or the
 window undrawn.
 
+## After the merge (2026-09-16)
+
+The branch landed on main (b4a0506). The same day, driving real clients
+against the desktop turned up what the protocol layer still only
+pretended to do, and each of these landed with a protocol-test case:
+
+- **Subsurfaces are drawn.** A subsurface used to be promoted to the
+  whole window (the Waydroid rule — a buffer at least the window's own
+  size) or thrown away. Now the shell draws it inside the window at its
+  offset, alpha kept, in stacking order (`place_above`/`place_below`);
+  synchronized mode — the protocol's default — holds a commit until the
+  parent's. weston-subsurfaces in both modes.
+- **Popup grabs and reposition.** A press outside a grabbed popup's tree
+  dismisses it (`popup_done`, submenu first); a press on nothing (the
+  desktop, the dock, an X11 window) too, reported by the shell's root
+  listener. `xdg_popup.reposition` is answered — GTK4 sends it right
+  after the first configure and waits for it, so the first right-click
+  menu in any GTK4 app was blank until then.
+- **Mouse buttons.** Every press went out as BTN_LEFT (both the Wayland
+  and the X11 glue) since the 0.2 drop. The mask is diffed per surface now.
+- **Dialogs** (`xdg_toplevel.set_parent`): natural size, centred over
+  the parent, above it — not maximized like every other window.
+- **Size hints** (`set_min_size`/`set_max_size`): double-buffered, the
+  shell's resizes stay inside them.
+- **Primary selection**: real, natively and through both data-control
+  protocols (`wl-paste --primary`), offered on pointer/keyboard enter and
+  never at get_device (Qt6).
+- **Pointer lock and confinement**, and relative motion, which nothing
+  had ever sent: the shell hides and holds the cursor at the content
+  centre and turns moves into deltas; focus moving away breaks it.
+- `wl_pointer.frame` is guarded by version — a v1 client (weston's demos)
+  aborted on the first pointer enter.
+- The protocol test builds under ASan/UBSan/LSan by default; two teardown
+  leaks fixed.
+
 ## Tests
 
 `test/wayland/run.sh` links the C server, connects a client in the same
 process and drives every protocol above end to end — no GPU, no display —
-in the fast tier (`test/run.sh`). wmbench itself is the functional check:
-`./benchmark.sh` and `./validate.sh` against a live desktop.
+in the fast tier (`test/run.sh`), under the sanitizers when cc has them
+(`STARLING_WL_SANITIZE=0` for a plain build). wmbench itself is the
+functional check: `./benchmark.sh` and `./validate.sh` against a live
+desktop. Live checks that proved useful: `weston-subsurfaces` (`-r 1 -t 1`
+for synchronized mode — it then only updates when its parent repaints,
+which the demo's main surface rarely does; hover its title bar),
+`weston-simple-egl` under `WAYLAND_DEBUG=1` for button codes and version
+guards (ids print as `wl_pointer#20`, not `@20`), gtk4-demo for menus,
+dialogs and middle-click paste, and Chrome with a `requestPointerLock`
+page for the lock.
 
 ## Not done
 
-- `wp_linux_drm_syncobj_v1` / explicit sync, `wp_color_management_v1`,
-  `wp_fifo_v1` / `wp_commit_timing_v1` — real compositor work each.
+Left open on purpose, in rough order of what a user would notice.
+
+- **Explicit sync** (`wp_linux_drm_syncobj_v1`). Matters for the NVIDIA
+  driver's clients; Mesa on AMD is fine on implicit sync. Shape of the
+  work, compositor-only: advertise the manager; `import_timeline` through
+  `drmSyncobjFDToHandle` on a DRM fd the compositor opens itself (the
+  engine's device's render node); on a commit with an acquire point, hold
+  the commit the way synchronized subsurfaces are held and release it
+  from a `drmSyncobjEventfd` on the event loop; signal the release point
+  where the buffer is released today. Needs libdrm linked and a test that
+  skips without a render node.
+- **Touch.** `wl_touch` is implemented in wayland_seat.c but the seat
+  advertises pointer and keyboard only, because the engine's DRM input
+  (`fl_drm_input.cc`) has no touch handling at all. Engine first.
+- **Pointer input into subsurfaces.** Pointer events over a subsurface go
+  to the toplevel with content-local coordinates; a client whose
+  subsurface takes input of its own (rare — video overlays and hover
+  cards do not) would need enter/motion on the subsurface's wl_surface.
+- **Subsurface details.** `set_position` and stacking apply at once rather
+  than on the parent's commit; "below the parent" is drawn as the bottom
+  of the child stack, since children draw above the parent's content.
+- **Pointer constraint regions.** A lock or confinement covers the whole
+  surface; `set_region` is accepted and ignored. Chrome's page does not
+  hear a compositor-initiated unlock (Chrome's own gap).
+- **Popup positioners.** Anchor, gravity and offset are honoured; the
+  constraint adjustment is the shell's own flip/slide, and `set_reactive`
+  (reposition when the parent moves) is not acted on.
+- `xdg_toplevel.show_window_menu`: no server-side window menu to show.
+- `wl_surface.set_input_region` / `set_opaque_region` are not used for
+  hit-testing or blending; `zwp_idle_inhibit` counts inhibitors and
+  ignores which surface holds them.
+- `wp_color_management_v1`, `wp_fifo_v1` / `wp_commit_timing_v1` — real
+  compositor work each.
 - Output configuration beyond the host's scale (modes, positions,
   transforms, disabling an output) — the display layout is the
   hardware's and the shell's settings', not a client's.
@@ -247,3 +321,18 @@ in the fast tier (`test/run.sh`). wmbench itself is the functional check:
 - Layer surfaces and screencopy on secondary outputs.
 - shm frames still go through glTexSubImage2D; a GBM-backed linear buffer
   would make them zero-copy like dma-buf (see above).
+
+## The X11 server, for reference
+
+Audited the same day (`shell/Sources/X11Server/`, 7.3k lines, from
+scratch, no tests). It runs the apps it was grown around — Zoom, VLC,
+Chrome, Audacity, Qt and GTK3 — and lacks, in order of what an X11 app
+notices: core fonts (an xterm draws nothing), cursor requests, a working
+`ConvertSelection` (X11 clients cannot paste), passive grabs (`GrabKey`,
+`GrabButton`; `GrabKeyboard` returns Success and grabs nothing), XDND,
+XKEYBOARD (the handler exists and is never advertised), DAMAGE, and any
+RENDER beyond fills, glyphs and solid-source composite. Every button went
+out as button 1 until 6c6eb68. The alternative to filling those in is
+rootless Xwayland with a small X window manager in this compositor —
+Xwayland already runs rootful for WeChat — which would get all of the
+above from X.org for the price of the window manager.
