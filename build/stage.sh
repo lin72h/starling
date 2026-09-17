@@ -192,13 +192,20 @@ done
 # deleting all three and booting both engines.
 install -m644 "$E/icudtl.dat" "$SHARE/"
 cp -r "$REPO/build/flutter_assets" "$SHARE/"
-# Wallpapers: the bundled JPEGs, decoded and center-cropped at runtime.
+# Wallpapers: the bundled JPEGs, decoded and center-cropped at runtime,
+# and the depth map beside each one — the 3D desktop's relief, which the
+# shell looks for as <wallpaper>.depth.png next to the picture. Generated
+# out of process by build/tools/wallpaper-depth.py and checked in; a
+# wallpaper without one keeps a flat wall.
 # sdk/wallpaper.rgba is deliberately NOT staged — it is the legacy
 # pre-rendered 3840x2160 raw path, which _loadWallpaperTexture() checks
 # FIRST, so staging it silently pins the desktop to that stale image and
 # the bundled default never loads (and it costs 33 MB).
 mkdir -p "$SHARE/wallpapers"
 install -m644 "$REPO"/shell/Resources/Wallpapers/*.jpg "$SHARE/wallpapers/"
+for d in "$REPO"/shell/Resources/Wallpapers/*.depth.png; do
+    [ -e "$d" ] && install -m644 "$d" "$SHARE/wallpapers/"
+done
 # The app catalog: one record per app the desktop knows about. The launcher,
 # the dock, the App Store and app-install all read it, so it has to be here
 # for any of them to know an app exists.

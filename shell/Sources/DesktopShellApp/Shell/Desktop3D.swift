@@ -327,6 +327,7 @@ extension _DesktopShellState {
         renderer.glProcAddressResolver = registry.glProcAddressResolver
         let source = wallpaperTextureId
         renderer.sourceTexture = { [weak registry] in registry?.sourceTexture(id: source) }
+        renderer.depthGrid = _wallpaperDepth
         let id = registry.registerTexture(engine: wl.engine)
         registry.setGLRenderer(id: id, renderer: renderer)
         _environment = renderer
@@ -336,6 +337,17 @@ extension _DesktopShellState {
         return true
         #else
         return false
+        #endif
+    }
+
+    /// The relief arrived after the room was built (the depth map decodes
+    /// on its own schedule) — hand it over and let the mesh rebuild.
+    func _applyEnvironmentDepth() {
+        #if os(Linux)
+        guard let env = _environment, let registry = drmTextureRegistry,
+              let wl = waylandIntegration, environmentTextureId >= 0 else { return }
+        env.depthGrid = _wallpaperDepth
+        registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId)
         #endif
     }
 

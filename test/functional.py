@@ -1315,6 +1315,12 @@ def check_desktop_3d_roundtrip() -> None:
     The pointer parks in one place for all three shots (parallax and the
     dock's magnification both follow it); the clock strip is cropped off."""
     assert not apps()["files"]["window"], "Files already running; quit it first"
+    # With tiling on, one window is maximised and covers the whole room, so
+    # entering 3D changes nothing a screenshot can see (the focused window
+    # is drawn flat and pixel-exact by rule) and this reads as a dead
+    # feature rather than a covered one.
+    assert not ask("control_center_state")["tiling"], \
+        "tiling is on, so a window covers the room; turn it off first"
     was_on = ask("desktop_3d", query=True)["on"]
     drive("move 300 300", "dock files", "click")
     wait_for(lambda: apps()["files"]["window"], "a window for the arc")

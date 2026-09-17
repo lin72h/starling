@@ -147,6 +147,30 @@ final class EnvironmentRenderer: GLRenderer {
     /// Where the room stops short of the eye, as a fraction of the wall's
     /// distance. Everything this near is far off the edges of the screen.
     static let kRoomNear = 0.02
+    /// The relief: how far the NEAREST part of the picture is pulled off
+    /// the wall toward the eye, as a fraction of the wall's distance. The
+    /// displacement runs ALONG THE VIEW RAY, so the picture is unchanged
+    /// from the home eye position however deep the relief is — it shows
+    /// up only as parallax when the eye moves, and as real distance when
+    /// something has to pass in front of or behind it.
+    ///
+    /// It can be this large because of what a depth map of a landscape
+    /// photograph actually contains: a ground plane, and nothing else.
+    /// Everything past the foreground really is at infinity, so there are
+    /// no silhouettes for a big displacement to rubber-band.
+    static let kRelief = 0.42
+    /// The relief fades out over this fraction of the picture at the top
+    /// and side edges, so the wall still meets the ceiling and side walls
+    /// exactly where they expect it. NOT at the bottom: that edge is the
+    /// near ground, which is the whole of the relief on a landscape, and
+    /// cutting it there would fold the picture right where the eye is
+    /// looking. The floor follows the wall's bottom edge instead.
+    static let kReliefEdgeFade = 0.06
+    /// Quads across the picture. The relief's silhouettes are only as
+    /// sharp as this: a bridge tower a hundred pixels wide spans about
+    /// eight quads at 192, which is enough that its edge does not visibly
+    /// rubber-band under the parallax this camera has.
+    static let kWallQuads = (192, 108)
 
     // Each surface other than the picture is (lit, fade, blur base, blur
     // reach): its brightness where it meets the picture, how fast it
@@ -175,6 +199,35 @@ final class EnvironmentRenderer: GLRenderer {
     /// Called on the raster thread with the GL context current: the
     /// wallpaper's texture name and size, or nil while it is not uploaded.
     var sourceTexture: (() -> (name: UInt32, width: Int, height: Int)?)?
+
+    /// The picture's relief, white nearest, top-down — read on the CPU
+    /// when the mesh is built, never by GL, so no vertex texture fetch is
+    /// needed and the whole thing costs one rebuild. nil is a flat wall
+    /// (tier 0), which is what a wallpaper with no depth map gets.
+    ///
+    /// Written on the platform thread and read on the raster thread, so
+    /// it lives under the same lock the camera does and the mesh builder
+    /// takes a snapshot of it rather than reading it as it draws.
+    var depthGrid: (values: [Float], cols: Int, rows: Int)? {
+        get { cameraLock.lock(); defer { cameraLock.unlock() }; return _depthGrid }
+        set {
+            cameraLock.lock()
+            _depthGrid = newValue
+            _meshStale = true
+            cameraLock.unlock()
+            dirty = true
+        }
+    }
+    private var _depthGrid: (values: [Float], cols: Int, rows: Int)?
+    private var _meshStale = false
+
+    /// True once, after the relief has changed: the mesh has to be rebuilt.
+    private func takeMeshStale() -> Bool {
+        cameraLock.lock(); defer { cameraLock.unlock() }
+        let was = _meshStale
+        _meshStale = false
+        return was
+    }
 
     private let cameraLock = NSLock()
     private var _camera = EnvironmentCamera()
@@ -284,7 +337,10 @@ final class EnvironmentRenderer: GLRenderer {
 
         if let src = sourceTexture?(), src.width > 0, src.height > 0 {
             let aspect = Double(width) / Double(height)
-            if aspect != meshAspect { buildMesh(viewAspect: aspect); meshAspect = aspect }
+            if aspect != meshAspect || takeMeshStale() {
+                buildMesh(viewAspect: aspect)
+                meshAspect = aspect
+            }
 
             _glActiveTexture(GL_TEXTURE0)
             _glBindTexture(GL_TEXTURE_2D, src.name)
@@ -414,7 +470,7 @@ final class EnvironmentRenderer: GLRenderer {
         typealias Vert = ((Double, Double, Double), (Double, Double, Double),
                           (Double, Double), Double, (Double, Double, Double, Double))
         var v: [Float] = []
-        v.reserveCapacity(24000)
+        v.reserveCapacity(300_000)
         func push(_ q: Vert) {
             v += [Float(q.0.0), Float(q.0.1), Float(q.0.2),
                   Float(q.1.0), Float(q.1.1), Float(q.1.2),
@@ -434,18 +490,54 @@ final class EnvironmentRenderer: GLRenderer {
             }
         }
 
-        // The picture, on the back wall. `w` runs down from its top.
-        grid(4, 4) { u, w in
-            (((u - 0.5) * 2 * tx, (0.5 - w) * 2 * ty, -1.0),
-             ((u - 0.5) * 2 * pw, cy + (0.5 - w) * 2 * ph, -dist),
-             (u, w), 1.0, (1.0, 0.0, 0.0, 0.0))
+        // The picture, on the back wall, given its relief. `w` runs down
+        // from its top. The displacement is ALONG THE VIEW RAY — the room
+        // point is simply scaled toward the eye — so from the home eye
+        // position the picture is pixel-identical to a flat wall however
+        // deep the relief is, and the shape only shows as parallax and as
+        // real distance. Faded out at the edges so the wall still meets
+        // the floor, ceiling and side walls where they join it.
+        let relief = depthGrid          // one snapshot, off the lock
+        func reliefScale(_ u: Double, _ w: Double) -> Double {
+            guard let r = relief, r.cols > 1, r.rows > 1 else { return 1 }
+            // Sides and top only — the bottom edge keeps its relief.
+            let fade = max(0, min(1, min(min(u, 1 - u) / Self.kReliefEdgeFade,
+                                         w / Self.kReliefEdgeFade)))
+            guard fade > 0 else { return 1 }
+            // Bilinear, so the relief is smooth between cells.
+            let gx = min(Double(r.cols - 1), max(0, u * Double(r.cols) - 0.5))
+            let gy = min(Double(r.rows - 1), max(0, w * Double(r.rows) - 0.5))
+            let x0 = Int(gx), y0 = Int(gy)
+            let x1 = min(r.cols - 1, x0 + 1), y1 = min(r.rows - 1, y0 + 1)
+            let ax = gx - Double(x0), ay = gy - Double(y0)
+            let d = (Double(r.values[y0 * r.cols + x0]) * (1 - ax)
+                     + Double(r.values[y0 * r.cols + x1]) * ax) * (1 - ay)
+                  + (Double(r.values[y1 * r.cols + x0]) * (1 - ax)
+                     + Double(r.values[y1 * r.cols + x1]) * ax) * ay
+            return 1 - Self.kRelief * d * fade
+        }
+        let (wallCols, wallRows) = Self.kWallQuads
+        var kMin = 1.0, kMax = 1.0
+        grid(relief == nil ? 4 : wallCols, relief == nil ? 4 : wallRows) { u, w in
+            let x = (u - 0.5) * 2 * pw, y = cy + (0.5 - w) * 2 * ph
+            let k = reliefScale(u, w)
+            kMin = min(kMin, k); kMax = max(kMax, k)
+            return (((u - 0.5) * 2 * tx, (0.5 - w) * 2 * ty, -1.0),
+                    (x * k, y * k, -dist * k),
+                    (u, w), 1.0, (1.0, 0.0, 0.0, 0.0))
         }
         // The floor, out of the picture's bottom edge: its lower band
-        // mirrored forward, dimming as it comes.
-        grid(24, 16) { u, s in
+        // mirrored forward, dimming as it comes. Its back edge follows the
+        // wall's relief exactly — on a landscape that edge is the near
+        // ground, so the water in the picture runs into the room's floor
+        // with no seam and no fold — and levels off to the room's own
+        // floor as it arrives at the viewer.
+        grid(relief == nil ? 24 : 96, 16) { u, s in
             let far = farAt(s)
+            let kw = reliefScale(u, 1.0)
+            let k = kw + (1 - kw) * s
             return (((u - 0.5) * 2 * tx, -ty, -1.0),
-                    ((u - 0.5) * 2 * pw, cy - ph, zAt(s)),
+                    ((u - 0.5) * 2 * pw * k, (cy - ph) * k, zAt(s) * k),
                     (u, 1 - (1 - far) * Self.kFloorReflect), far, Self.kFloorShade)
         }
         // The ceiling, out of its top edge.
@@ -467,6 +559,12 @@ final class EnvironmentRenderer: GLRenderer {
         }
 
         vertexCount = Int32(v.count / Self.kFloatsPerVertex)
+        FileHandle.standardError.write(Data(
+            ("[EnvironmentRenderer] mesh \(vertexCount) verts, "
+             + (relief == nil ? "flat wall (no depth map)"
+                : "relief \(relief!.cols)x\(relief!.rows) at \(Self.kRelief), "
+                  + "scale \(String(format: "%.3f", kMin))-\(String(format: "%.3f", kMax))")
+             + "\n").utf8))
         _glBindBuffer(GL_ARRAY_BUFFER, vbo)
         v.withUnsafeBytes { buf in
             _glBufferData(GL_ARRAY_BUFFER, buf.count, buf.baseAddress, GL_STATIC_DRAW)

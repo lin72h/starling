@@ -434,9 +434,74 @@ both should stay unbuilt at this geometry:**
 Both are worth revisiting only if windows ever sit ON the floor or right
 against the wall, which no arrangement here does.
 
-What is still not right: nothing reflects, nothing occludes. A window is
-still in front of every part of the room, however deep it claims to be.
-Tier 1's depth relief would give the room something to occlude with.
+### Phase 2b — tier 1, and what a photograph's depth map actually holds
+
+The pipeline is built and the bundled wallpaper's map is checked in:
+
+- `build/tools/wallpaper-depth.py` runs Depth Anything V2 Small through
+  ONNX Runtime on the CPU, about three seconds an image, and writes
+  `<wallpaper>.depth.png` beside the picture — white nearest. It runs out
+  of process, never in the shell, and the desktop gains no dependency: a
+  wallpaper with no map beside it keeps the flat wall.
+- `stage.sh` stages the maps with the pictures; the shell decodes one when
+  it finds it, crops it exactly as it crops the picture, reduces it to a
+  256×144 grid of floats and hands it to the renderer, which reads it on
+  the CPU while building the mesh. No vertex texture fetch, no GPU
+  readback, one rebuild.
+- **The displacement runs along the view ray.** A wall vertex is simply
+  scaled toward the eye by `1 − kRelief·depth`, so from the home eye
+  position the picture is pixel-identical to a flat wall however deep the
+  relief is. The shape exists only as parallax when the eye moves and as
+  real distance when something must pass in front of it — which is the
+  property that makes the whole thing safe to turn on.
+- The relief is faded out at the top and side edges so the wall still
+  meets the ceiling and side walls. **Not at the bottom**: the floor's
+  back edge follows the wall's relief instead and levels off as it
+  arrives at the viewer, so on a landscape the water runs into the room's
+  floor with no fold at exactly the place the eye is looking.
+
+#### And the finding, which changes what tier 2 is worth
+
+**A monocular depth map of a landscape photograph contains a ground
+plane and nothing else.** For the bundled wallpaper, 54% of the map is in
+the darkest tenth and the whole structure is a ramp across the bottom
+quarter — the water. Sky, bridge and headland all sit between 0.00 and
+0.19, because they genuinely are at infinity: the bridge is two
+kilometres away and a viewer moving their head gets no parallax off it
+at all. The model is not failing; the scene is like that.
+
+So the plan's open question — "whether a depth map from a photograph
+reads as a place or as a pop-up book" — has an answer for this class of
+image: **neither. It reads as a ground plane.** Measured against the
+flat wall at the same eye positions, the far scene parallaxes 45 px
+across a full pointer sweep and the near ground 52 px; the relief's
+scale factor runs 0.585 to 1.000 across the picture.
+
+That also settles tier 2. **Occlusion layers are not worth building for
+a wallpaper like this**, and the reason is the same one: there is no
+near subject to go behind. The only geometry in front of the wall is the
+ground directly beneath the viewer, which on screen is a thin strip at
+the picture's bottom edge — a window "occluded" by it would have a few
+pixels of its lower edge clipped, which reads as a glitch, not as depth.
+Tier 2 becomes interesting only for a wallpaper with a real near subject
+(a portrait, an interior, a close-up), and the pipeline above is what it
+would need.
+
+Two traps paid for here:
+
+- **A relief of all zeros is indistinguishable from no relief**, and
+  both look exactly like a working flat wall. The mesh builder logs the
+  range of the scale it computed (`scale 0.585-1.000`) and the wallpaper
+  loader logs the map's near value and mean, because an hour went to
+  measuring parallax that could not have been there — the depth map was
+  not being staged at all, so the shell never found it beside the
+  picture.
+- **Cross-correlation lies on smooth content.** Measuring the parallax
+  of the near water gave a 30 px bias against a known-shift calibration,
+  because a smooth luminance ramp correlates on the ramp and not on the
+  features, and because a band wide enough to include the side wall
+  mixes two different depths. Calibrate the estimator on the actual
+  content before believing it, and keep the band inside the picture.
 
 Three traps paid for:
 
@@ -461,13 +526,17 @@ Three traps paid for:
   versions of both are invisible here.
 - ~~Per-window glass tint from the scene's light buffer~~ — done, and
   with no light buffer: the wallpaper's own pixels answer it on the CPU.
-- Precomputed depth map for the bundled wallpaper; the relief mesh.
-- The optional depth helper for user wallpapers, run at set time.
+- ~~Precomputed depth map for the bundled wallpaper; the relief mesh~~ —
+  done, along with the helper (`build/tools/wallpaper-depth.py`), which
+  is what a user's own wallpaper would be run through at set time. What
+  it buys on a landscape is a ground plane; see Phase 2b.
 
 ### Phase 3 — camera moves and layers
 
 - Mission Control as dolly-back, spaces as pans, open/close along z.
-- Tier 2 occlusion layers, if tiers 0–1 earned them.
+- Tier 2 occlusion layers — **not earned by this wallpaper**, and the
+  reason is in Phase 2b: a landscape has no near subject for a window to
+  go behind. Worth revisiting only for a picture that does.
 
 ## Traps to expect
 

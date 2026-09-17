@@ -258,6 +258,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The wallpaper as a coarse colour grid — the 3D desktop's light
     /// source, since the room's back wall is the picture itself.
     var _wallpaperLight: (cells: [Color], cols: Int, rows: Int)? = nil
+    /// And as a depth grid, if a `.depth.png` was found beside it: the
+    /// shape the room's back wall is given. nil keeps the wall flat.
+    var _wallpaperDepth: (values: [Float], cols: Int, rows: Int)? = nil
 
     /// macOS-style fullscreen auto-hide: when a fullscreen window is on top,
     /// the desktop status bar and the window's title bar are hidden until the
@@ -1609,11 +1612,97 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     shell._windowChildCache.removeAll()
                     shell._syncSharedWallpaper()
                 }
+                shell._loadWallpaperDepth(jpg, aspect: phys.width / phys.height)
             } catch {
                 // Decode failed — the preset's gradient stand-in stays up.
             }
         }
         #endif
+    }
+
+    /// The relief: `<wallpaper>.depth.png` next to the picture, white
+    /// nearest. It turns the room's back wall from a flat photograph into
+    /// a surface with shape, so the bridge stands in front of the sky when
+    /// the eye moves. Generated out of process by
+    /// `build/tools/wallpaper-depth.py` and checked in beside the bundled
+    /// wallpapers; a picture with no map beside it simply keeps the flat
+    /// wall, which is what every user-set wallpaper gets until the helper
+    /// runs at set time.
+    func _loadWallpaperDepth(_ imagePath: String, aspect: Double) {
+        #if os(Linux)
+        let base = (imagePath as NSString).deletingPathExtension
+        let path = base + ".depth.png"
+        guard FileManager.default.fileExists(atPath: path),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return }
+        Task { @MainActor in
+            do {
+                let codec = try await FlutterSwiftBridge.instantiateImageCodec([UInt8](data))
+                let frame = try await codec.getNextFrame()
+                codec.dispose()
+                let image = frame.image
+                defer { image.dispose() }
+                guard let shell = _shellState else { return }
+                let grid = _DesktopShellState._depthGrid(
+                    rgba: try image.toByteData(format: .rawRgba),
+                    width: image.width, height: image.height, toAspect: aspect)
+                shell.setState { shell._wallpaperDepth = grid }
+                shell._applyEnvironmentDepth()
+            } catch {
+                // Undecodable — the wall stays flat, which is tier 0.
+            }
+        }
+        #endif
+    }
+
+    /// The depth map, cropped the way the picture is and reduced to a grid
+    /// the relief mesh samples. Kept TOP-DOWN (row 0 is the picture's top),
+    /// unlike the colour upload, because nothing here goes to GL: the
+    /// renderer reads it on the CPU when it builds the mesh.
+    static func _depthGrid(rgba: Data, width: Int, height: Int, toAspect target: Double)
+        -> (values: [Float], cols: Int, rows: Int)? {
+        let cols = 256, rows = 144
+        guard width > 0, height > 0, rgba.count >= width * height * 4 else { return nil }
+        // The same centre crop the picture gets, in pixels.
+        var cropW = width, cropH = height, x0 = 0, y0 = 0
+        let srcAspect = Double(width) / Double(height)
+        if srcAspect > target + 0.005 {
+            cropW = Int(Double(height) * target); x0 = (width - cropW) / 2
+        } else if srcAspect < target - 0.005 {
+            cropH = Int(Double(width) / target); y0 = (height - cropH) / 2
+        }
+        guard cropW >= cols, cropH >= rows else { return nil }
+        var out = [Float](repeating: 0, count: cols * rows)
+        rgba.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            guard let base = src.baseAddress else { return }
+            for gy in 0..<rows {
+                let py0 = y0 + gy * cropH / rows, py1 = y0 + (gy + 1) * cropH / rows
+                for gx in 0..<cols {
+                    let px0 = x0 + gx * cropW / cols, px1 = x0 + (gx + 1) * cropW / cols
+                    var sum = 0, n = 0
+                    let ys = max(1, (py1 - py0) / 4), xs = max(1, (px1 - px0) / 4)
+                    var y = py0
+                    while y < py1 {
+                        var x = px0
+                        while x < px1 {
+                            sum += Int(base.load(fromByteOffset: (y * width + x) * 4,
+                                                 as: UInt8.self))
+                            n += 1
+                            x += xs
+                        }
+                        y += ys
+                    }
+                    if n > 0 { out[gy * cols + gx] = Float(sum) / Float(n) / 255 }
+                }
+            }
+        }
+        // One line, once per wallpaper: a relief that is all zeros looks
+        // exactly like no relief at all, and that took a while to tell
+        // apart the first time.
+        let mean = out.reduce(0, +) / Float(out.count)
+        FileHandle.standardError.write(Data(String(
+            format: "[wallpaper] depth grid %dx%d  near %.2f  mean %.2f\n",
+            cols, rows, out.max() ?? 0, mean).utf8))
+        return (out, cols, rows)
     }
 
     /// The wallpaper reduced to a coarse grid of average colours: the
