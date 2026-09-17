@@ -672,6 +672,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// the host's; the arc and the environment read it.
     var _cameras3D: [Int: Camera3D] = [:]
     var _cameraQuantum3D: (Int, Int) = (0, 0)
+    /// The lean: where the eye has leaned to follow the pointer, and where
+    /// it is heading, each in [-1, 1] across the screen. Not part of the
+    /// camera — the walked camera is where the viewer STANDS, and a lean
+    /// must never accumulate into it.
+    var _lean3D: (x: Double, y: Double) = (0, 0)
+    var _lean3DTarget: (x: Double, y: Double) = (0, 0)
+    /// Runs only while the lean is catching up with the pointer, so a still
+    /// pointer costs nothing.
+    var _lean3DTicker: Ticker? = nil
+    var _lean3DClock: Double = 0
     #if os(Linux)
     var _environment: EnvironmentRenderer? = nil
     /// Drives the sky's cloud while the room is open.
@@ -4354,15 +4364,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
                 _constraintPointerMoved(e.position, echo: echo)
                 _dragPointerMoved(e.position)
+                _desktop3DNotePointer()
             },
             onPointerUp: { [self] e in
                 _lastPointer = e.position; _lastButtons = 0; _injectedPointer = nil
                 _dragPointerReleased(e.position)
+                _desktop3DNotePointer()
             },
             onPointerHover: { [self] e in
                 let echo = _isInjectEcho(e.position)
                 _lastPointer = e.position; _injectedPointer = nil
                 _constraintPointerMoved(e.position, echo: echo)
+                _desktop3DNotePointer()
             },
             behavior: .translucent,
             child: _buildShellRoot(context))

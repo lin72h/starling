@@ -217,13 +217,137 @@ extension _DesktopShellState {
         let home = _desktop3DHomeCamera(displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
         guard t > 0 else { return home }
-        if t >= 1 { return _camera3D }
+        if t >= 1 { return _desktop3DLeaned(_camera3D, t) }
         let c = _camera3D
-        return Camera3D(x: home.x + (c.x - home.x) * t,
-                        y: home.y + (c.y - home.y) * t,
-                        z: home.z + (c.z - home.z) * t,
-                        yaw: home.yaw + (c.yaw - home.yaw) * t,
-                        pitch: home.pitch + (c.pitch - home.pitch) * t)
+        return _desktop3DLeaned(
+            Camera3D(x: home.x + (c.x - home.x) * t,
+                     y: home.y + (c.y - home.y) * t,
+                     z: home.z + (c.z - home.z) * t,
+                     yaw: home.yaw + (c.yaw - home.yaw) * t,
+                     pitch: home.pitch + (c.pitch - home.pitch) * t), t)
+    }
+
+    // MARK: The lean — parallax from the pointer
+
+    /// A monitor shows one image to a still head, so the depth cues two
+    /// eyes and a moving head would give are both gone. What is left is
+    /// MOTION parallax, and the pointer is the only thing that moves.
+    ///
+    /// So the eye leans a few centimetres toward the pointer and keeps
+    /// looking at the same spot. That last part is what makes it parallax
+    /// rather than a pan: turning the camera slides everything together
+    /// and reads as a wobble, while TRANSLATING it slides the near things
+    /// against the far ones — the floor against the back wall, a near
+    /// window against a far one — which is the whole cue.
+    ///
+    /// How far the eye leans at the edge of the screen, in metres. Head
+    /// sway when someone leans to see around something is 5-15 cm; this is
+    /// the quiet end of that, because the pointer reaches the edge far
+    /// more often than a head does.
+    static let k3DLeanX = 0.055
+    static let k3DLeanY = 0.035
+    /// What the eye keeps its gaze on while it leans: the FAR WALL, not
+    /// the arc the windows sit on.
+    ///
+    /// This is the whole difference between parallax and a wobble, and it
+    /// was measured the wrong way round first. Leaning by `s` slides a
+    /// thing at distance `d` across the screen by `focal·s/d`, and turning
+    /// back toward the pivot slides everything by a uniform `focal·s/pivot`
+    /// the other way — so the net motion goes as `1/pivot − 1/d`, and
+    /// anything NEARER than the pivot moves one way while anything beyond
+    /// it moves the other. Pivot on the arc (3.7 m) and every piece of
+    /// furniture in the room is beyond it, so the far wall swung 3.7× as
+    /// far as the near sofa: the exact inverse of what leaning does, and
+    /// it reads as the room sliding rather than the eye moving.
+    ///
+    /// Pivot on the wall instead and the wall holds still while the room
+    /// swings across it, near things most — which is what a head actually
+    /// sees. Measured at the end of Phase 5.
+    static let k3DLeanPivotMin = 3.0
+    /// Seconds for the lean to cover most of the distance to a new
+    /// pointer position. Long enough that the scene glides rather than
+    /// snapping to every jitter, short enough that it is not lag.
+    static let k3DLeanTau = 0.11
+    /// Below this, the lean has arrived: stop the ticker rather than
+    /// rebuild the window stack forever for motion nobody can see.
+    static let k3DLeanSettled = 0.002
+
+    /// Apply the current lean to a camera. Scaled by the enter/leave
+    /// tween, so the flat desktop never leans and entering 3D brings the
+    /// parallax up with everything else.
+    func _desktop3DLeaned(_ c: Camera3D, _ t: Double) -> Camera3D {
+        let s = _lean3D.x * Self.k3DLeanX * t
+        // Screen y runs down; leaning toward the pointer means the eye
+        // drops when the pointer is low.
+        let u = -_lean3D.y * Self.k3DLeanY * t
+        guard s != 0 || u != 0 else { return c }
+        var out = c
+        // Right of the camera is (cos yaw, 0, sin yaw): forward is
+        // (sin yaw, 0, -cos yaw), the same convention walking uses.
+        out.x += cos(c.yaw) * s
+        out.z += sin(c.yaw) * s
+        out.y += u
+        // Turn back toward the pivot by the small angle the step subtends,
+        // so the spot being looked at stays put. Lean right, turn left.
+        // The picture wall is at z = 0, so the eye's own z IS its distance
+        // to what it is looking at, and walking toward the wall shortens
+        // the lever exactly as it should.
+        let pivot = max(Self.k3DLeanPivotMin, c.z)
+        out.yaw -= s / pivot
+        out.pitch -= u / pivot
+        return out
+    }
+
+    /// Called from the root Listener on every pointer event. Cheap and
+    /// silent unless the room is open: it only records where the lean is
+    /// heading, and the ticker does the moving.
+    func _desktop3DNotePointer() {
+        guard _desktop3DActive else { return }
+        // Frozen while a button is down. A window being dragged should
+        // follow the pointer and nothing else; a scene that leans under
+        // the drag makes the target move as you reach for it.
+        guard _lastButtons == 0 else { return }
+        let f = _pointerFraction
+        let want = (x: max(-1, min(1, (f.x - 0.5) * 2)),
+                    y: max(-1, min(1, (f.y - 0.5) * 2)))
+        guard abs(want.x - _lean3DTarget.x) > 0.001
+                || abs(want.y - _lean3DTarget.y) > 0.001 else { return }
+        _lean3DTarget = want
+        _desktop3DStartLean()
+    }
+
+    /// Ease the lean toward the pointer, one step per frame, and stop as
+    /// soon as it has arrived. Every tick that moves rebuilds the window
+    /// stack (the windows ride the same eye as the room), which is why
+    /// this must stop rather than idle.
+    func _desktop3DStartLean() {
+        if _lean3DTicker == nil {
+            _lean3DTicker = createTicker { [weak self] elapsed in
+                guard let self else { return }
+                let now = Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) * 1e-18
+                let dt = max(0, min(0.1, now - self._lean3DClock))
+                self._lean3DClock = now
+                guard self._desktop3DActive else {
+                    self._lean3DTicker?.stop()
+                    self._lean3D = (0, 0)
+                    self._lean3DTarget = (0, 0)
+                    return
+                }
+                let k = 1 - exp(-dt / Self.k3DLeanTau)
+                var next = (x: self._lean3D.x + (self._lean3DTarget.x - self._lean3D.x) * k,
+                            y: self._lean3D.y + (self._lean3DTarget.y - self._lean3D.y) * k)
+                let done = abs(next.x - self._lean3DTarget.x) < Self.k3DLeanSettled
+                    && abs(next.y - self._lean3DTarget.y) < Self.k3DLeanSettled
+                if done { next = self._lean3DTarget; self._lean3DTicker?.stop() }
+                self.setState { self._lean3D = next }
+                self._desktop3DPublishCamera()
+            }
+        }
+        if !(_lean3DTicker?.isActive ?? false) {
+            _lean3DClock = 0
+            _ = _lean3DTicker?.start()
+        }
     }
 
     /// World -> view: undo the camera's place and heading.

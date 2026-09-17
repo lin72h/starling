@@ -591,6 +591,78 @@ REST of the sky onto nine spherical harmonics for the ambient.
 - The bake warns when the sun is not on the window side. It was not,
   first time, and the room came out with 0% of its surfaces in daylight.
 
+### Phase 5 — the scene moves with the pointer (2026-09-17)
+
+A monitor shows one image to a still head, so both of the depth cues a
+person normally has — two eyes, and a head that moves — are gone. What
+is left is MOTION parallax, and on a desktop the only thing that moves
+is the pointer. So the eye now leans a few centimetres toward the
+pointer and keeps looking at the far wall: `_desktop3DLeaned` in
+`Shell/Desktop3D.swift`, folded into `_desktop3DEffectiveCamera`, so the
+room and the windows ride the same eye and cannot disagree.
+
+- **A translation, not a pan.** Turning the camera slides everything
+  together and reads as a wobble. Translating it slides the near things
+  against the far ones, which is the entire cue.
+- **It costs nothing at rest.** The root Listener only records where the
+  lean is heading; a ticker eases toward it (τ = 0.11 s) and STOPS when
+  it arrives, because every moving frame rebuilds the window stack.
+- **Frozen while a button is down**, so a window being dragged does not
+  have the room swimming under it.
+
+#### Results, measured on the dev box (eDP 2560x1600 @ scale 2)
+
+Pointer swept from x = 200 to x = 1080 logical (69% of the screen),
+which is 7.6 cm of lean. Shift of tracked features between the two
+frames, by 2D template match:
+
+| Feature | Distance | Shift |
+|---|---|---|
+| back wall, window frames | ~9 m | +2 px |
+| left armchair | ~6 m | −4 px |
+| coffee table rug | ~6 m | −7 px |
+| plant on the side table | ~5 m | −19 px |
+| an app window on the arc | 3.7 m | −54 to −95 px |
+
+The wall holds still and everything nearer swings across it, more the
+nearer it is. A tilted window's two ends move by different amounts
+(−95 at the near edge, −66 at the far one), which is the pane turning
+rather than sliding. A click with the lean active still focuses the
+window under the pointer.
+
+#### The pivot was wrong first, and the measurement is what caught it
+
+Leaning by `s` slides a thing at distance `d` across the screen by
+`focal·s/d`; turning back toward the pivot to hold the gaze slides
+everything by a uniform `focal·s/pivot` the other way. So net motion
+goes as `1/pivot − 1/d`, and the pivot is where the scene is nailed
+down.
+
+Pivoting on the arc (3.7 m, the obvious choice — it is where the
+windows are) put every piece of furniture in the room BEYOND the pivot,
+so the far wall swung 3.7× as far as the near sofa: +26 px at the wall
+against +7 px at the side table. Every shift was in the same direction
+and the gradient ran the wrong way, which is the exact inverse of what
+leaning does and reads as the room sliding rather than the eye moving.
+It looks plausible in a still frame and wrong in motion.
+
+The pivot belongs on the far wall — `max(3, camera.z)`, since the
+picture wall is at z = 0 — and then the numbers in the table above fall
+out. **A parallax that is merely present is not the same as a parallax
+that is correct**; the only way to tell them apart is to measure the
+shift of near and far features separately and check the ORDER.
+
+#### Still to decide
+
+The focused window is not exempt. The crispness rule in the design says
+the focused window should be drawn with its transform skipped, at 1:1;
+what is implemented is that only a FULLSCREEN window stays flat, and
+everything else is posed. So the window being read leans with the rest,
+~54 px across a full pointer sweep — invisible while typing, because a
+parked pointer means a still scene, but it does undo the pixel-exactness
+that stepping up to a window buys. Damping the lean while the pointer is
+over the focused window is the cheap answer if it proves annoying.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
