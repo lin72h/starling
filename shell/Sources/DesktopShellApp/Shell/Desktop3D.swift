@@ -90,6 +90,16 @@ struct RoomLight: Equatable {
     /// How far off the room the window reads as floating, 0 to 1 with the
     /// enter/leave tween. Scales the drop shadow.
     var separation: Double
+    /// What the pane's four edges catch of the room's light, lit by the
+    /// same sky as the room itself. A pane with no edge is infinitely
+    /// thin and reads as a decal stuck to the view; give it a few
+    /// millimetres that take the light and it becomes an object. The
+    /// side facing the windows comes up bright and the side facing away
+    /// stays dark, which is the whole cue.
+    var edgeTop: Color = Color(0x00000000)
+    var edgeRight: Color = Color(0x00000000)
+    var edgeBottom: Color = Color(0x00000000)
+    var edgeLeft: Color = Color(0x00000000)
 }
 
 extension _DesktopShellState {
@@ -552,6 +562,84 @@ extension _DesktopShellState {
     /// The distance at which haze reaches its maximum.
     static let k3DHazeFar = 9.0
 
+    /// What the pane's edge is made of, as the fraction of the light
+    /// falling on it that it returns. This is an albedo and it has to be
+    /// one: with the edge treated as a perfect reflector, the sun (whose
+    /// baked colour runs to 9.9) drove the two lit sides clean past white
+    /// and the pane came out with a hard graphic border instead of a
+    /// bevel. At 0.55 — anodised metal, near enough — the four sides land
+    /// at 0.85, 0.79, 0.31 and 0.21, which is a lit edge and a dark one.
+    static let k3DEdgeAlbedo = 0.55
+
+    /// What the baked sky gives a surface facing `n`, in exactly the terms
+    /// the room's own shader uses — the nine spherical-harmonic
+    /// coefficients, the share of the sky a room can actually see, the
+    /// bounce off the floor that no sky supplies, and the sun. Mirrored
+    /// rather than shared because the room is drawn on the raster thread
+    /// in GLSL and this is one number per window on the platform thread;
+    /// if one is ever changed the other has to follow, or the panes will
+    /// be lit by a different day than the room they hang in.
+    func _desktop3DSkyLight(_ nx: Double, _ ny: Double, _ nz: Double) -> [Double] {
+        #if os(Linux)
+        guard let sh = _roomAsset?.mesh.sh, sh.count == 27,
+              let sun = _roomAsset?.mesh.sunDir,
+              let sunCol = _roomAsset?.mesh.sunColour else { return [0.3, 0.3, 0.3] }
+        let c1 = 0.429043, c2 = 0.511664, c3 = 0.743125, c4 = 0.886227, c5 = 0.247708
+        // How much of the sky this room can see facing that way: the walls
+        // block most of it and the windows are where it gets in.
+        let toWin = max(-nz, 0)
+        let down = min(1, max(0, 0.5 - ny * 0.5))
+        let ndl = max(0, nx * Double(sun.0) + ny * Double(sun.1) + nz * Double(sun.2))
+        let sunRGB = [Double(sunCol.0), Double(sunCol.1), Double(sunCol.2)]
+        let bounceRGB = [1.0, 0.90, 0.76]
+        var out = [Double](repeating: 0, count: 3)
+        for k in 0..<3 {
+            func s(_ i: Int) -> Double { Double(sh[i * 3 + k]) }
+            let irr = c1 * s(8) * (nx * nx - ny * ny)
+                + c3 * s(6) * nz * nz
+                + c4 * s(0) - c5 * s(6)
+                + 2 * c1 * (s(4) * nx * ny + s(7) * nx * nz + s(5) * ny * nz)
+                + 2 * c2 * (s(3) * nx + s(1) * ny + s(2) * nz)
+            let sky = max(0, irr) * (0.17 + 0.62 * toWin) * 0.318
+            let bounce = bounceRGB[k] * (0.10 + 0.26 * down) * (0.35 + 0.06 * sunRGB[1])
+            out[k] = sky + bounce + sunRGB[k] * ndl * 0.318
+        }
+        return out
+        #else
+        return [0.3, 0.3, 0.3]
+        #endif
+    }
+
+    /// The four edges of a pane at this heading, lit by the room's sky.
+    /// The pane hangs in the open with nothing to shadow it, so the sun
+    /// term is a plain N·L — the only thing that varies is which way each
+    /// edge faces.
+    ///
+    /// Depends on the pane's YAW and nothing else, so it survives every
+    /// step the viewer takes and only changes when the window is moved
+    /// around the arc. That matters: this feeds `_windowChildCache`.
+    func _desktop3DPaneEdges(yaw: Double)
+        -> (top: Color, right: Color, bottom: Color, left: Color) {
+        // The pane's normal is (sin yaw, 0, cos yaw), so its right-hand
+        // edge faces (cos yaw, 0, -sin yaw) and its top faces straight up.
+        let rx = cos(yaw), rz = -sin(yaw)
+        func edge(_ nx: Double, _ ny: Double, _ nz: Double) -> Color {
+            let l = _desktop3DSkyLight(nx, ny, nz)
+            func ch(_ x: Double) -> Double {
+                // The room's own filmic shoulder, so an edge in a sun
+                // patch rolls off instead of clipping to white.
+                let v = x * Self.k3DEdgeAlbedo
+                return min(1, max(0, (v / (v + 0.78)) * 1.62))
+            }
+            // Quantised for the same reason the rest of the light is: an
+            // unrounded colour would miss the widget cache forever.
+            func q(_ x: Double) -> Double { (x * 32).rounded() / 32 }
+            return Color(alpha: 1, red: q(ch(l[0])), green: q(ch(l[1])), blue: q(ch(l[2])))
+        }
+        return (top: edge(0, 1, 0), right: edge(rx, 0, rz),
+                bottom: edge(0, -1, 0), left: edge(-rx, 0, -rz))
+    }
+
     /// The light behind one window: the average colour of the part of the
     /// picture it stands in front of, plus the haze its distance earns.
     /// The sampling point is where the ray from the eye through the
@@ -602,10 +690,13 @@ extension _DesktopShellState {
         let haze = Self.k3DHazeMax
             * min(1, max(0, (dist - d1) / (Self.k3DHazeFar - d1)))
         func q(_ x: Double) -> Double { (x * 24).rounded() / 24 }
+        let edges = _desktop3DPaneEdges(yaw: p.yaw)
         return RoomLight(
             color: Color(alpha: 1.0, red: q(r / n), green: q(g / n), blue: q(b / n)),
             haze: (haze * 40).rounded() / 40,
-            separation: (t * 20).rounded() / 20)
+            separation: (t * 20).rounded() / 20,
+            edgeTop: edges.top, edgeRight: edges.right,
+            edgeBottom: edges.bottom, edgeLeft: edges.left)
         #else
         return nil
         #endif

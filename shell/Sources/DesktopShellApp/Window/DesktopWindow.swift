@@ -11,6 +11,12 @@ import Foundation
 /// Clicking anywhere in the window brings it to front.
 class DesktopWindow: StatelessWidget {
 
+    /// How thick the pane's edge reads, in logical pixels. A window is
+    /// about 2.6 m of room per 1280 px, so two logical pixels is roughly
+    /// four millimetres of glass — a pane, not a sheet of paper, and not
+    /// a frame either.
+    static let kPaneEdge = 2.0
+
     private func _buildContentArea(_ context: any BuildContext) -> Widget {
         guard let texId = windowInfo.textureId else {
             return windowInfo.appBuilder(context)
@@ -331,6 +337,44 @@ class DesktopWindow: StatelessWidget {
                     )
                 )
             )
+        }
+
+        // The pane's edge. A window in the room is a slab of glass a few
+        // millimetres thick, and the edge is the only thing that says so:
+        // a quad with no edge is infinitely thin and reads as a decal
+        // stuck over the view, however well it is placed and lit. Each of
+        // the four sides is lit by the same sky as the room, so the side
+        // turned toward the windows comes up bright and the side turned
+        // away stays dark — which is what the eye reads as thickness.
+        //
+        // Appended BEFORE the haze so a distant pane's edge is veiled
+        // along with the rest of it, and wrapped in IgnorePointer for the
+        // same reason the haze is: a ColoredBox hit-tests opaque even at
+        // alpha 0 and would eat every click meant for the client.
+        if let light = roomLight, !isFullscreen {
+            let w = Self.kPaneEdge
+            // Kept clear of the rounded corners, where a straight strip
+            // would cut the curve.
+            let inset = cornerRadius
+            func strip(_ c: Color, left: Double? = nil, top: Double? = nil,
+                       right: Double? = nil, bottom: Double? = nil,
+                       width: Double? = nil, height: Double? = nil) -> Widget {
+                Positioned(
+                    left: left, top: top, right: right, bottom: bottom,
+                    width: width, height: height,
+                    child: IgnorePointer(
+                        child: ColoredBox(color: c, child: SizedBox(expand: ()))
+                    )
+                )
+            }
+            stackChildren.append(
+                strip(light.edgeTop, left: inset, top: 0, right: inset, height: w))
+            stackChildren.append(
+                strip(light.edgeBottom, left: inset, right: inset, bottom: 0, height: w))
+            stackChildren.append(
+                strip(light.edgeLeft, left: 0, top: inset, bottom: inset, width: w))
+            stackChildren.append(
+                strip(light.edgeRight, top: inset, right: 0, bottom: inset, width: w))
         }
 
         // Aerial perspective: a window further into the room is veiled

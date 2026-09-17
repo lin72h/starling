@@ -663,6 +663,63 @@ parked pointer means a still scene, but it does undo the pixel-exactness
 that stepping up to a window buys. Damping the lean while the pointer is
 over the focused window is the cheap answer if it proves annoying.
 
+### Phase 6 — the panes get an edge (2026-09-17)
+
+A window was a quad with no thickness, which is a decal: whatever is
+behind it, it reads as stuck over the view rather than standing in the
+room. It now has an edge — four strips two logical pixels wide, about
+four millimetres of glass at the room's scale — and each one is lit by
+the same sky as the room.
+
+`_desktop3DSkyLight` mirrors the room's own fragment shader in Swift:
+the nine spherical-harmonic coefficients, the share of the sky a room
+can actually see, the bounce off the floor that no sky supplies, and
+the sun. `_desktop3DPaneEdges` runs it for the four edge normals — top
+and bottom straight up and down, left and right from the pane's yaw —
+and hands the colours to `DesktopWindow` in `RoomLight`.
+
+It depends on the pane's YAW and nothing else, so it survives every step
+the viewer takes and only changes when a window is moved around the arc.
+That matters: this feeds `_windowChildCache`.
+
+#### Results
+
+The room's sun is up and to the left (its baked direction is
+−0.35, +0.45, −0.82), so a pane facing down the hall should be bright
+along its top and left and dark along its bottom and right. Predicted
+from the baked sky, then measured off the screen:
+
+| Edge | Predicted | Measured |
+|---|---|---|
+| top | 216 | 206 |
+| left | 201 | 191 |
+| bottom | 79 | 81 |
+| right | 53 | 59 |
+
+The two lit edges come back a little under prediction because the haze
+veils them, which is what it is for. Turning the camera 21° left the
+lit edge at 179 — a diffuse edge belongs to the pane and the room's
+light, not to where the viewer is standing, and it behaves that way.
+
+#### The edge needs an albedo, and it is not optional
+
+Treating the edge as a perfect reflector — returning all the light that
+falls on it — drove the two lit sides clean past white, because the
+baked sun colour runs to 9.9 and nothing was absorbing any of it. The
+pane came out with a hard graphic border on two sides, which is worse
+than no edge at all: a border is a 2D decoration and the whole point was
+to stop the pane reading as 2D. At 0.55, which is about anodised metal,
+the four sides land at 0.85, 0.79, 0.31 and 0.21 and it reads as a
+bevel. The room's own surfaces never hit this because their albedo comes
+out of a texture and their sunlight is multiplied by a traced visibility.
+
+#### Not yet measured
+
+The left and right edges depend on the pane's yaw, and that is derived
+rather than confirmed: every window in the test scene faces down the
+hall, because nothing in the shell can yet move a window around the arc.
+The grab is what would let it be measured.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
