@@ -104,17 +104,15 @@ extension _DesktopShellState {
     /// 1280-pixel window comes out 2.6 m wide and reads 1:1 from about
     /// 1.8 m — a step and a half away, which is where you would stand to
     /// read something on a wall.
-    static let k3DMetresPerPx = 0.00205
-    /// How far the viewer may move from the spot the photograph was taken
-    /// from, in metres. A reconstruction only holds what one frame saw:
-    /// wander far enough and its own edge comes into view, and behind
-    /// every near thing is a hole the picture has nothing to fill with.
-    /// This is a lean, not an expedition.
-    static let k3DRoam = 2.2
+    static let k3DMetresPerPx = 0.0019
+    /// Where the viewer stands when the room opens: back in the room,
+    /// looking at the windows, at eye height.
+    static let k3DEyeHeight = 1.68
+    static let k3DHomeZ = 9.3
 
     /// Where the windows are put when the room first lays them out, and
     /// how wide the fan is.
-    static let k3DArcRadius = 2.9
+    static let k3DArcRadius = 3.7
     static let k3DArcSpread = 52.0 * Double.pi / 180
 
     /// Walking. One key press (or repeat) is one step.
@@ -136,12 +134,10 @@ extension _DesktopShellState {
         (host.width / 2) / tan(Self.k3DFovX / 2)
     }
 
-    /// Home is the spot the photograph was taken from: the origin,
-    /// looking the way the camera was pointed. From exactly here the
-    /// reconstruction IS the photograph, which is what makes entering the
-    /// scene continuous with the flat desktop and leaving it exact.
+    /// Where the viewer stands when the room opens: back in the room with
+    /// the windows ahead, at eye height.
     func _desktop3DHomeCamera(_ host: Rect) -> Camera3D {
-        Camera3D(x: 0, y: 0, z: 0, yaw: 0, pitch: 0)
+        Camera3D(x: 0, y: Self.k3DEyeHeight, z: Self.k3DHomeZ, yaw: 0, pitch: 0)
     }
 
     /// Where a window hangs when it is simply showing its 2D rect: the
@@ -370,12 +366,11 @@ extension _DesktopShellState {
         default:         return false
         }
         _desktop3DLog("key \(usage) -> \(c.x),\(c.z) yaw \(c.yaw)")
-        // Stay near the spot the photograph was taken from. Wander far
-        // and the reconstruction's holes open up, because the picture
-        // holds no information about what is behind what.
-        c.x = min(Self.k3DRoam, max(-Self.k3DRoam, c.x))
-        c.y = min(Self.k3DRoam, max(-Self.k3DRoam, c.y))
-        c.z = min(Self.k3DRoam * 1.6, max(-Self.k3DRoam, c.z))
+        // Stay inside the room, and out of the walls.
+        let m = 0.45
+        c.x = min(Room3D.halfW - m, max(-Room3D.halfW + m, c.x))
+        c.y = min(Room3D.height - 0.3, max(0.5, c.y))
+        c.z = min(Room3D.depth - m, max(m, c.z))
         c.pitch = min(1.2, max(-1.2, c.pitch))
         setState { _camera3D = c }
         _desktop3DPublishCamera()
@@ -601,12 +596,13 @@ extension _DesktopShellState {
         renderer.glProcAddressResolver = registry.glProcAddressResolver
         let source = wallpaperTextureId
         renderer.sourceTexture = { [weak registry] in registry?.sourceTexture(id: source) }
-        renderer.depthGrid = _wallpaperDepth
         let id = registry.registerTexture(engine: wl.engine)
         registry.setGLRenderer(id: id, renderer: renderer)
         _environment = renderer
         environmentTextureId = id
         _startSceneClock()
+        _loadRoomAsset()
+        _applyRoomAsset()
         _desktop3DPublishCamera()
         registry.markGLTextureDirty(engine: wl.engine, id: id)
         return true
@@ -641,13 +637,53 @@ extension _DesktopShellState {
         #endif
     }
 
-    /// The relief arrived after the room was built (the depth map decodes
-    /// on its own schedule) — hand it over and let the mesh rebuild.
-    func _applyEnvironmentDepth() {
+    /// Read the baked room: the mesh, and the two atlases it is textured
+    /// with. Decoded off the platform thread's critical path the same way
+    /// the wallpaper is, then handed to the renderer, which uploads it at
+    /// the next frame. Missing files leave the scene empty rather than
+    /// failing — the room is an asset, not a dependency.
+    func _loadRoomAsset() {
         #if os(Linux)
-        guard let env = _environment, let registry = drmTextureRegistry,
-              let wl = waylandIntegration, environmentTextureId >= 0 else { return }
-        env.depthGrid = _wallpaperDepth
+        guard !_roomLoadStarted else { return }
+        _roomLoadStarted = true
+        guard let meshPath = Self.dataFilePath("room/room.mesh")
+                ?? ["Resources/Room/room.mesh"].first(where: {
+                    FileManager.default.fileExists(atPath: $0) }),
+              let mesh = Room3D.loadMesh(meshPath) else {
+            FileHandle.standardError.write(Data(
+                "[room] no baked room found — run build/tools/room-import.py\n".utf8))
+            return
+        }
+        let dir = (meshPath as NSString).deletingLastPathComponent
+        Task { @MainActor in
+            func decode(_ name: String) async -> (data: [UInt8], w: Int, h: Int)? {
+                guard let d = try? Data(contentsOf: URL(
+                    fileURLWithPath: dir + "/" + name)) else { return nil }
+                guard let codec = try? await FlutterSwiftBridge
+                        .instantiateImageCodec([UInt8](d)),
+                      let frame = try? await codec.getNextFrame() else { return nil }
+                codec.dispose()
+                let image = frame.image
+                defer { image.dispose() }
+                guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+                return ([UInt8](bytes), image.width, image.height)
+            }
+            guard let diff = await decode("room-diffuse.png"),
+                  let arm = await decode("room-arm.png"),
+                  let shell = _shellState else { return }
+            shell._roomAsset = (mesh, diff, arm)
+            shell._applyRoomAsset()
+        }
+        #endif
+    }
+
+    /// Hand the room to the renderer, whenever both exist.
+    func _applyRoomAsset() {
+        #if os(Linux)
+        guard let env = _environment, let asset = _roomAsset,
+              let registry = drmTextureRegistry, let wl = waylandIntegration,
+              environmentTextureId >= 0 else { return }
+        env.roomAsset = asset
         registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId)
         #endif
     }

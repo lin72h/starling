@@ -74,6 +74,9 @@ private typealias GLRenderbufferStorageFunc = @convention(c) (UInt32, UInt32, In
 private typealias GLFramebufferRenderbufferFunc = @convention(c) (UInt32, UInt32, UInt32, UInt32) -> Void
 private typealias GLDepthFuncFunc = @convention(c) (UInt32) -> Void
 private typealias GLDepthMaskFunc = @convention(c) (UInt8) -> Void
+private typealias GLDrawElementsFunc = @convention(c) (UInt32, Int32, UInt32, UnsafeRawPointer?) -> Void
+private typealias GLGenTexturesFunc = @convention(c) (Int32, UnsafeMutablePointer<UInt32>?) -> Void
+private typealias GLTexImage2DFunc = @convention(c) (UInt32, Int32, Int32, Int32, Int32, Int32, UInt32, UInt32, UnsafeRawPointer?) -> Void
 private typealias GLBindFramebufferFunc = @convention(c) (UInt32, UInt32) -> Void
 private typealias GLFramebufferTexture2DFunc = @convention(c) (UInt32, UInt32, UInt32, UInt32, Int32) -> Void
 private typealias GLViewportFunc = @convention(c) (Int32, Int32, Int32, Int32) -> Void
@@ -120,6 +123,10 @@ private let GL_DEPTH_COMPONENT24: UInt32 = 0x81A6
 private let GL_DEPTH_BUFFER_BIT: UInt32 = 0x0100
 private let GL_LEQUAL: UInt32 = 0x0203
 private let GL_CCW: UInt32 = 0x0901
+private let GL_ELEMENT_ARRAY_BUFFER: UInt32 = 0x8893
+private let GL_UNSIGNED_INT: UInt32 = 0x1405
+private let GL_RGBA: UInt32 = 0x1908
+private let GL_UNSIGNED_BYTE: UInt32 = 0x1401
 
 /// What the platform thread last decided the camera should be, and the
 /// hall it is standing in. Read on the raster thread under the renderer's
@@ -232,34 +239,6 @@ final class EnvironmentRenderer: GLRenderer {
     /// wallpaper's texture name and size, or nil while it is not uploaded.
     var sourceTexture: (() -> (name: UInt32, width: Int, height: Int)?)?
 
-    /// The picture's relief, white nearest, top-down — read on the CPU
-    /// when the mesh is built, never by GL, so no vertex texture fetch is
-    /// needed and the whole thing costs one rebuild. nil is a flat wall
-    /// (tier 0), which is what a wallpaper with no depth map gets.
-    ///
-    /// Written on the platform thread and read on the raster thread, so
-    /// it lives under the same lock the camera does and the mesh builder
-    /// takes a snapshot of it rather than reading it as it draws.
-    var depthGrid: (values: [Float], cols: Int, rows: Int)? {
-        get { cameraLock.lock(); defer { cameraLock.unlock() }; return _depthGrid }
-        set {
-            cameraLock.lock()
-            _depthGrid = newValue
-            _meshStale = true
-            cameraLock.unlock()
-            dirty = true
-        }
-    }
-    private var _depthGrid: (values: [Float], cols: Int, rows: Int)?
-    private var _meshStale = false
-
-    /// True once, after the relief has changed: the mesh has to be rebuilt.
-    private func takeMeshStale() -> Bool {
-        cameraLock.lock(); defer { cameraLock.unlock() }
-        let was = _meshStale
-        _meshStale = false
-        return was
-    }
 
     /// Seconds since the scene opened. The sky and the water move with
     /// it, so the place is weather rather than a photograph.
@@ -278,8 +257,27 @@ final class EnvironmentRenderer: GLRenderer {
 
     private let cameraLock = NSLock()
     private var _camera = EnvironmentCamera()
-    /// Rebuild the room when the hall's shape changes.
-    private var meshKey: Double = 0
+
+    /// The baked room, and the two atlases it is textured with. Handed
+    /// over by the shell once the files are read; the renderer uploads
+    /// them on the raster thread at the next frame.
+    var roomAsset: (mesh: Room3D.Asset,
+                    diffuse: (data: [UInt8], w: Int, h: Int),
+                    arm: (data: [UInt8], w: Int, h: Int))? {
+        get { cameraLock.lock(); defer { cameraLock.unlock() }; return _room }
+        set {
+            cameraLock.lock(); _room = newValue; _roomStale = true; cameraLock.unlock()
+            dirty = true
+        }
+    }
+    private var _room: (mesh: Room3D.Asset,
+                        diffuse: (data: [UInt8], w: Int, h: Int),
+                        arm: (data: [UInt8], w: Int, h: Int))?
+    private var _roomStale = false
+    private var ibo: UInt32 = 0
+    private var indexCount: Int32 = 0
+    private var texDiffuse: UInt32 = 0, texArm: UInt32 = 0
+    private var uDiffuse: Int32 = -1, uArm: Int32 = -1
 
     // GL objects (raster thread only)
     private var glReady = false
@@ -290,8 +288,9 @@ final class EnvironmentRenderer: GLRenderer {
     private var fbo: UInt32 = 0
     private var vertexCount: Int32 = 0
     private var mipmapped: Set<UInt32> = []
-    private var aPos: Int32 = -1, aUV: Int32 = -1, aMat: Int32 = -1
-    private var aDisp: Int32 = -1, uTime: Int32 = -1
+    private var aPos: Int32 = -1, aNrm: Int32 = -1, aUV: Int32 = -1
+    private var aAO: Int32 = -1, aSun: Int32 = -1, aMat: Int32 = -1
+    private var uTime: Int32 = -1
     private var uEye: Int32 = -1, uEyeV: Int32 = -1, uFade: Int32 = -1
     private var uLight: Int32 = -1
     private var uProj: Int32 = -1, uView: Int32 = -1, uT: Int32 = -1, uTex: Int32 = -1
@@ -332,6 +331,9 @@ final class EnvironmentRenderer: GLRenderer {
     private var _glFramebufferRenderbuffer: GLFramebufferRenderbufferFunc!
     private var _glDepthFunc: GLDepthFuncFunc!
     private var _glDepthMask: GLDepthMaskFunc!
+    private var _glDrawElements: GLDrawElementsFunc!
+    private var _glGenTextures: GLGenTexturesFunc!
+    private var _glTexImage2D: GLTexImage2DFunc!
     private var depthRb: UInt32 = 0
     private var _glBindFramebuffer: GLBindFramebufferFunc!
     private var _glFramebufferTexture2D: GLFramebufferTexture2DFunc!
@@ -400,13 +402,8 @@ final class EnvironmentRenderer: GLRenderer {
         _glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         if let src = sourceTexture?(), src.width > 0, src.height > 0 {
-            // The hall's shape comes from the shell with the camera, so a
-            // change of output (or of wallpaper aspect) rebuilds the mesh.
-            let key = cam.pictureWidth + cam.pictureHeight * 7 + cam.roomDepth * 31
-            if key != meshKey || takeMeshStale() {
-                buildMesh(cam)
-                meshKey = key
-            }
+            uploadRoomIfNeeded()
+            guard indexCount > 0 else { return }
 
             _glActiveTexture(GL_TEXTURE0)
             _glBindTexture(GL_TEXTURE_2D, src.name)
@@ -435,8 +432,8 @@ final class EnvironmentRenderer: GLRenderer {
                 _glVertexAttribPointer(UInt32(loc), n, GL_FLOAT, 0, stride,
                                        UnsafeRawPointer(bitPattern: offsetFloats * MemoryLayout<Float>.size))
             }
-            attrib(aPos, 3, 0); attrib(aUV, 2, 3); attrib(aMat, 1, 5)
-            attrib(aDisp, 1, 6)
+            attrib(aPos, 3, 0); attrib(aNrm, 3, 3); attrib(aUV, 2, 6)
+            attrib(aAO, 1, 8); attrib(aSun, 1, 9); attrib(aMat, 1, 10)
 
             var proj = Self.projection(aspect: Double(width) / Double(height),
                                        tanHalfFovX: cam.tanHalfFovX)
@@ -456,12 +453,20 @@ final class EnvironmentRenderer: GLRenderer {
             var light = [Float(cam.lightR), Float(cam.lightG), Float(cam.lightB)]
             if uLight >= 0 { _glUniform3fv?(uLight, 1, &light) }
             _glUniform1i(uTex, 0)
-            _glDrawArrays(GL_TRIANGLES, 0, vertexCount)
+            _glActiveTexture(GL_TEXTURE0 + 1)
+            _glBindTexture(GL_TEXTURE_2D, texDiffuse)
+            _glUniform1i(uDiffuse, 1)
+            _glActiveTexture(GL_TEXTURE0 + 2)
+            _glBindTexture(GL_TEXTURE_2D, texArm)
+            _glUniform1i(uArm, 2)
+            _glActiveTexture(GL_TEXTURE0)
+            _glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo)
+            _glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nil)
+            _glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
             if !loggedDraw {
                 loggedDraw = true
                 let err = _glGetError()
-                let msg = "[EnvironmentRenderer] draw \(vertexCount) verts, glError \(err), "
-                    + "attribs \(aPos) \(aUV) \(aMat)\n"
+                let msg = "[EnvironmentRenderer] draw \(vertexCount) verts, glError \(err)\n"
                 FileHandle.standardError.write(Data(msg.utf8))
             }
             _glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -545,24 +550,53 @@ final class EnvironmentRenderer: GLRenderer {
         return m
     }
 
-    /// Vertices are pos(3) uv(2) mat(1).
-    static let kFloatsPerVertex = Scene3D.floatsPerVertex
+    /// Vertices are pos(3) nrm(3) uv(2) ao(1) sun(1) mat(1).
+    static let kFloatsPerVertex = 11
 
-    /// Build the scene once: the wallpaper put back into three dimensions
-    /// by its own depth map. `Scene3D` owns the geometry.
-    private func buildMesh(_ cam: EnvironmentCamera) {
-        let v = Scene3D.build(grid: depthGrid, tanHalfFovX: cam.tanHalfFovX,
-                              aspect: Double(width) / Double(height))
-        vertexCount = Int32(v.count / Self.kFloatsPerVertex)
-        let what = depthGrid == nil ? "flat (no depth map)"
-            : "depth \(Int(Scene3D.near))m to \(Int(Scene3D.far))m"
-        FileHandle.standardError.write(Data(
-            "[EnvironmentRenderer] scene \(vertexCount) verts, \(what)\n".utf8))
+    /// Upload the baked room the first time it arrives. Everything about
+    /// it is already decided — geometry, texture coordinates, the light —
+    /// so this is a copy and nothing more.
+    private func uploadRoomIfNeeded() {
+        cameraLock.lock()
+        let stale = _roomStale
+        _roomStale = false
+        let room = _room
+        cameraLock.unlock()
+        guard stale, let r = room else { return }
+
         _glBindBuffer(GL_ARRAY_BUFFER, vbo)
-        v.withUnsafeBytes { buf in
+        r.mesh.vertices.withUnsafeBytes { buf in
             _glBufferData(GL_ARRAY_BUFFER, buf.count, buf.baseAddress, GL_STATIC_DRAW)
         }
         _glBindBuffer(GL_ARRAY_BUFFER, 0)
+        if ibo == 0 { _glGenBuffers(1, &ibo) }
+        _glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo)
+        r.mesh.indices.withUnsafeBytes { buf in
+            _glBufferData(GL_ELEMENT_ARRAY_BUFFER, buf.count, buf.baseAddress, GL_STATIC_DRAW)
+        }
+        _glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+        vertexCount = Int32(r.mesh.vertices.count / r.mesh.floatsPerVertex)
+        indexCount = Int32(r.mesh.indices.count)
+
+        func upload(_ name: inout UInt32, _ t: (data: [UInt8], w: Int, h: Int)) {
+            if name == 0 { _glGenTextures(1, &name) }
+            _glBindTexture(GL_TEXTURE_2D, name)
+            t.data.withUnsafeBytes { buf in
+                _glTexImage2D(GL_TEXTURE_2D, 0, Int32(GL_RGBA), Int32(t.w), Int32(t.h),
+                              0, GL_RGBA, GL_UNSIGNED_BYTE, buf.baseAddress)
+            }
+            _glGenerateMipmap(GL_TEXTURE_2D)
+            _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+            _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            _glBindTexture(GL_TEXTURE_2D, 0)
+        }
+        upload(&texDiffuse, r.diffuse)
+        upload(&texArm, r.arm)
+        let msg = "[EnvironmentRenderer] room \(vertexCount) verts, "
+            + "\(indexCount / 3) tris, atlas \(r.diffuse.w)x\(r.diffuse.h)\n"
+        FileHandle.standardError.write(Data(msg.utf8))
     }
 
     // MARK: GL setup
@@ -570,38 +604,59 @@ final class EnvironmentRenderer: GLRenderer {
     private static let vertexSource = """
     #version 100
     attribute vec3 aPos;
+    attribute vec3 aNrm;
     attribute vec2 aUV;
+    attribute float aAO;
+    attribute float aSun;
     attribute float aMat;
-    attribute float aDisp;
     uniform mat4 uProj;
     uniform mat4 uView;
     uniform vec3 uEyeV;
+    varying vec3 vPos;
+    varying vec3 vNrm;
     varying vec2 vUV;
+    varying float vAO;
+    varying float vSun;
     varying float vMat;
-    varying float vDisp;
     varying vec3 vDir;
     void main() {
-        // The hole-filling copy of the image rides with the viewer, so it
-        // behaves like scenery at infinity and never shows an edge.
-        vec3 p = aPos + (aMat > 0.5 ? uEyeV : vec3(0.0));
+        // Outside rides with the viewer: scenery at infinity, which never
+        // approaches and never shows an edge. Material 4 — and it has to
+        // agree with room-import.py, which is where the numbering lives.
+        // When it did not, the CEILING rode with the camera instead and
+        // the room simply had no ceiling, with the sky showing through.
+        vec3 p = aPos + (aMat > 3.5 && aMat < 4.5 ? uEyeV : vec3(0.0));
         gl_Position = uProj * uView * vec4(p, 1.0);
+        vPos = p;
+        vNrm = aNrm;
         vUV = aUV;
+        vAO = aAO;
+        vSun = aSun;
         vMat = aMat;
-        vDisp = aDisp;
         vDir = normalize(p - uEyeV);
     }
     """
 
     private static let fragmentSource = """
     #version 100
+    // HIGHP. The procedural textures hash uv in METRES, which over a 10 m
+    // floor reaches hundreds of thousands — past what mediump (fp16, max
+    // 65504) holds. It overflows to infinity, sin(inf) is NaN, and the
+    // fragment comes out pure BLACK with no error anywhere.
     precision highp float;
     uniform sampler2D uTex;
-    uniform float uMip;
+    uniform sampler2D uDiffuse;
+    uniform sampler2D uArm;
     uniform float uTime;
+    uniform float uFade;
+    uniform vec3 uEye;
     uniform vec3 uLight;
+    varying vec3 vPos;
+    varying vec3 vNrm;
     varying vec2 vUV;
+    varying float vAO;
+    varying float vSun;
     varying float vMat;
-    varying float vDisp;
     varying vec3 vDir;
 
     float hash(vec2 p) {
@@ -616,97 +671,116 @@ final class EnvironmentRenderer: GLRenderer {
     }
     float fbm(vec2 p) {
         float a = 0.5, s = 0.0;
-        for (int i = 0; i < 5; i++) {
-            s += a * noise(p);
-            p *= 2.03;
-            a *= 0.5;
-        }
+        for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; }
         return s;
     }
 
     void main() {
-        // The wallpaper texture's row 0 is the picture's BOTTOM (the
-        // engine's bottom-left convention), so v runs up.
-        vec2 uv = vec2(clamp(vUV.x, 0.0, 1.0), 1.0 - clamp(vUV.y, 0.0, 1.0));
+        float m = vMat;
 
-        // The water: near, and low in the frame. A long exposure froze it;
-        // this puts it back in motion — a slow swell that drags the
-        // reflections with it, because a reflection is the surface, not
-        // the thing reflected.
-        float water = smoothstep(0.16, 0.34, vDisp) * smoothstep(0.52, 0.40, uv.y);
-        vec2 wuv = uv;
-        if (water > 0.001) {
-            float t = uTime;
-            float swell = fbm(vec2(uv.x * 7.0, uv.y * 26.0 - t * 0.09)) - 0.5;
-            float ripple = sin(uv.y * 190.0 - t * 1.1 + swell * 5.0) * 0.5
-                         + sin(uv.x * 61.0 + uv.y * 130.0 - t * 0.8) * 0.5;
-            // The further off, the less a wave moves on screen.
-            float amp = 0.0018 + 0.0065 * smoothstep(0.30, 1.0, vDisp);
-            wuv.y += (swell * 1.7 + ripple * 0.30) * amp * water;
-            wuv.x += swell * amp * 0.5 * water;
-        }
-        float bias = vMat > 0.5 ? 2.5 * uMip : 0.0;
-        vec3 c = texture2D(uTex, wuv, bias).rgb;
-        // What shows through the cuts is the same picture, softened and a
-        // little darker — a gap that reads as distance behind the thing in
-        // front of it. Lightening it instead drew a halo round every
-        // silhouette in the scene.
-        if (vMat > 0.5) c = mix(c * 0.82, uLight * 0.5, 0.12);
-
-        // The sky: far, and high in the frame. Cloud comes over it, lit by
-        // the moon, drifting the way weather does — slowly, and faster
-        // near the top of the frame than at the horizon.
-        float sky = smoothstep(0.075, 0.015, vDisp) * smoothstep(0.30, 0.55, uv.y)
-                  * (vMat > 0.5 ? 0.25 : 1.0);
-        if (sky > 0.001) {
-            // Direction-based coordinates, so the cloud belongs to the sky
-            // and not to the screen: it stays put when the viewer moves.
-            vec2 sc = vec2(atan(vDir.x, -vDir.z), vDir.y / max(0.12, length(vDir.xz)));
-            float drift = uTime * 0.0065;
-            float f = fbm(vec2(sc.x * 2.6 + drift, sc.y * 1.7 - drift * 0.22));
-            float g = fbm(vec2(sc.x * 6.1 - drift * 1.9, sc.y * 3.9 + drift * 0.5));
-            float cloud = smoothstep(0.46, 0.86, f * 0.72 + g * 0.28);
-            // The moon, low in the west, and the light it throws.
-            vec3 moonDir = normalize(vec3(-0.52, 0.42, -0.74));
-            float md = dot(normalize(vDir), moonDir);
-            float disc = smoothstep(0.99955, 0.99985, md);
-            float halo = pow(max(md, 0.0), 220.0) * 0.55 + pow(max(md, 0.0), 22.0) * 0.10;
-            vec3 moonCol = vec3(0.86, 0.90, 1.0);
-            // Cloud takes the moon's light on the side facing it and stays
-            // blue-grey away from it.
-            vec3 cloudCol = mix(vec3(0.10, 0.13, 0.20),
-                                moonCol * 0.85, pow(max(md, 0.0), 3.0));
-            c = mix(c, cloudCol, cloud * sky * 0.72);
-            c += (disc * 1.5 + halo) * moonCol * sky * (1.0 - cloud * 0.85);
+        // ---- outside ----------------------------------------------------
+        if (m > 3.5 && m < 4.5) {
+            vec3 d = normalize(vDir);
+            float up = clamp(d.y * 1.2 + 0.18, 0.0, 1.0);
+            vec3 sky2 = mix(vec3(0.78, 0.84, 0.90), vec3(0.34, 0.54, 0.88), up);
+            // Cloud in direction-space, so it belongs to the sky and not to
+            // the screen, drifting the way weather does.
+            vec2 sc = vec2(atan(d.x, -d.z) * 1.9, d.y / max(0.14, length(d.xz)) * 1.3);
+            float t2 = uTime * 0.0075;
+            float f = fbm(sc + vec2(t2, -t2 * 0.18));
+            float g = fbm(sc * 2.7 + vec2(-t2 * 1.7, t2 * 0.4));
+            float cloud = smoothstep(0.44, 0.82, f * 0.72 + g * 0.28)
+                        * smoothstep(0.02, 0.30, up);
+            vec3 sunDir = normalize(vec3(-0.34, 0.56, -0.76));
+            float toSun = max(dot(d, sunDir), 0.0);
+            vec3 cloudCol = mix(vec3(0.76, 0.78, 0.82), vec3(1.0, 0.98, 0.94),
+                                pow(toSun, 2.5));
+            vec3 c = mix(sky2, cloudCol, cloud * 0.92) * 1.45;
+            c += vec3(1.0, 0.95, 0.85) * pow(toSun, 900.0) * 2.2;
+            c += vec3(1.0, 0.93, 0.80) * pow(toSun, 14.0) * 0.18;
+            float land = smoothstep(0.015, -0.004, d.y);
+            c = mix(c, vec3(0.60, 0.66, 0.58) * (0.85 + 0.3 * fbm(sc * 5.0)), land * 0.80);
+            c = c / (c + vec3(0.78)) * 1.62;
+            gl_FragColor = vec4(c * uFade, 1.0);
+            return;
         }
 
-        // Waves. Dragging the reflection is only half of it — a sea reads
-        // as a sea because its faces catch the light and its troughs do
-        // not. Two crossing swells, rolling toward the viewer, with the
-        // wavelength growing as the water comes nearer.
-        if (water > 0.001) {
-            float t = uTime;
-            float near = smoothstep(0.18, 0.95, vDisp);
-            float scale = mix(150.0, 34.0, near);
-            float drift = fbm(vec2(uv.x * 3.0, uv.y * 9.0 - t * 0.05)) - 0.5;
-            float s1 = sin(uv.y * scale - t * 1.35 + drift * 7.0 + uv.x * 5.0);
-            float s2 = sin(uv.y * scale * 0.61 + uv.x * 13.0 - t * 0.95);
-            float s3 = sin(uv.y * scale * 2.3 - t * 2.2 + drift * 11.0);
-            float crest = s1 * 0.5 + s2 * 0.33 + s3 * 0.17;
-            // Faces toward the sky brighten, troughs fall into shadow.
-            float face = smoothstep(-0.25, 0.85, crest);
-            c += (vec3(0.16, 0.19, 0.26) * (face - 0.42)) * water * mix(0.5, 1.5, near);
-            // Foam on the steepest crests, only close in.
-            float foam = smoothstep(0.86, 0.99, crest) * near * water;
-            c += vec3(0.30, 0.34, 0.40) * foam * 0.35;
-            // And the moon's path across them: the one thing that ties the
-            // sky to the surface.
-            float band = exp(-pow((uv.x - 0.30) * 4.2, 2.0));
-            float sparkle = fbm(vec2(uv.x * 120.0, uv.y * 300.0 - t * 1.4));
-            float g = smoothstep(0.55, 0.78, sparkle * 0.7 + face * 0.3) * band * water;
-            c += vec3(0.62, 0.68, 0.86) * g * 0.40;
+        // ---- materials --------------------------------------------------
+        // Material 0 is "look it up in the atlas": the furniture, whose
+        // colour, roughness and its own ambient occlusion were authored
+        // rather than guessed. The rest are procedural, because a floor
+        // and a wall want to tile and an atlas cannot.
+        vec3 albedo;
+        float gloss = 0.0;
+        float texAO = 1.0;
+        if (m < 0.5) {
+            albedo = texture2D(uDiffuse, vUV).rgb;
+            vec3 arm = texture2D(uArm, vUV).rgb;
+            texAO = 0.35 + 0.65 * arm.r;
+            gloss = (1.0 - arm.g) * 0.5 + arm.b * 0.35;
+        } else if (m < 1.5) {
+            // Oak boards, 17 cm, laid along z, each a different tone.
+            float board = floor(vUV.x / 0.17);
+            float tone = 0.80 + 0.32 * hash(vec2(board, 3.0));
+            float grain = noise(vec2(vUV.y * 30.0, board * 7.0)) * 0.15
+                        + noise(vec2(vUV.y * 110.0, board * 13.0)) * 0.07;
+            float seam = smoothstep(0.0, 0.010, abs(fract(vUV.x / 0.17) - 0.5) - 0.475);
+            float endJoint = smoothstep(0.0, 0.012,
+                abs(fract(vUV.y / 1.9 + hash(vec2(board, 9.0))) - 0.5) - 0.487);
+            albedo = vec3(0.47, 0.335, 0.205) * (tone + grain)
+                   * (1.0 - max(seam, endJoint) * 0.5);
+            gloss = 0.34;
+        } else if (m < 2.5) {
+            float tooth = noise(vUV * 95.0) * 0.5 + noise(vUV * 230.0) * 0.5;
+            albedo = vec3(0.83, 0.805, 0.765) * (0.985 + 0.03 * tooth);
+            albedo *= 0.94 + 0.06 * smoothstep(0.0, 1.8, vPos.y);
+        } else if (m < 3.5) {
+            albedo = vec3(0.93, 0.925, 0.915);
+        } else if (m < 5.5) {
+            // The wallpaper, framed and hanging in the room.
+            gl_FragColor = vec4(texture2D(uTex,
+                vec2(clamp(vUV.x, 0.0, 1.0), clamp(vUV.y, 0.0, 1.0))).rgb
+                * (0.55 + 0.9 * vAO) * uFade, 1.0);
+            return;
+        } else {
+            float g2 = noise(vec2(vUV.x * 44.0, vUV.y * 5.0));
+            albedo = vec3(0.24, 0.16, 0.105) * (0.82 + 0.38 * g2);
+            gloss = 0.26;
         }
-        gl_FragColor = vec4(c, 1.0);
+
+        vec3 n = normalize(vNrm);
+        // An interior is mostly inter-reflection: cool from the sky above,
+        // warm off the floor below, and a flat term for light that has
+        // bounced more than twice — without which a ceiling, which can
+        // only see the floor, comes out brown.
+        float lum = dot(uLight, vec3(0.30, 0.59, 0.11)) + 0.10;
+        vec3 tint = uLight / lum;
+        float up = n.y * 0.5 + 0.5;
+        vec3 sky = mix(vec3(0.95, 0.97, 1.0), tint, 0.30) * 0.66;
+        // The floor's bounce is warm but not orange, and it is weaker than
+        // the fill: a ceiling sees only the floor, and with a strong warm
+        // bounce and a weak fill it comes out BROWN, which is the single
+        // thing that most gives away an interior lit by guesswork.
+        vec3 bounce = vec3(0.56, 0.50, 0.44) * 0.30;
+        // A wall of windows is an enormous soft source, and a surface
+        // that FACES it is far brighter than one that does not. Without
+        // this term every face of every object gets the same light and the
+        // furniture reads as polystyrene: the form is all in the contrast
+        // between the side that sees the window and the side that cannot.
+        float toWin = max(-n.z, 0.0);
+        vec3 ambient = (mix(bounce, sky, up) * 0.62
+                        + sky * toWin * 0.95
+                        + vec3(0.17, 0.18, 0.20)) * vAO * texAO;
+        vec3 sunCol = vec3(1.28, 1.17, 0.98) * 2.05;
+        vec3 lit = albedo * (ambient + sunCol * vSun);
+        if (gloss > 0.0) {
+            vec3 vv = normalize(uEye - vPos);
+            float fres = pow(1.0 - max(dot(n, vv), 0.0), 4.0);
+            lit += vec3(0.9, 0.93, 1.0) * fres * gloss * vAO * 0.30;
+        }
+        // Filmic shoulder, so a sun patch rolls off instead of clipping.
+        lit = lit / (lit + vec3(0.78)) * 1.62;
+        gl_FragColor = vec4(lit * uFade, 1.0);
     }
     """
 
@@ -760,6 +834,9 @@ final class EnvironmentRenderer: GLRenderer {
         _glFramebufferRenderbuffer = load("glFramebufferRenderbuffer")
         _glDepthFunc = load("glDepthFunc")
         _glDepthMask = load("glDepthMask")
+        _glDrawElements = load("glDrawElements")
+        _glGenTextures = load("glGenTextures")
+        _glTexImage2D = load("glTexImage2D")
         _glBindFramebuffer = load("glBindFramebuffer")
         _glFramebufferTexture2D = load("glFramebufferTexture2D")
         _glViewport = load("glViewport")
@@ -826,8 +903,12 @@ final class EnvironmentRenderer: GLRenderer {
         program = prog
         aPos = _glGetAttribLocation(prog, "aPos")
         aUV = _glGetAttribLocation(prog, "aUV")
+        uDiffuse = _glGetUniformLocation(prog, "uDiffuse")
+        uArm = _glGetUniformLocation(prog, "uArm")
+        aNrm = _glGetAttribLocation(prog, "aNrm")
+        aAO = _glGetAttribLocation(prog, "aAO")
+        aSun = _glGetAttribLocation(prog, "aSun")
         aMat = _glGetAttribLocation(prog, "aMat")
-        aDisp = _glGetAttribLocation(prog, "aDisp")
         uTime = _glGetUniformLocation(prog, "uTime")
         uEye = _glGetUniformLocation(prog, "uEye")
         uEyeV = _glGetUniformLocation(prog, "uEyeV")

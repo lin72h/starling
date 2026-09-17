@@ -206,6 +206,14 @@ install -m644 "$REPO"/shell/Resources/Wallpapers/*.jpg "$SHARE/wallpapers/"
 for d in "$REPO"/shell/Resources/Wallpapers/*.depth.png; do
     [ -e "$d" ] && install -m644 "$d" "$SHARE/wallpapers/"
 done
+
+# The 3D desktop's room: one baked mesh and its two texture atlases, made
+# by build/tools/room-import.py from CC0 assets and checked in. Nothing
+# here is built from source at package time.
+if [ -d "$REPO/shell/Resources/Room" ]; then
+    mkdir -p "$SHARE/room"
+    install -m644 "$REPO"/shell/Resources/Room/* "$SHARE/room/"
+fi
 # The app catalog: one record per app the desktop knows about. The launcher,
 # the dock, the App Store and app-install all read it, so it has to be here
 # for any of them to know an app exists.
