@@ -484,6 +484,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // Modifier key tracking for keyboard shortcuts (Ctrl+Tab, etc.)
     private var _ctrlPressed: Bool = false
     private var _shiftPressed: Bool = false
+    /// Alt: the 3D room's walk modifier, so the camera can be driven
+    /// without first giving up the focused window.
+    var _altPressed: Bool = false
 
     // ── Spaces (virtual desktops) ────────────────────────────────────────
     // macOS-style horizontal slide between spaces. While a slide is running,
@@ -674,6 +677,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _cameraQuantum3D: (Int, Int) = (0, 0)
     #if os(Linux)
     var _environment: EnvironmentRenderer? = nil
+    /// Drives the scene's cloud and water while 3D is open.
+    var _sceneTicker: Ticker? = nil
     #endif
     var environmentTextureId: Int64 = -1
 
@@ -1660,7 +1665,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// renderer reads it on the CPU when it builds the mesh.
     static func _depthGrid(rgba: Data, width: Int, height: Int, toAspect target: Double)
         -> (values: [Float], cols: Int, rows: Int)? {
-        let cols = 256, rows = 144
+        let cols = 384, rows = 216
         guard width > 0, height > 0, rgba.count >= width * height * 4 else { return nil }
         // The same centre crop the picture gets, in pixels.
         var cropW = width, cropH = height, x0 = 0, y0 = 0
@@ -1676,22 +1681,17 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             guard let base = src.baseAddress else { return }
             for gy in 0..<rows {
                 let py0 = y0 + gy * cropH / rows, py1 = y0 + (gy + 1) * cropH / rows
+                let py = (py0 + py1) / 2
                 for gx in 0..<cols {
                     let px0 = x0 + gx * cropW / cols, px1 = x0 + (gx + 1) * cropW / cols
-                    var sum = 0, n = 0
-                    let ys = max(1, (py1 - py0) / 4), xs = max(1, (px1 - px0) / 4)
-                    var y = py0
-                    while y < py1 {
-                        var x = px0
-                        while x < px1 {
-                            sum += Int(base.load(fromByteOffset: (y * width + x) * 4,
-                                                 as: UInt8.self))
-                            n += 1
-                            x += xs
-                        }
-                        y += ys
-                    }
-                    if n > 0 { out[gy * cols + gx] = Float(sum) / Float(n) / 255 }
+                    // Point sample, not an average: averaging across a
+                    // silhouette blurs the depth step, and a blurred step
+                    // is exactly what smears the sky onto the bridge when
+                    // the scene is reconstructed from it.
+                    let px = (px0 + px1) / 2
+                    out[gy * cols + gx] =
+                        Float(base.load(fromByteOffset: (py * width + px) * 4,
+                                        as: UInt8.self)) / 255
                 }
             }
         }
@@ -2476,6 +2476,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if phys == 0xE1 || phys == 0xE5 {
                 self._shiftPressed = (keyData.type == .down || keyData.type == .repeat)
             }
+            // Alt (HID 0xE2/0xE6): the room's walk modifier, so the camera
+            // can be driven without first giving up the focused window.
+            if phys == 0xE2 || phys == 0xE6 {
+                self._altPressed = (keyData.type == .down || keyData.type == .repeat)
+            }
 
             // Screensaver: any key wakes it, and nothing reaches apps or the
             // shell's own UI while it is up (launcher-style modal swallow).
@@ -2753,6 +2758,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     self._setDesktop3D(!self._desktop3DOn)
                     return true
                 }
+            }
+
+            // Walking the room. With the hall open and nothing focused,
+            // the keyboard drives the camera: WASD or the arrows to move,
+            // Q/E to turn, R/F to rise and sink, Home to go back to the
+            // spot the flat desktop is seen from, Space to step up to the
+            // window in front of you. Clicking a window takes the keys
+            // back; clicking the room hands them over again.
+            if keyData.type == .down || keyData.type == .repeat,
+               self._desktop3DKey(Int(phys), fast: self._shiftPressed,
+                                  forced: self._altPressed) {
+                return true
             }
 
             guard let focusedId = self.windowManager.focusedWindowId,
@@ -4423,7 +4440,6 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 let echo = _isInjectEcho(e.position)
                 _lastPointer = e.position; _injectedPointer = nil
                 _constraintPointerMoved(e.position, echo: echo)
-                _desktop3DPointerHover(e.position)
             },
             behavior: .translucent,
             child: _buildShellRoot(context))
@@ -4503,6 +4519,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             contextMenuOutputId = displayLayout?.host.id ?? 0
                             activeStatusBarPopup = nil
                         }
+                    } else if _desktop3DT > 0, windowManager.focusedWindowId != nil {
+                        // In the room, a click that reaches the floor is how
+                        // you stop using a window and go back to walking —
+                        // the keyboard drives the camera again. Clicking a
+                        // window takes the keys back.
+                        setState { windowManager.focusedWindowId = nil }
                     }
                 },
                 onPointerHover: { _ in
@@ -4598,8 +4620,24 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 } + windowManager.visibleWindows
                     .filter { !slideSpaceIds.contains($0.spaceId) }
                     .map { ($0, 0.0) }
+        // The room has no z-buffer between the layer tree's children, so
+        // while it is open the stack is drawn far to near instead of by
+        // zIndex. Walk behind a window and the one beyond it is in front.
+        // Anything new in the room needs a place in it before it can be
+        // drawn there — including everything, in a session that came up
+        // with the room already open.
+        if _desktop3DT > 0 { _desktop3DPlaceWindows() }
+        let camera3D = _desktop3DEffectiveCamera(_desktop3DT)
+        let orderedWindows: [(win: WindowInfo, layerDx: Double)] = _desktop3DT > 0
+            ? layerWindows.sorted {
+                _desktop3DDistance(rect: $0.win.rect.translate($0.layerDx, 0),
+                                   t: _desktop3DT, camera: camera3D, pose: $0.win.pose3D)
+                > _desktop3DDistance(rect: $1.win.rect.translate($1.layerDx, 0),
+                                     t: _desktop3DT, camera: camera3D, pose: $1.win.pose3D)
+              }
+            : layerWindows
         var liveWindowIds = Set<String>()
-        for (win, layerDx) in layerWindows {
+        for (win, layerDx) in orderedWindows {
             let winId = win.id
             liveWindowIds.insert(winId)
             let isFocused = win.id == windowManager.focusedWindowId
@@ -4611,23 +4649,25 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // An edge-drag-carried window ignores the slide offset: it
             // stays pinned under the cursor while the desktop slides.
             let windowDx = win.id == _spaceSlide?.carried ? 0 : layerDx
-            // 3D desktop: an unfocused window's pose on the arc, from where
-            // it sits on screen right now, eased by the enter/leave tween
-            // and seen from this output's camera. nil = flat (focused,
-            // fullscreen, off the host, past the near plane, or 2D).
-            let pose = (_desktop3DT > 0 && !isFocused && !win.isFullscreen)
-                ? _desktop3DPose(rect: win.rect.translate(windowDx, 0),
-                                 t: _desktop3DT,
-                                 camera: _cameras3D[displayLayout?.host.id ?? 0] ?? Camera3D(),
-                                 depth: win.pose3D.depth)
-                : nil
+            // 3D desktop: where this window's pane stands in the hall,
+            // seen from wherever the viewer is. A fullscreen window is
+            // the one thing that stays flat — it is the screen, not a
+            // thing in the room.
+            let posedRect = win.rect.translate(windowDx, 0)
+            let placement: Desktop3DPlacement = (_desktop3DT > 0 && !win.isFullscreen)
+                ? _desktop3DPlacement(rect: posedRect, t: _desktop3DT,
+                                      camera: camera3D, pose: win.pose3D)
+                : .flat
+            if case .hidden = placement { continue }
+            var pose: (matrix: Matrix4, pivot: Offset)? = nil
+            if case let .posed(m, pivot) = placement { pose = (m, pivot) }
             let tilted = pose != nil
-            // The light it floats in: the part of the picture behind it,
-            // and the haze its distance earns. Quantised, so a pointer
-            // move does not rebuild every window's subtree.
+            // The light it stands in: the part of the picture behind it,
+            // and the haze its distance earns. Quantised, so one step of
+            // the camera does not rebuild every window's subtree.
             let roomLight = tilted
-                ? _desktop3DRoomLight(rect: win.rect.translate(windowDx, 0),
-                                      t: _desktop3DT, depth: win.pose3D.depth)
+                ? _desktop3DRoomLight(rect: posedRect, t: _desktop3DT,
+                                      camera: camera3D, pose: win.pose3D)
                 : nil
 
             // Reuse cached widget when only position changed (drag).

@@ -7,48 +7,79 @@ import Foundation
 
 // MARK: - The 3D desktop (docs/plans/desktop-3d.md)
 //
-// Two states, both persistent. 2D is today's desktop, pixel for pixel:
-// every window slot is under an identity Transform (the plain-translation
-// paint path, no layer, no resampling) and the wallpaper slot shows the
-// wallpaper texture. 3D lifts every UNFOCUSED window onto an arc around
-// the viewer — yawed to face the centre, pushed back so it reads as
-// further away — while the focused window stays untransformed and
-// pixel-exact (a 0.999 scale resamples text, identity does not), and the
-// wallpaper's slot shows EnvironmentRenderer's room instead. Windows stay
-// in the layer tree under a perspective Transform: the engine rasterises
-// the external texture through the matrix, and RenderTransform's hit test
-// runs the same matrix backwards with the homogeneous divide, so a click
-// lands on the right client pixel with no new input code.
+// A room you are standing in, with a real camera. 2D is today's desktop,
+// pixel for pixel; 3D puts you inside a hall built out of your wallpaper,
+// with the windows hanging in it as panes of glass at real places. You
+// walk with the keyboard. Approach a window and it grows the way a thing
+// in a room grows; stand at the right distance, square on, and it is
+// pixel-exact again.
 //
-// `_desktop3DT` is the one number everything reads: 0 flat, 1 the room,
-// tweened by a 600 ms controller on enter and leave. The poses scale
-// with it, the environment unfolds with it, the camera's parallax fades
-// with it — so the end of a leave is EXACTLY the flat desktop, not a
-// near-identity that would resample every window for one frame.
+// WORLD UNITS ARE METRES. y is up, the picture hangs on the wall at
+// z = 0, and the viewer starts back down the hall looking at it. One
+// logical pixel of a window is `k3DMetresPerPx` across, so a window has a
+// real size in the room and "1:1" is a real distance you can walk to.
+//
+// Windows stay in the Flutter layer tree under a `Transform` carrying the
+// whole projection · view · model chain. That is what buys the two things
+// a hand-rolled GL desktop would have to rebuild: the engine rasterises
+// each window's external texture through the matrix, and
+// RenderTransform's hit test runs the same matrix backwards with the
+// homogeneous divide — so a click on a window across the room lands on
+// the right client pixel with no new input code at all.
+//
+// `_desktop3DT` is still the one number the enter/leave tween moves, and
+// t = 0 is still EXACTLY the flat desktop: at t = 0 no window gets a
+// matrix at all (identity would resample), and the room's surfaces have
+// collapsed onto the picture's edges. The camera's home position is the
+// one place in the room where the picture fills the view precisely, so
+// the flat desktop is simply "standing at the right spot", and entering
+// 3D is the room unfolding around you from there.
 
-/// What only 3D knows about a window. Kept beside `WindowInfo.rect`, never
-/// derived from it and never written by 2D, so leaving 3D changes nothing
-/// here and re-entering finds it again.
+/// Where a window stands in the room: the centre of its pane, in metres,
+/// and which way it faces. Kept beside `WindowInfo.rect`, never derived
+/// from it by 2D and never written by it, so leaving 3D changes nothing
+/// here and re-entering finds the arrangement again.
 struct WindowPose3D: Equatable {
-    /// How far back the window sits: 1 = the arc's own distance, more is
-    /// further. A scroll on the title bar changes it.
-    var depth: Double = 1.0
-    static let range: ClosedRange<Double> = 0.6...2.5
+    var x = 0.0
+    var y = 0.0
+    var z = 0.0
+    /// Radians about the world's y axis. 0 faces +z, down the hall.
+    var yaw = 0.0
+    /// False until the window has been given a place in the room; the
+    /// first entry into 3D lays every window out and sets it.
+    var placed = false
 }
 
-/// The light one window sits in, and how far off the room it reads as
-/// floating. Resolved per window from the wallpaper itself: the room's
-/// back wall IS the picture, so "what is behind this window" is a region
-/// of it. nil in 2D and for the focused window, which stays pixel-exact.
+/// The viewer: a real camera standing in the room.
+struct Camera3D: Equatable {
+    var x = 0.0
+    var y = 0.0
+    var z = 0.0
+    /// Radians. 0 looks down -z, at the picture.
+    var yaw = 0.0
+    var pitch = 0.0
+}
+
+/// Where one window ends up on screen this frame.
+enum Desktop3DPlacement {
+    /// 2D, or t = 0: no matrix at all, the plain-translation paint path,
+    /// pixel-exact.
+    case flat
+    /// In the room: the full transform, and the pivot its coordinates are
+    /// centred on (handed to `Transform` as `origin`, made window-local).
+    case posed(Matrix4, Offset)
+    /// Behind the viewer, past the near plane, or turned away. `Transform`
+    /// does no near-plane clipping and Skia draws garbage past it, so the
+    /// window is not drawn at all.
+    case hidden
+}
+
+/// The light one window sits in. Resolved per window from the wallpaper
+/// itself: the room's back wall IS the picture, so "what is behind this
+/// window" is the part of the picture the window stands in front of.
 ///
-/// This is the whole of what can be done to marry a window to the room at
-/// a desktop lens, and the two things it does NOT do were both measured
-/// out rather than skipped — see `docs/plans/desktop-3d.md`, Phase 2a:
-/// a floor reflection lands off the bottom of the screen for any window a
-/// person would actually use, and a shadow cast onto the wall behind is
-/// always SMALLER on screen than the window casting it, so the window
-/// hides it completely. Haze, tint and a screen-space drop shadow are
-/// what is left, and they are what painters and visionOS both use.
+/// The two things this does NOT do were both measured out rather than
+/// skipped — see `docs/plans/desktop-3d.md`, Phase 2a.
 struct RoomLight: Equatable {
     /// The average colour of the picture behind the window.
     var color: Color
@@ -61,145 +92,397 @@ struct RoomLight: Equatable {
     var separation: Double
 }
 
-/// The viewer, per output. Pointer parallax moves the eye a little; the
-/// arc and the environment both read it, so they move together.
-struct Camera3D: Equatable {
-    /// Where the eye has moved, in [-1, 1] of its travel on each axis.
-    var pan: Offset = Offset(0, 0)
-}
-
 extension _DesktopShellState {
 
-    // MARK: Tuning
+    // MARK: The room, in metres
 
-    /// The lens, in screen widths. Shorter is more dramatic and less
-    /// readable; the environment renderer uses the same one.
-    static let k3DFocalScreens = 1.5
-    /// How far a window at the screen's edge turns toward the centre.
-    static let k3DMaxYaw = 35.0 * Double.pi / 180
-    /// The on-screen scale of an unfocused window's centre after the push
-    /// back — visionOS neighbours read noticeably smaller than the focused
-    /// pane, and the focused one is pixel-exact by rule.
-    static let k3DNeighbourScale = 0.7
-    /// The eye's full parallax travel, as a fraction of the screen width.
-    /// The same eye the room moves (`EnvironmentRenderer.kEyeTravel`), so
-    /// windows and room slide against each other by their real depths —
-    /// change one and change the other.
-    static let k3DEyeTravel = 0.03
-    /// Parallax steps across the screen, per axis. Quantised so a still
-    /// pointer means a still camera — every step is a full recomposite.
-    static let k3DParallaxSteps = 40
+    /// A game lens, not a desktop one. The flat desktop's implied lens is
+    /// long and flattening; standing in a room wants something near what
+    /// a person actually sees.
+    static let k3DFovX = 70.0 * Double.pi / 180
+    /// How big a window is in the room: one logical pixel across. A
+    /// 1280-pixel window comes out 2.6 m wide and reads 1:1 from about
+    /// 1.8 m — a step and a half away, which is where you would stand to
+    /// read something on a wall.
+    static let k3DMetresPerPx = 0.00205
+    /// How far the viewer may move from the spot the photograph was taken
+    /// from, in metres. A reconstruction only holds what one frame saw:
+    /// wander far enough and its own edge comes into view, and behind
+    /// every near thing is a hole the picture has nothing to fill with.
+    /// This is a lean, not an expedition.
+    static let k3DRoam = 2.2
+
+    /// Where the windows are put when the room first lays them out, and
+    /// how wide the fan is.
+    static let k3DArcRadius = 2.9
+    static let k3DArcSpread = 52.0 * Double.pi / 180
+
+    /// Walking. One key press (or repeat) is one step.
+    static let k3DStep = 0.22
+    static let k3DTurn = 2.6 * Double.pi / 180
     static let k3DTransitionMs = 600
 
     var _desktop3DActive: Bool { _desktop3DT > 0 }
 
-    // MARK: The pose
+    /// STARLING_3D_LOG=1: what the camera is doing, on stderr.
+    func _desktop3DLog(_ m: @autoclosure () -> String) {
+        guard ProcessInfo.processInfo.environment["STARLING_3D_LOG"] == "1" else { return }
+        FileHandle.standardError.write(Data("[3D] \(m())\n".utf8))
+    }
 
-    /// The pose of an unfocused window whose on-screen rect is `rect`
-    /// (global logical px), eased by `t`, seen from `camera`: a matrix over
-    /// screen-centred coordinates plus the pivot those coordinates are
-    /// centred on (in `rect`'s space — hand it to `Transform` as `origin`,
-    /// made window-local). nil keeps the window flat: it is off the host,
-    /// or its pose would cross the near plane — `Transform` does no
-    /// near-plane clipping and Skia draws garbage past it.
-    func _desktop3DPose(rect: Rect, t: Double, camera: Camera3D,
-                        depth: Double) -> (matrix: Matrix4, pivot: Offset)? {
+    /// The focal length in logical pixels that the room's lens implies on
+    /// this output.
+    func _desktop3DFocalPx(_ host: Rect) -> Double {
+        (host.width / 2) / tan(Self.k3DFovX / 2)
+    }
+
+    /// Home is the spot the photograph was taken from: the origin,
+    /// looking the way the camera was pointed. From exactly here the
+    /// reconstruction IS the photograph, which is what makes entering the
+    /// scene continuous with the flat desktop and leaving it exact.
+    func _desktop3DHomeCamera(_ host: Rect) -> Camera3D {
+        Camera3D(x: 0, y: 0, z: 0, yaw: 0, pitch: 0)
+    }
+
+    /// Where a window hangs when it is simply showing its 2D rect: the
+    /// plane in front of the home camera at which one logical pixel is
+    /// one screen pixel.
+    func _desktop3DFlatPose(rect: Rect, host: Rect) -> WindowPose3D {
+        let home = _desktop3DHomeCamera(host)
+        let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
+        return WindowPose3D(
+            x: (rect.center.dx - host.center.dx) * Self.k3DMetresPerPx,
+            y: home.y - (rect.center.dy - host.center.dy) * Self.k3DMetresPerPx,
+            z: home.z - d1,
+            yaw: 0, placed: true)
+    }
+
+    // MARK: Laying the windows out
+
+    /// Give any window that has no place in the room one: a fan in front
+    /// of wherever the viewer is standing, ordered left to right by where
+    /// the windows already were on screen, so nothing teleports and the
+    /// arrangement the user had is still legible.
+    ///
+    /// Called from the window-stack builder rather than only on entry,
+    /// because windows appear at every moment — a fresh launch, a restore
+    /// from minimise, and the case that caught this out, a session that
+    /// came up with the room ALREADY open, where entering never happened
+    /// at all. It only ever writes to a window that has no place, so it
+    /// settles on the first build and does nothing on every later one.
+    @discardableResult
+    func _desktop3DPlaceWindows() -> Bool {
         let host = displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
-        guard host.width > 0, host.height > 0, rect.overlaps(host), t > 0 else { return nil }
-        let pivot = host.center
-        let wx = rect.center.dx - pivot.dx
-        let wy = rect.center.dy - pivot.dy
-        let focal = Self.k3DFocalScreens * host.width
-        // Yaw grows with the distance from the centre column. rotationY(+θ)
-        // maps +x toward -z, so a window on the right turns its right edge
-        // AWAY from the viewer — it faces the centre.
-        let yaw = max(-1.0, min(1.0, wx / (host.width / 2))) * Self.k3DMaxYaw * t
-        // Pushed back until its centre projects at the neighbour scale
-        // (w = 1 + push / focal, scale = 1 / w), times the window's depth.
-        let push = focal * (1 / Self.k3DNeighbourScale - 1) * depth * t
+        guard host.width > 0 else { return false }
+        let fresh = windowManager.visibleWindows
+            .filter { !$0.pose3D.placed }
+            .sorted { $0.rect.center.dx < $1.rect.center.dx }
+        guard !fresh.isEmpty else { return false }
+        // In front of the viewer, not in front of the door: a window that
+        // opens while you are down the other end of the hall should be
+        // where you are looking.
+        let eye = _camera3D
+        let taken = windowManager.visibleWindows.filter { $0.pose3D.placed }.count
+        let n = fresh.count + taken
+        for (i, win) in fresh.enumerated() {
+            let slot = taken + i
+            let f = n == 1 ? 0.0 : Double(slot) / Double(n - 1) - 0.5
+            let a = f * Self.k3DArcSpread + eye.yaw
+            win.pose3D = WindowPose3D(
+                x: eye.x + Self.k3DArcRadius * sin(a),
+                y: eye.y,
+                z: eye.z - Self.k3DArcRadius * cos(a),
+                // Turn to face the spot the viewer is standing in.
+                yaw: -a,
+                placed: true)
+        }
+        return true
+    }
 
-        var m = Matrix4.identity()
-        m.setEntry(3, 2, -1 / focal)   // perspective: w = 1 - z / focal
-        // The eye moved: the world shifts the other way. Nearer things
-        // shift more on screen than far ones, and the focused window (flat,
-        // exempt) not at all — that difference is the parallax.
-        let eye = Self.k3DEyeTravel * host.width * t
-        m.translate(-camera.pan.dx * eye, -camera.pan.dy * eye, 0)
-        m.translate(wx, wy, -push)     // the window's centre, pushed back...
-        m.rotateY(yaw)                 // ...turned toward the viewer...
-        m.translate(-wx, -wy, 0)       // ...about its own centre
+    // MARK: The camera
 
-        // Near-plane check on the four corners (screen-centred, z = 0).
-        let l = rect.left - pivot.dx, r = rect.right - pivot.dx
-        let tp = rect.top - pivot.dy, b = rect.bottom - pivot.dy
+    var _camera3D: Camera3D {
+        get {
+            let id = displayLayout?.host.id ?? 0
+            if let c = _cameras3D[id] { return c }
+            return _desktop3DHomeCamera(displayLayout?.host.logicalRect
+                ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
+        }
+        set { _cameras3D[displayLayout?.host.id ?? 0] = newValue }
+    }
+
+    /// The camera as this frame should see it: folded back toward the
+    /// home spot by the enter/leave tween. At t = 0 it IS the home spot —
+    /// the one place where the picture fills the view — so leaving 3D
+    /// walks the viewer back to their desk however far they had wandered,
+    /// and the flat desktop it lands on is exact rather than approximate.
+    func _desktop3DEffectiveCamera(_ t: Double) -> Camera3D {
+        let home = _desktop3DHomeCamera(displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
+        guard t > 0 else { return home }
+        if t >= 1 { return _camera3D }
+        let c = _camera3D
+        return Camera3D(x: home.x + (c.x - home.x) * t,
+                        y: home.y + (c.y - home.y) * t,
+                        z: home.z + (c.z - home.z) * t,
+                        yaw: home.yaw + (c.yaw - home.yaw) * t,
+                        pitch: home.pitch + (c.pitch - home.pitch) * t)
+    }
+
+    /// World -> view: undo the camera's place and heading.
+    static func _view(_ c: Camera3D) -> Matrix4 {
+        var m = Matrix4.rotationX(-c.pitch)
+        m.multiply(Matrix4.rotationY(-c.yaw))
+        m.multiply(Matrix4.translationValues(-c.x, -c.y, -c.z))
+        return m
+    }
+
+    /// View -> what `Transform` wants: x and y scaled by the focal length,
+    /// w carrying the distance, so the engine's own divide IS the
+    /// perspective divide. Screen y runs down, world y runs up.
+    ///
+    /// The z row has to be a real projection row even though nothing reads
+    /// the z: with a trivial one the matrix is SINGULAR (two rows differing
+    /// by a sign), and `RenderTransform` neither paints nor hit-tests a
+    /// matrix it cannot invert — every window simply vanishes, with no
+    /// error anywhere.
+    static func _screenFromView(focal: Double) -> Matrix4 {
+        let near = 0.05, far = 200.0
+        var p = Matrix4.zero()
+        p.setEntry(0, 0, focal)
+        p.setEntry(1, 1, -focal)
+        p.setEntry(2, 2, -(far + near) / (far - near))
+        p.setEntry(2, 3, -2 * far * near / (far - near))
+        p.setEntry(3, 2, -1)
+        return p
+    }
+
+    // MARK: The pose
+
+    /// Where a window lands on screen: the full projection · view · model
+    /// chain, over coordinates centred on the host's centre (the same
+    /// convention `Transform`'s `origin` is given).
+    ///
+    /// The tween is in the WORLD, not on the matrix: at t the window is
+    /// interpolated between the pose that reproduces its 2D rect exactly
+    /// and the pose it has in the room, so entering 3D lifts each window
+    /// off the flat desktop from precisely where it was.
+    func _desktop3DPlacement(rect: Rect, t: Double, camera: Camera3D,
+                             pose: WindowPose3D) -> Desktop3DPlacement {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        guard host.width > 0, host.height > 0, t > 0 else { return .flat }
+        let p = _desktop3DLerpPose(rect: rect, host: host, t: t, pose: pose)
+
+        // Turned away from the viewer: a pane has one side.
+        let n = Vector3(sin(p.yaw), 0, cos(p.yaw))
+        let toCam = Vector3(camera.x - p.x, camera.y - p.y, camera.z - p.z)
+        if n.dot(toCam) <= 0.02 { return .hidden }
+
+        let focal = _desktop3DFocalPx(host)
+        let s = Self.k3DMetresPerPx
+        // The window's own centre, in the coordinates the matrix is given.
+        let wcx = rect.center.dx - host.center.dx
+        let wcy = rect.center.dy - host.center.dy
+
+        var m = Self._screenFromView(focal: focal)
+        m.multiply(Self._view(camera))
+        m.multiply(Matrix4.translationValues(p.x, p.y, p.z))
+        m.multiply(Matrix4.rotationY(p.yaw))
+        m.multiply(Matrix4.diagonal3Values(s, -s, s))
+        m.multiply(Matrix4.translationValues(-wcx, -wcy, 0))
+
+        // Near plane, on the four corners. Either the whole pane is in
+        // front of the camera or it is not drawn.
+        let l = rect.left - host.center.dx, r = rect.right - host.center.dx
+        let tp = rect.top - host.center.dy, b = rect.bottom - host.center.dy
         let row3 = m.getRow(3)
         for (x, y) in [(l, tp), (r, tp), (l, b), (r, b)] {
-            if row3.x * x + row3.y * y + row3.w <= 0.05 { return nil }
+            if row3.x * x + row3.y * y + row3.w <= 0.25 { return .hidden }
         }
-        return (m, pivot)
+        return .posed(m, host.center)
+    }
+
+    /// The window's place this frame: between the pose that reproduces
+    /// its flat rect and the pose it has in the room.
+    func _desktop3DLerpPose(rect: Rect, host: Rect, t: Double,
+                            pose: WindowPose3D) -> WindowPose3D {
+        let flat = _desktop3DFlatPose(rect: rect, host: host)
+        let target = pose.placed ? pose : flat
+        return WindowPose3D(
+            x: flat.x + (target.x - flat.x) * t,
+            y: flat.y + (target.y - flat.y) * t,
+            z: flat.z + (target.z - flat.z) * t,
+            yaw: flat.yaw + (target.yaw - flat.yaw) * t,
+            placed: true)
+    }
+
+    /// How far the camera is from a window's pane — what the far-to-near
+    /// draw order sorts on, since the layer tree has no z-buffer between
+    /// its children.
+    func _desktop3DDistance(rect: Rect, t: Double, camera: Camera3D,
+                            pose: WindowPose3D) -> Double {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        let p = _desktop3DLerpPose(rect: rect, host: host, t: t, pose: pose)
+        let dx = camera.x - p.x, dy = camera.y - p.y, dz = camera.z - p.z
+        return (dx * dx + dy * dy + dz * dz).squareRoot()
+    }
+
+    // MARK: Walking
+
+    /// True when the keyboard should drive the camera rather than a
+    /// window: the room is open and nothing has the keyboard. Clicking a
+    /// window takes the keys; clicking the room gives them back.
+    var _desktop3DWalking: Bool {
+        _desktop3DOn && _desktop3DT > 0 && windowManager.focusedWindowId == nil
+    }
+
+    /// One step of the camera, from a key. Returns true if the key was
+    /// ours. HID usage codes, like the rest of the shortcut table.
+    ///
+    /// `forced` is Alt held: the camera answers even while a window has
+    /// the keyboard, because otherwise the room is unreachable in
+    /// practice — something is focused almost all of the time.
+    func _desktop3DKey(_ usage: Int, fast: Bool, forced: Bool = false) -> Bool {
+        guard _desktop3DOn, _desktop3DT > 0 else { return false }
+        guard forced || _desktop3DWalking else { return false }
+        var c = _camera3D
+        let step = Self.k3DStep * (fast ? 2.5 : 1)
+        let turn = Self.k3DTurn * (fast ? 2.5 : 1)
+        // Forward is where the camera is looking, flattened: walking, not
+        // flying, unless the rise/sink keys are used.
+        let fx = sin(c.yaw), fz = -cos(c.yaw)
+        switch usage {
+        case 0x1A, 0x52: c.x += fx * step; c.z += fz * step     // W, Up
+        case 0x16, 0x51: c.x -= fx * step; c.z -= fz * step     // S, Down
+        case 0x04:       c.x += fz * step; c.z -= fx * step     // A, strafe
+        case 0x07:       c.x -= fz * step; c.z += fx * step     // D, strafe
+        case 0x50, 0x14: c.yaw -= turn                          // Left, Q
+        case 0x4F, 0x08: c.yaw += turn                          // Right, E
+        case 0x15:       c.y += step                            // R, rise
+        case 0x09:       c.y -= step                            // F, sink
+        case 0x4A:                                              // Home
+            c = _desktop3DHomeCamera(displayLayout?.host.logicalRect
+                ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
+        case 0x2C:       return _desktop3DStepUp()               // Space
+        default:         return false
+        }
+        _desktop3DLog("key \(usage) -> \(c.x),\(c.z) yaw \(c.yaw)")
+        // Stay near the spot the photograph was taken from. Wander far
+        // and the reconstruction's holes open up, because the picture
+        // holds no information about what is behind what.
+        c.x = min(Self.k3DRoam, max(-Self.k3DRoam, c.x))
+        c.y = min(Self.k3DRoam, max(-Self.k3DRoam, c.y))
+        c.z = min(Self.k3DRoam * 1.6, max(-Self.k3DRoam, c.z))
+        c.pitch = min(1.2, max(-1.2, c.pitch))
+        setState { _camera3D = c }
+        _desktop3DPublishCamera()
+        return true
+    }
+
+    /// Walk up to the window most nearly in front of the viewer and stand
+    /// square on at the distance where its pixels are its pixels. This is
+    /// the answer to the oldest objection to a 3D desktop — that
+    /// perspective-sampled text is unusable — and it is an answer a room
+    /// can give and a flat desktop cannot: you step up to the thing.
+    @discardableResult
+    func _desktop3DStepUp() -> Bool {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        let c = _camera3D
+        let fx = sin(c.yaw), fz = -cos(c.yaw)
+        var best: (WindowInfo, Double)? = nil
+        for win in windowManager.visibleWindows where win.pose3D.placed {
+            let p = win.pose3D
+            let dx = p.x - c.x, dz = p.z - c.z
+            let len = (dx * dx + dz * dz).squareRoot()
+            guard len > 0.01 else { continue }
+            let facing = (dx * fx + dz * fz) / len       // 1 = dead ahead
+            guard facing > 0.2 else { continue }
+            let score = facing / (1 + len * 0.15)
+            if best == nil || score > best!.1 { best = (win, score) }
+        }
+        _desktop3DLog("step up: \(windowManager.visibleWindows.count) windows, "
+                      + "\(windowManager.visibleWindows.filter { $0.pose3D.placed }.count) placed, "
+                      + "best \(best?.0.title ?? "none")")
+        guard let winner = best?.0 else { return false }
+        let p = winner.pose3D
+        let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
+        setState {
+            // Square on to the pane, at the 1:1 distance, eye on its centre.
+            _camera3D = Camera3D(x: p.x + sin(p.yaw) * d1, y: p.y,
+                                 z: p.z + cos(p.yaw) * d1,
+                                 yaw: p.yaw, pitch: 0)
+            windowManager.bringToFront(winner.id)
+        }
+        _desktop3DPublishCamera()
+        return true
     }
 
     // MARK: The light
 
-    /// How much of the room's colour a window at the back of its range
+    /// How much of the room's colour a window at the back of the hall
     /// takes. Enough that distance reads; not so much that a window you
     /// might want to glance at stops being legible.
     static let k3DHazeMax = 0.30
-    /// How far a tilted window's glass leans from the theme's tint toward
-    /// the light actually behind it.
+    /// How far a window's glass leans from the theme's tint toward the
+    /// light actually behind it.
     static let k3DGlassRoomMix = 0.55
+    /// The distance at which haze reaches its maximum.
+    static let k3DHazeFar = 9.0
 
     /// The light behind one window: the average colour of the part of the
-    /// picture it floats in front of, plus the haze its distance earns.
-    ///
-    /// The sampling point needs no world-space maths at all. The window
-    /// and the wall point behind it lie on the SAME ray from the eye, and
-    /// the picture covers `kRoomCover` of the view — so the wall point
-    /// behind a window is simply its on-screen position divided by the
-    /// cover, less the picture's lift. Windows near the screen's edge
-    /// project past the picture onto the side walls, which carry the
-    /// picture's own edge colours anyway, so clamping is not an
-    /// approximation there, it is the right answer.
+    /// picture it stands in front of, plus the haze its distance earns.
+    /// The sampling point is where the ray from the eye through the
+    /// window's centre meets the picture's wall.
     ///
     /// Quantised, because this feeds `_windowChildCache`: an unrounded
-    /// colour would miss the cache on every pointer move and rebuild
-    /// every window's subtree for a change nobody can see.
-    func _desktop3DRoomLight(rect: Rect, t: Double, depth: Double) -> RoomLight? {
+    /// colour would miss the cache on every step and rebuild every
+    /// window's subtree for a change nobody can see.
+    func _desktop3DRoomLight(rect: Rect, t: Double, camera: Camera3D,
+                             pose: WindowPose3D) -> RoomLight? {
         #if os(Linux)
         guard t > 0, let grid = _wallpaperLight, grid.cols > 0, grid.rows > 0 else { return nil }
         let host = displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         guard host.width > 0, host.height > 0 else { return nil }
-        // The same w the perspective divide uses, so this is the window's
-        // real distance from the eye rather than its depth knob.
-        let w = 1 + (1 / Self.k3DNeighbourScale - 1) * depth * t
-        let cx = host.center.dx + (rect.center.dx - host.center.dx) / w
-        let cy = host.center.dy + (rect.center.dy - host.center.dy) / w
-        let cover = EnvironmentRenderer.kRoomCover
-        let lift = EnvironmentRenderer.kRoomLift
-        let nx = (cx - host.center.dx) / (host.width / 2)
-        let ny = -(cy - host.center.dy) / (host.height / 2)
-        let u = 0.5 + (nx / cover) / 2
-        let v = 0.5 - ((ny - lift * cover) / cover) / 2
-        let hu = (rect.width / w) / host.width / cover / 2
-        let hv = (rect.height / w) / host.height / cover / 2
+        let p = _desktop3DLerpPose(rect: rect, host: host, t: t, pose: pose)
 
-        func cell(_ a: Double, _ n: Int) -> Int {
-            min(n - 1, max(0, Int(a * Double(n))))
+        // The view outside is scenery at infinity, so where a pane sits
+        // against it depends only on the DIRECTION from the eye — which is
+        // its position on screen, in the frame the view exactly fills.
+        let tanH = tan(Self.k3DFovX / 2)
+        let fwd = (sin(camera.yaw), -cos(camera.yaw))
+        let right = (cos(camera.yaw), sin(camera.yaw))
+        let dx = p.x - camera.x, dy = p.y - camera.y, dz = p.z - camera.z
+        let along = dx * fwd.0 + dz * fwd.1
+        var u = 0.5, v = 0.5
+        if along > 0.05 {
+            let side = dx * right.0 + dz * right.1
+            u = 0.5 + (side / along) / (2 * tanH)
+            v = 0.5 - (dy / along) / (2 * tanH) * (host.width / host.height)
         }
-        let x0 = cell(u - hu, grid.cols), x1 = cell(u + hu, grid.cols)
-        let y0 = cell(v - hv, grid.rows), y1 = cell(v + hv, grid.rows)
+        let halfU = (rect.width * Self.k3DMetresPerPx) / (2 * max(along, 0.1) * tanH) / 2
+        let halfV = halfU
+        func cell(_ a: Double, _ n: Int) -> Int { min(n - 1, max(0, Int(a * Double(n)))) }
+        let x0 = cell(u - halfU, grid.cols), x1 = cell(u + halfU, grid.cols)
+        let y0 = cell(v - halfV, grid.rows), y1 = cell(v + halfV, grid.rows)
         var r = 0.0, g = 0.0, b = 0.0, n = 0.0
-        for gy in y0...y1 {
-            for gx in x0...x1 {
+        for gy in min(y0, y1)...max(y0, y1) {
+            for gx in min(x0, x1)...max(x0, x1) {
                 let c = grid.cells[gy * grid.cols + gx]
                 r += c.r; g += c.g; b += c.b; n += 1
             }
         }
         guard n > 0 else { return nil }
+        // Nothing hazes until it is further off than reading distance.
+        let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
+        let dist = _desktop3DDistance(rect: rect, t: t, camera: camera, pose: pose)
+        let haze = Self.k3DHazeMax
+            * min(1, max(0, (dist - d1) / (Self.k3DHazeFar - d1)))
         func q(_ x: Double) -> Double { (x * 24).rounded() / 24 }
-        let haze = min(Self.k3DHazeMax, (w - 1) * 0.28)
         return RoomLight(
             color: Color(alpha: 1.0, red: q(r / n), green: q(g / n), blue: q(b / n)),
             haze: (haze * 40).rounded() / 40,
@@ -217,6 +500,13 @@ extension _DesktopShellState {
         if on == _desktop3DOn, animated { return }
         _desktop3DOn = on
         _desktop3DPersist()
+        if on {
+            // Start from the one spot where the room looks like the flat
+            // desktop, and give every window a place in the hall.
+            _camera3D = _desktop3DHomeCamera(displayLayout?.host.logicalRect
+                ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
+            _desktop3DPlaceWindows()
+        }
         if !animated {
             setState { _desktop3DT = on ? 1 : 0 }
             _desktop3DPublishCamera()
@@ -274,37 +564,21 @@ extension _DesktopShellState {
         _desktop3DT = on ? 1 : 0
     }
 
-    // MARK: The camera
-
-    /// Pointer parallax: the eye follows the pointer a little, in steps.
-    /// Hover only — a drag delivers move events, not hover, so the camera
-    /// holds still while a window is being dragged.
-    func _desktop3DPointerHover(_ pos: Offset) {
-        guard _desktop3DOn || _desktop3DT > 0 else { return }
-        let host = displayLayout?.host.logicalRect
-            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
-        guard host.width > 0, host.height > 0 else { return }
-        let half = Double(Self.k3DParallaxSteps) / 2
-        let nx = max(-1.0, min(1.0, ((pos.dx - host.left) / host.width - 0.5) * 2))
-        let ny = max(-1.0, min(1.0, ((pos.dy - host.top) / host.height - 0.5) * 2))
-        let q = (Int((nx * half).rounded()), Int((ny * half).rounded()))
-        if q == _cameraQuantum3D { return }
-        _cameraQuantum3D = q
-        let cam = Camera3D(pan: Offset(Double(q.0) / half, Double(q.1) / half))
-        let hostId = displayLayout?.host.id ?? 0
-        setState { _cameras3D[hostId] = cam }
-        _desktop3DPublishCamera()
-    }
-
     /// Hand the environment what the platform thread decided; it renders
     /// on the raster thread at the next engine frame.
     func _desktop3DPublishCamera() {
         #if os(Linux)
         guard let env = _environment, let registry = drmTextureRegistry,
               let wl = waylandIntegration, environmentTextureId >= 0 else { return }
-        let cam = _cameras3D[displayLayout?.host.id ?? 0] ?? Camera3D()
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        let c = _desktop3DEffectiveCamera(_desktop3DT)
+        _ = host
+        let sky = shellMica ?? Color(alpha: 1, red: 0.55, green: 0.60, blue: 0.70)
         let changed = env.setCamera(EnvironmentCamera(
-            t: _desktop3DT, panX: cam.pan.dx, panY: cam.pan.dy))
+            t: _desktop3DT, x: c.x, y: c.y, z: c.z, yaw: c.yaw, pitch: c.pitch,
+            tanHalfFovX: tan(Self.k3DFovX / 2),
+            lightR: sky.r, lightG: sky.g, lightB: sky.b))
         if changed { registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId) }
         #endif
     }
@@ -332,11 +606,38 @@ extension _DesktopShellState {
         registry.setGLRenderer(id: id, renderer: renderer)
         _environment = renderer
         environmentTextureId = id
+        _startSceneClock()
         _desktop3DPublishCamera()
         registry.markGLTextureDirty(engine: wl.engine, id: id)
         return true
         #else
         return false
+        #endif
+    }
+
+    /// The scene is weather, not a photograph: a ticker drives the cloud
+    /// and the water. It lives with the ENVIRONMENT rather than with the
+    /// mode, because a session that comes up with the scene already open
+    /// never runs the enter path at all — the same thing that left every
+    /// window without a place in the room.
+    ///
+    /// This is the one part of the 3D desktop that costs power while
+    /// nothing else is happening: a full-screen pass per frame.
+    func _startSceneClock() {
+        #if os(Linux)
+        if _sceneTicker == nil {
+            _sceneTicker = createTicker { [weak self] elapsed in
+                guard let self, let env = self._environment,
+                      let registry = drmTextureRegistry,
+                      let wl = waylandIntegration,
+                      self.environmentTextureId >= 0 else { return }
+                env.tick(Double(elapsed.components.seconds)
+                         + Double(elapsed.components.attoseconds) * 1e-18)
+                registry.markGLTextureDirty(engine: wl.engine,
+                                            id: self.environmentTextureId)
+            }
+        }
+        if !(_sceneTicker?.isActive ?? false) { _ = _sceneTicker?.start() }
         #endif
     }
 
@@ -355,23 +656,31 @@ extension _DesktopShellState {
         #if os(Linux)
         guard environmentTextureId >= 0, let registry = drmTextureRegistry,
               let wl = waylandIntegration else { return }
+        _sceneTicker?.stop()
         registry.unregisterTexture(engine: wl.engine, id: environmentTextureId)
         environmentTextureId = -1
         _environment = nil
         #endif
     }
 
-    // MARK: Window depth
+    // MARK: Moving a window in the room
 
-    /// A scroll on a title bar pushes the window away or pulls it closer.
-    /// Only the 3D desktop has a notion of depth; in 2D it is a no-op.
+    /// A scroll on a title bar pushes the window away from the viewer or
+    /// pulls it closer, along the line between them — the room's version
+    /// of dragging a window around.
     func _desktop3DScroll(_ winId: String, delta: Double) {
         guard _desktop3DOn, delta != 0,
-              let win = windowManager.windows.first(where: { $0.id == winId }) else { return }
-        let factor = delta > 0 ? 1.08 : 1 / 1.08
-        let next = min(WindowPose3D.range.upperBound,
-                       max(WindowPose3D.range.lowerBound, win.pose3D.depth * factor))
-        guard next != win.pose3D.depth else { return }
-        setState { win.pose3D.depth = next }
+              let win = windowManager.windows.first(where: { $0.id == winId }),
+              win.pose3D.placed else { return }
+        let c = _camera3D
+        var p = win.pose3D
+        let dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z
+        let len = (dx * dx + dy * dy + dz * dz).squareRoot()
+        guard len > 0.05 else { return }
+        let next = min(12.0, max(0.9, len + (delta > 0 ? 0.25 : -0.25)))
+        guard next != len else { return }
+        let k = next / len
+        p.x = c.x + dx * k; p.y = c.y + dy * k; p.z = c.z + dz * k
+        setState { win.pose3D = p }
     }
 }
