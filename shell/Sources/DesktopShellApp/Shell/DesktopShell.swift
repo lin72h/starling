@@ -679,7 +679,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The baked room, once it has been read off disk.
     var _roomAsset: (mesh: Room3D.Asset,
                      diffuse: (data: [UInt8], w: Int, h: Int),
-                     arm: (data: [UInt8], w: Int, h: Int))? = nil
+                     arm: (data: [UInt8], w: Int, h: Int),
+                     sky: (data: [UInt8], w: Int, h: Int))? = nil
     var _roomLoadStarted = false
     #endif
     var environmentTextureId: Int64 = -1

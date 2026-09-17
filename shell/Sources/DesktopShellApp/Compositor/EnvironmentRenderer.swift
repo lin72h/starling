@@ -263,7 +263,8 @@ final class EnvironmentRenderer: GLRenderer {
     /// them on the raster thread at the next frame.
     var roomAsset: (mesh: Room3D.Asset,
                     diffuse: (data: [UInt8], w: Int, h: Int),
-                    arm: (data: [UInt8], w: Int, h: Int))? {
+                    arm: (data: [UInt8], w: Int, h: Int),
+                    sky: (data: [UInt8], w: Int, h: Int))? {
         get { cameraLock.lock(); defer { cameraLock.unlock() }; return _room }
         set {
             cameraLock.lock(); _room = newValue; _roomStale = true; cameraLock.unlock()
@@ -272,12 +273,14 @@ final class EnvironmentRenderer: GLRenderer {
     }
     private var _room: (mesh: Room3D.Asset,
                         diffuse: (data: [UInt8], w: Int, h: Int),
-                        arm: (data: [UInt8], w: Int, h: Int))?
+                        arm: (data: [UInt8], w: Int, h: Int),
+                        sky: (data: [UInt8], w: Int, h: Int))?
     private var _roomStale = false
     private var ibo: UInt32 = 0
     private var indexCount: Int32 = 0
-    private var texDiffuse: UInt32 = 0, texArm: UInt32 = 0
-    private var uDiffuse: Int32 = -1, uArm: Int32 = -1
+    private var texDiffuse: UInt32 = 0, texArm: UInt32 = 0, texSky: UInt32 = 0
+    private var uDiffuse: Int32 = -1, uArm: Int32 = -1, uSky: Int32 = -1
+    private var uSH: Int32 = -1, uSunCol: Int32 = -1, uSkyRange: Int32 = -1
 
     // GL objects (raster thread only)
     private var glReady = false
@@ -459,7 +462,18 @@ final class EnvironmentRenderer: GLRenderer {
             _glActiveTexture(GL_TEXTURE0 + 2)
             _glBindTexture(GL_TEXTURE_2D, texArm)
             _glUniform1i(uArm, 2)
+            _glActiveTexture(GL_TEXTURE0 + 3)
+            _glBindTexture(GL_TEXTURE_2D, texSky)
+            _glUniform1i(uSky, 3)
             _glActiveTexture(GL_TEXTURE0)
+            if let room = _room {
+                var sh = room.mesh.sh
+                if uSH >= 0, sh.count == 27 { _glUniform3fv?(uSH, 9, &sh) }
+                var sc = [room.mesh.sunColour.0, room.mesh.sunColour.1,
+                          room.mesh.sunColour.2]
+                if uSunCol >= 0 { _glUniform3fv?(uSunCol, 1, &sc) }
+                _glUniform1f(uSkyRange, room.mesh.skyRange)
+            }
             _glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo)
             _glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nil)
             _glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
@@ -594,6 +608,7 @@ final class EnvironmentRenderer: GLRenderer {
         }
         upload(&texDiffuse, r.diffuse)
         upload(&texArm, r.arm)
+        upload(&texSky, r.sky)
         let msg = "[EnvironmentRenderer] room \(vertexCount) verts, "
             + "\(indexCount / 3) tris, atlas \(r.diffuse.w)x\(r.diffuse.h)\n"
         FileHandle.standardError.write(Data(msg.utf8))
@@ -647,6 +662,10 @@ final class EnvironmentRenderer: GLRenderer {
     uniform sampler2D uTex;
     uniform sampler2D uDiffuse;
     uniform sampler2D uArm;
+    uniform sampler2D uSky;
+    uniform vec3 uSH[9];
+    uniform vec3 uSunCol;
+    uniform float uSkyRange;
     uniform float uTime;
     uniform float uFade;
     uniform vec3 uEye;
@@ -679,27 +698,23 @@ final class EnvironmentRenderer: GLRenderer {
         float m = vMat;
 
         // ---- outside ----------------------------------------------------
+        // A real sky, captured: the same one the room's light was baked
+        // from, so what comes through the glass and what falls on the
+        // floor are the same weather. Packed as RGB times a multiplier in
+        // alpha, because 8 bits per channel cannot hold a sun.
         if (m > 3.5 && m < 4.5) {
             vec3 d = normalize(vDir);
-            float up = clamp(d.y * 1.2 + 0.18, 0.0, 1.0);
-            vec3 sky2 = mix(vec3(0.78, 0.84, 0.90), vec3(0.34, 0.54, 0.88), up);
-            // Cloud in direction-space, so it belongs to the sky and not to
-            // the screen, drifting the way weather does.
-            vec2 sc = vec2(atan(d.x, -d.z) * 1.9, d.y / max(0.14, length(d.xz)) * 1.3);
-            float t2 = uTime * 0.0075;
-            float f = fbm(sc + vec2(t2, -t2 * 0.18));
-            float g = fbm(sc * 2.7 + vec2(-t2 * 1.7, t2 * 0.4));
-            float cloud = smoothstep(0.44, 0.82, f * 0.72 + g * 0.28)
-                        * smoothstep(0.02, 0.30, up);
-            vec3 sunDir = normalize(vec3(-0.34, 0.56, -0.76));
-            float toSun = max(dot(d, sunDir), 0.0);
-            vec3 cloudCol = mix(vec3(0.76, 0.78, 0.82), vec3(1.0, 0.98, 0.94),
-                                pow(toSun, 2.5));
-            vec3 c = mix(sky2, cloudCol, cloud * 0.92) * 1.45;
-            c += vec3(1.0, 0.95, 0.85) * pow(toSun, 900.0) * 2.2;
-            c += vec3(1.0, 0.93, 0.80) * pow(toSun, 14.0) * 0.18;
-            float land = smoothstep(0.015, -0.004, d.y);
-            c = mix(c, vec3(0.60, 0.66, 0.58) * (0.85 + 0.3 * fbm(sc * 5.0)), land * 0.80);
+            float su = 0.5 + atan(d.x, -d.z) / 6.2831853;
+            float sv = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+            // The PNG's rows go in top-down and GL's origin is at the
+            // bottom, so the lookup runs the other way.
+            // Square-rooted on the way in, squared here. NOT an alpha
+            // multiplier: the engine's image codec returns premultiplied
+            // RGBA, so anything kept in alpha arrives already folded into
+            // the colour and multiplying by it again blackens the sky.
+            // (`packed` is also a reserved word in GLSL, for the record.)
+            vec3 sky = texture2D(uSky, vec2(su, 1.0 - sv)).rgb;
+            vec3 c = sky * sky * uSkyRange;
             c = c / (c + vec3(0.78)) * 1.62;
             gl_FragColor = vec4(c * uFade, 1.0);
             return;
@@ -714,8 +729,10 @@ final class EnvironmentRenderer: GLRenderer {
         float gloss = 0.0;
         float texAO = 1.0;
         if (m < 0.5) {
-            albedo = texture2D(uDiffuse, vUV).rgb;
-            vec3 arm = texture2D(uArm, vUV).rgb;
+            // Same flip as the sky: these atlases are written top-down.
+            vec2 au = vec2(vUV.x, 1.0 - vUV.y);
+            albedo = texture2D(uDiffuse, au).rgb;
+            vec3 arm = texture2D(uArm, au).rgb;
             texAO = 0.35 + 0.65 * arm.r;
             gloss = (1.0 - arm.g) * 0.5 + arm.b * 0.35;
         } else if (m < 1.5) {
@@ -739,7 +756,7 @@ final class EnvironmentRenderer: GLRenderer {
         } else if (m < 5.5) {
             // The wallpaper, framed and hanging in the room.
             gl_FragColor = vec4(texture2D(uTex,
-                vec2(clamp(vUV.x, 0.0, 1.0), clamp(vUV.y, 0.0, 1.0))).rgb
+                vec2(clamp(vUV.x, 0.0, 1.0), 1.0 - clamp(vUV.y, 0.0, 1.0))).rgb
                 * (0.55 + 0.9 * vAO) * uFade, 1.0);
             return;
         } else {
@@ -749,30 +766,29 @@ final class EnvironmentRenderer: GLRenderer {
         }
 
         vec3 n = normalize(vNrm);
-        // An interior is mostly inter-reflection: cool from the sky above,
-        // warm off the floor below, and a flat term for light that has
-        // bounced more than twice — without which a ceiling, which can
-        // only see the floor, comes out brown.
-        float lum = dot(uLight, vec3(0.30, 0.59, 0.11)) + 0.10;
-        vec3 tint = uLight / lum;
-        float up = n.y * 0.5 + 0.5;
-        vec3 sky = mix(vec3(0.95, 0.97, 1.0), tint, 0.30) * 0.66;
-        // The floor's bounce is warm but not orange, and it is weaker than
-        // the fill: a ceiling sees only the floor, and with a strong warm
-        // bounce and a weak fill it comes out BROWN, which is the single
-        // thing that most gives away an interior lit by guesswork.
-        vec3 bounce = vec3(0.56, 0.50, 0.44) * 0.30;
-        // A wall of windows is an enormous soft source, and a surface
-        // that FACES it is far brighter than one that does not. Without
-        // this term every face of every object gets the same light and the
-        // furniture reads as polystyrene: the form is all in the contrast
-        // between the side that sees the window and the side that cannot.
+        // What the whole sky gives a surface facing this way, from the
+        // nine coefficients baked out of the HDRI. This is what used to be
+        // three hand-tuned constants and a guess about which way was up.
+        const float c1 = 0.429043, c2 = 0.511664;
+        const float c3 = 0.743125, c4 = 0.886227, c5 = 0.247708;
+        vec3 irr = c1 * uSH[8] * (n.x * n.x - n.y * n.y)
+                 + c3 * uSH[6] * n.z * n.z
+                 + c4 * uSH[0] - c5 * uSH[6]
+                 + 2.0 * c1 * (uSH[4] * n.x * n.y + uSH[7] * n.x * n.z
+                               + uSH[5] * n.y * n.z)
+                 + 2.0 * c2 * (uSH[3] * n.x + uSH[1] * n.y + uSH[2] * n.z);
+        // Only what the room can see of it: the walls block most of the
+        // sky, and the windows are where it gets in.
         float toWin = max(-n.z, 0.0);
-        vec3 ambient = (mix(bounce, sky, up) * 0.62
-                        + sky * toWin * 0.95
-                        + vec3(0.17, 0.18, 0.20)) * vAO * texAO;
-        vec3 sunCol = vec3(1.28, 1.17, 0.98) * 2.05;
-        vec3 lit = albedo * (ambient + sunCol * vSun);
+        vec3 skyAmb = max(irr, vec3(0.0)) * (0.17 + 0.62 * toWin) * 0.318;
+        // Light that has bounced off the floor. No sky can supply this —
+        // a ceiling sees no sky at all — and without it the ceiling is
+        // black, which is the one thing that never happens in a room.
+        float down = clamp(0.5 - n.y * 0.5, 0.0, 1.0);
+        vec3 bounce = vec3(1.0, 0.90, 0.76)
+                    * (0.10 + 0.26 * down) * (0.35 + 0.06 * uSunCol.g);
+        vec3 ambient = (skyAmb + bounce) * vAO * texAO;
+        vec3 lit = albedo * (ambient + uSunCol * vSun * 0.318);
         if (gloss > 0.0) {
             vec3 vv = normalize(uEye - vPos);
             float fres = pow(1.0 - max(dot(n, vv), 0.0), 4.0);
@@ -905,6 +921,10 @@ final class EnvironmentRenderer: GLRenderer {
         aUV = _glGetAttribLocation(prog, "aUV")
         uDiffuse = _glGetUniformLocation(prog, "uDiffuse")
         uArm = _glGetUniformLocation(prog, "uArm")
+        uSky = _glGetUniformLocation(prog, "uSky")
+        uSH = _glGetUniformLocation(prog, "uSH[0]")
+        uSunCol = _glGetUniformLocation(prog, "uSunCol")
+        uSkyRange = _glGetUniformLocation(prog, "uSkyRange")
         aNrm = _glGetAttribLocation(prog, "aNrm")
         aAO = _glGetAttribLocation(prog, "aAO")
         aSun = _glGetAttribLocation(prog, "aSun")

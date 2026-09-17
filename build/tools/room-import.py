@@ -31,6 +31,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from room_gltf import Gltf  # noqa: E402
+import room_hdri  # noqa: E402
 
 # ---------------------------------------------------------------- the room
 
@@ -39,10 +40,18 @@ HALF = WIDTH / 2
 # Three tall windows in the z = 0 wall.
 WINDOWS = [(-3.30, -1.90, 0.42, 2.62), (-0.70, 0.70, 0.42, 2.62),
            (1.90, 3.30, 0.42, 2.62)]
-# Direction TO the sun: outside (negative z), high, and off to one side so
-# the patches it throws are long and the room has a direction.
+# Direction TO the sun. Overwritten from the sky: the room is lit by the
+# same sun the view out of its windows is, which is the whole point of
+# using a captured sky rather than numbers somebody tuned by eye.
 SUN = np.array([-0.34, 0.56, -0.76])
 SUN /= np.linalg.norm(SUN)
+# Which way the room faces in the sky's world, in degrees. The sky is a
+# real place with a real sun in it; this is how the windows are pointed
+# to put that sun where the room wants it.
+# Rolling the equirectangular columns adds to the sun's azimuth, measured
+# as atan2(x, -z). meadow_2's sun sits at 36 deg; the room wants it near
+# -23, coming in over the left-hand windows.
+SKY_YAW = 301.0
 
 # Materials the shader knows. 0 is "look it up in the atlas"; the rest are
 # procedural, because a floor and a wall want to tile and an atlas cannot.
@@ -238,6 +247,39 @@ class Occupancy:
         return hit
 
 
+def load_sky(path, out, yaw_deg):
+    """Read the sky, turn it to face the room, and get its light out.
+
+    Returns the nine spherical-harmonic coefficients that reproduce how
+    this sky lights a surface facing any direction, and the sun's
+    direction and colour. Both go into the mesh file, so the shell never
+    sees an HDR pixel.
+    """
+    img = room_hdri.read_hdr(path)
+    # Rotate about the vertical by rolling the equirectangular columns —
+    # which is all a yaw is in this projection.
+    shift = int(round((yaw_deg / 360.0) * img.shape[1])) % img.shape[1]
+    img = np.roll(img, shift, axis=1)
+
+    sun_dir, sun_col = room_hdri.find_sun(img)
+    # The harmonics are the sky WITHOUT its sun. The sun is added back as
+    # a directional light that casts shadows, and leaving it in both
+    # places counts it twice — which reads as a room whose ambient is
+    # three times too bright and whose shadows therefore have to be
+    # crushed to compensate.
+    sh = room_hdri.sh9(room_hdri.without_sun(img))
+    Image.fromarray(room_hdri.to_gamma(img, max_range=SKY_RANGE)).save(
+        os.path.join(out, "room-sky.png"), optimize=True)
+    return sh, sun_dir, sun_col
+
+
+# How much of the sky's range the packed texture keeps. The sun itself is
+# thousands of times brighter than the sky around it and no 8-bit
+# encoding holds that; what matters is that the sky and the clouds keep
+# their relationship and the sun stays the brightest thing in the frame.
+SKY_RANGE = 9.0
+
+
 def bake_light(pos, nrm, occ):
     """Ambient occlusion and daylight, per vertex, against the real room.
 
@@ -332,9 +374,21 @@ def main() -> int:
         "shell", "Resources", "Room"))
     ap.add_argument("--aspect", type=float, default=1.6)
     ap.add_argument("--fov", type=float, default=70.0)
+    ap.add_argument("--hdri", default=os.path.expanduser("~/tmp/hdri-meadow_2.hdr"),
+                    help="the sky the room is lit by and looks out on")
     a = ap.parse_args()
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
+
+    global SUN
+    sh, sun_dir, sun_col = load_sky(a.hdri, out, SKY_YAW)
+    SUN = sun_dir
+    print(f"  sky: sun {np.round(sun_dir, 3)} "
+          f"({np.degrees(np.arcsin(sun_dir[1])):.0f}deg up), "
+          f"colour {np.round(sun_col, 2)}, sh0 {np.round(sh[0], 3)}")
+    if sun_dir[2] > -0.05:
+        print("  ! the sun is not on the window side; turn SKY_YAW",
+              file=sys.stderr)
 
     mesh, atlas = Mesh(), Atlas()
     tan_half = np.tan(np.radians(a.fov) / 2)
@@ -365,12 +419,18 @@ def main() -> int:
                             mat[:, None]], axis=1).astype(np.float32)
     with open(os.path.join(out, "room.mesh"), "wb") as f:
         f.write(b"STARROOM")
-        f.write(struct.pack("<IIII", 1, len(verts), len(idx), 11))
+        # Version 2 carries the sky's light after the header: nine SH
+        # coefficients, then the sun's direction and colour.
+        f.write(struct.pack("<IIII", 2, len(verts), len(idx), 11))
+        f.write(np.asarray(sh, np.float32).tobytes())
+        f.write(np.asarray(sun_dir, np.float32).tobytes())
+        f.write(np.asarray(sun_col, np.float32).tobytes())
+        f.write(struct.pack("<f", SKY_RANGE))
         f.write(verts.tobytes())
         f.write(idx.astype(np.uint32).tobytes())
     atlas.diffuse.save(os.path.join(out, "room-diffuse.png"), optimize=True)
     atlas.arm.save(os.path.join(out, "room-arm.png"), optimize=True)
-    for n2 in ("room.mesh", "room-diffuse.png", "room-arm.png"):
+    for n2 in ("room.mesh", "room-diffuse.png", "room-arm.png", "room-sky.png"):
         print(f"  {n2:20s} {os.path.getsize(os.path.join(out, n2))/1e6:6.2f} MB")
     return 0
 

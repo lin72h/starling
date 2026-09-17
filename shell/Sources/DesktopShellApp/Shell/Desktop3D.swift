@@ -670,8 +670,9 @@ extension _DesktopShellState {
             }
             guard let diff = await decode("room-diffuse.png"),
                   let arm = await decode("room-arm.png"),
+                  let sky = await decode("room-sky.png"),
                   let shell = _shellState else { return }
-            shell._roomAsset = (mesh, diff, arm)
+            shell._roomAsset = (mesh, diff, arm, sky)
             shell._applyRoomAsset()
         }
         #endif

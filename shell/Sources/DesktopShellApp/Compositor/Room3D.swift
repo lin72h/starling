@@ -38,6 +38,16 @@ struct Room3D {
         var vertices: [Float]
         var indices: [UInt32]
         var floatsPerVertex: Int
+        /// The sky's light: nine spherical-harmonic coefficients (RGB
+        /// each) that reproduce how it lights a surface facing any
+        /// direction, and the sun's direction and colour. Computed from
+        /// the HDRI at bake time, so the room and the view out of its
+        /// windows are lit by the same sky.
+        var sh: [Float] = []
+        var sunDir: (Float, Float, Float) = (0, 1, 0)
+        var sunColour: (Float, Float, Float) = (1, 1, 1)
+        /// What the packed sky texture's alpha channel multiplies by.
+        var skyRange: Float = 12
     }
 
     /// Read the baked room. `STARROOM`, a version, counts, then the two
@@ -53,16 +63,28 @@ struct Room3D {
             let vCount = Int(base.loadUnaligned(fromByteOffset: 12, as: UInt32.self))
             let iCount = Int(base.loadUnaligned(fromByteOffset: 16, as: UInt32.self))
             let stride = Int(base.loadUnaligned(fromByteOffset: 20, as: UInt32.self))
-            guard version == 1, vCount > 0, iCount > 0, stride == 11 else { return nil }
+            guard version == 2, vCount > 0, iCount > 0, stride == 11 else { return nil }
+            // Version 2's header is followed by the sky's light: 9 SH
+            // triples, the sun's direction and colour, and the sky
+            // texture's range. 34 floats.
+            let lightFloats = 9 * 3 + 3 + 3 + 1
+            let lightBytes = lightFloats * 4
             let vBytes = vCount * stride * 4, iBytes = iCount * 4
-            guard data.count >= 24 + vBytes + iBytes else { return nil }
+            guard data.count >= 24 + lightBytes + vBytes + iBytes else { return nil }
+            var light = [Float](repeating: 0, count: lightFloats)
+            light.withUnsafeMutableBytes { memcpy($0.baseAddress!, base + 24, lightBytes) }
+            let vOff = 24 + lightBytes
             let verts = [Float](unsafeUninitializedCapacity: vCount * stride) { buf, n in
-                memcpy(buf.baseAddress!, base + 24, vBytes); n = vCount * stride
+                memcpy(buf.baseAddress!, base + vOff, vBytes); n = vCount * stride
             }
             let idx = [UInt32](unsafeUninitializedCapacity: iCount) { buf, n in
-                memcpy(buf.baseAddress!, base + 24 + vBytes, iBytes); n = iCount
+                memcpy(buf.baseAddress!, base + vOff + vBytes, iBytes); n = iCount
             }
-            return Asset(vertices: verts, indices: idx, floatsPerVertex: stride)
+            return Asset(vertices: verts, indices: idx, floatsPerVertex: stride,
+                         sh: Array(light[0..<27]),
+                         sunDir: (light[27], light[28], light[29]),
+                         sunColour: (light[30], light[31], light[32]),
+                         skyRange: light[33])
         }
     }
 }
