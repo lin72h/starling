@@ -686,6 +686,10 @@ func runDRM() -> Never {
     DesktopCursor.shapeSetter = { shape in
         fl_drm_view_set_cursor_shape(view, shape.rawValue)
     }
+    // A pointer lock hides the sprite (an empty image); a shape brings it back.
+    DesktopCursor.hiddenSetter = { hidden in
+        if hidden { fl_drm_view_set_cursor_image(view, nil, 0, 0, 0, 0) }
+    }
     // Export screen resolution so child apps (SettingsApp) can compute max DPI.
     // Fresh reads, not the values captured at create: the persisted-primary
     // rebind above may have moved the implicit view to a different panel.

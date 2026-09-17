@@ -62,6 +62,8 @@
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
 #include "primary-selection-unstable-v1-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
 #include <xkbcommon/xkbcommon.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -174,6 +176,7 @@ static struct {
     uint32_t watch_shm_sid; int watch_shm_count;
     uint32_t sub_unmapped_id; int sub_unmapped;
     uint32_t parent_child, parent_parent; int parent_count;
+    uint32_t pc_surface; int pc_lock, pc_active, pc_has_hint; double pc_hint_x, pc_hint_y; int pc_count;
 } seen;
 
 #define LOCKED(stmt) do { pthread_mutex_lock(&seen_mu); stmt; pthread_mutex_unlock(&seen_mu); } while (0)
@@ -196,6 +199,12 @@ static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int3
 static void cb_sub_unmapped(void* ctx, uint32_t sid) {
     (void)ctx;
     LOCKED(seen.sub_unmapped_id = sid; seen.sub_unmapped++);
+}
+static void cb_constraint(void* ctx, uint32_t sid, int lock, int active, int has_hint,
+                          double hx, double hy) {
+    (void)ctx;
+    LOCKED(seen.pc_surface = sid; seen.pc_lock = lock; seen.pc_active = active;
+           seen.pc_has_hint = has_hint; seen.pc_hint_x = hx; seen.pc_hint_y = hy; seen.pc_count++);
 }
 static void cb_parent(void* ctx, uint32_t sid, uint32_t parent) {
     (void)ctx;
@@ -309,6 +318,8 @@ static struct wl_shm* shm;
 static struct wl_seat* seat;
 static struct wl_subcompositor* subcompositor;
 static struct zwp_primary_selection_device_manager_v1* prim_mgr;
+static struct zwp_pointer_constraints_v1* cons_mgr;
+static struct zwp_relative_pointer_manager_v1* rel_mgr;
 
 /* Proxies the server hands out through events (handles, heads, modes,
  * offers) that the tests read and never destroy: kept here and destroyed
@@ -368,6 +379,8 @@ static void reg_global(void* data, struct wl_registry* r, uint32_t id,
     BIND(seat, wl_seat, 9);
     BIND(subcompositor, wl_subcompositor, 1);
     BIND(prim_mgr, zwp_primary_selection_device_manager_v1, 1);
+    BIND(cons_mgr, zwp_pointer_constraints_v1, 1);
+    BIND(rel_mgr, zwp_relative_pointer_manager_v1, 1);
     BIND(output, wl_output, 4);
     BIND(wm_base, xdg_wm_base, 7);
     BIND(layer_shell, zwlr_layer_shell_v1, 5);
@@ -2308,6 +2321,123 @@ static void test_primary_via_data_control(void) {
     wl_display_roundtrip(dpy);
 }
 
+/* zwp_pointer_constraints + zwp_relative_pointer. A lock takes effect
+ * when the pointer enters the surface (at once if it is there), the shell
+ * hears it, relative motion reaches the client, leaving ends it; a
+ * one-shot lock is spent then, a persistent one re-arms; the shell can
+ * break one; a cursor position hint rides the end of a lock. */
+static volatile int plk_locked, plk_unlocked, cf_confined, cf_unconfined, rel_count;
+static double rel_dx, rel_dy;
+static void pplk_locked_cb(void* d, struct zwp_locked_pointer_v1* l) { (void)d; (void)l; plk_locked++; }
+static void pplk_unlocked_cb(void* d, struct zwp_locked_pointer_v1* l) { (void)d; (void)l; plk_unlocked++; }
+static const struct zwp_locked_pointer_v1_listener plk_listener = { pplk_locked_cb, pplk_unlocked_cb };
+static void cf_confined_cb(void* d, struct zwp_confined_pointer_v1* c) { (void)d; (void)c; cf_confined++; }
+static void cf_unconfined_cb(void* d, struct zwp_confined_pointer_v1* c) { (void)d; (void)c; cf_unconfined++; }
+static const struct zwp_confined_pointer_v1_listener cf_listener = { cf_confined_cb, cf_unconfined_cb };
+static void rel_motion(void* d, struct zwp_relative_pointer_v1* r, uint32_t hi, uint32_t lo,
+                       wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t udx, wl_fixed_t udy) {
+    (void)d; (void)r; (void)hi; (void)lo; (void)udx; (void)udy;
+    rel_dx = wl_fixed_to_double(dx); rel_dy = wl_fixed_to_double(dy); rel_count++;
+}
+static const struct zwp_relative_pointer_v1_listener rel_listener = { rel_motion };
+static void p9_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* sf, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)s; (void)sf; (void)x; (void)y; }
+static void p9_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* sf) { (void)d; (void)p; (void)s; (void)sf; }
+static void p9_motion(void* d, struct wl_pointer* p, uint32_t t, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)t; (void)x; (void)y; }
+static void p9_button(void* d, struct wl_pointer* p, uint32_t s, uint32_t t, uint32_t b, uint32_t st) { (void)d; (void)p; (void)s; (void)t; (void)b; (void)st; }
+static void p9_axis(void* d, struct wl_pointer* p, uint32_t t, uint32_t a, wl_fixed_t v) { (void)d; (void)p; (void)t; (void)a; (void)v; }
+static void p9_frame(void* d, struct wl_pointer* p) { (void)d; (void)p; }
+static void p9_axis_source(void* d, struct wl_pointer* p, uint32_t a) { (void)d; (void)p; (void)a; }
+static void p9_axis_stop(void* d, struct wl_pointer* p, uint32_t t, uint32_t a) { (void)d; (void)p; (void)t; (void)a; }
+static void p9_axis_discrete(void* d, struct wl_pointer* p, uint32_t a, int32_t v) { (void)d; (void)p; (void)a; (void)v; }
+static void p9_axis_value120(void* d, struct wl_pointer* p, uint32_t a, int32_t v) { (void)d; (void)p; (void)a; (void)v; }
+static void p9_axis_relative_direction(void* d, struct wl_pointer* p, uint32_t a, uint32_t dir) { (void)d; (void)p; (void)a; (void)dir; }
+static const struct wl_pointer_listener p9_listener = {
+    p9_enter, p9_leave, p9_motion, p9_button, p9_axis, p9_frame, p9_axis_source,
+    p9_axis_stop, p9_axis_discrete, p9_axis_value120, p9_axis_relative_direction
+};
+static void task_leave(void* arg) { (void)arg; wayland_server_pointer_leave(server, enter_sid); }
+static void task_relative(void* arg) { (void)arg; wayland_server_pointer_relative_motion(server, enter_sid, 9, 5.0, -3.5); }
+static void task_break(void* arg) { (void)arg; wayland_server_break_pointer_constraints(server); }
+
+static void test_pointer_constraints(void) {
+    if (!cons_mgr || !rel_mgr) { CHECK(0, "constraint managers missing"); return; }
+    uint32_t tl_sid = seen.new_toplevel_id;
+    enter_sid = tl_sid;
+    struct wl_pointer* ptr = wl_seat_get_pointer(seat);
+    wl_pointer_add_listener(ptr, &p9_listener, NULL);
+    struct zwp_relative_pointer_v1* rel = zwp_relative_pointer_manager_v1_get_relative_pointer(rel_mgr, ptr);
+    zwp_relative_pointer_v1_add_listener(rel, &rel_listener, NULL);
+    wl_display_roundtrip(dpy);
+
+    /* Relative motion arrives, lock or no lock. */
+    on_server(task_enter, NULL);
+    on_server(task_relative, NULL);
+    CHECK(wait_for(&rel_count, 500), "relative motion reached the client");
+    CHECK(rel_dx == 5.0 && rel_dy == -3.5, "with its delta (%.1f, %.1f)", rel_dx, rel_dy);
+
+    /* The pointer leaves; a one-shot lock waits for it to come back. */
+    on_server(task_leave, NULL);
+    int pc0; LOCKED(pc0 = seen.pc_count);
+    struct zwp_locked_pointer_v1* plk = zwp_pointer_constraints_v1_lock_pointer(cons_mgr, tl_surface, ptr, NULL,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+    zwp_locked_pointer_v1_add_listener(plk, &plk_listener, NULL);
+    wl_display_roundtrip(dpy);
+    CHECK(plk_locked == 0, "no lock until the pointer is on the surface");
+    on_server(task_enter, NULL);
+    CHECK(wait_for(&plk_locked, 500), "locked when the pointer enters");
+    int pc; LOCKED(pc = seen.pc_count);
+    CHECK(pc == pc0 + 1 && seen.pc_surface == tl_sid && seen.pc_lock && seen.pc_active,
+          "the shell heard the lock (%d, surface %u, lock %d active %d)", pc - pc0,
+          seen.pc_surface, seen.pc_lock, seen.pc_active);
+    zwp_locked_pointer_v1_set_cursor_position_hint(plk, wl_fixed_from_double(12.5), wl_fixed_from_double(40.0));
+    wl_display_roundtrip(dpy);   /* the hint must be in before the leave */
+    on_server(task_leave, NULL);
+    CHECK(wait_for(&plk_unlocked, 500), "unlocked when the pointer leaves");
+    LOCKED(pc = seen.pc_count);
+    CHECK(pc == pc0 + 2 && !seen.pc_active, "the shell heard the end (%d)", pc - pc0);
+    CHECK(seen.pc_has_hint && seen.pc_hint_x == 12.5 && seen.pc_hint_y == 40.0,
+          "with the cursor position hint (%d: %.1f, %.1f)", seen.pc_has_hint, seen.pc_hint_x, seen.pc_hint_y);
+    plk_locked = 0;
+    on_server(task_enter, NULL);
+    wl_display_roundtrip(dpy);
+    CHECK(!wait_for(&plk_locked, 150), "a one-shot lock does not come back");
+    zwp_locked_pointer_v1_destroy(plk);
+    wl_display_roundtrip(dpy);
+
+    /* Persistent: re-arms on every enter; the shell can break it. */
+    on_server(task_leave, NULL);
+    plk_locked = 0; plk_unlocked = 0;
+    plk = zwp_pointer_constraints_v1_lock_pointer(cons_mgr, tl_surface, ptr, NULL,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+    zwp_locked_pointer_v1_add_listener(plk, &plk_listener, NULL);
+    wl_display_roundtrip(dpy);
+    on_server(task_enter, NULL);
+    CHECK(wait_for(&plk_locked, 500), "a persistent lock locks on enter");
+    on_server(task_leave, NULL);
+    CHECK(wait_for(&plk_unlocked, 500), "and unlocks on leave");
+    plk_locked = 0;
+    on_server(task_enter, NULL);
+    CHECK(wait_for(&plk_locked, 500), "and locks again on the next enter");
+    plk_unlocked = 0;
+    on_server(task_break, NULL);
+    CHECK(wait_for(&plk_unlocked, 500), "the shell breaking it unlocks");
+    zwp_locked_pointer_v1_destroy(plk);
+    wl_display_roundtrip(dpy);
+
+    /* A confinement on a surface the pointer is already on: at once. */
+    struct zwp_confined_pointer_v1* cf = zwp_pointer_constraints_v1_confine_pointer(cons_mgr, tl_surface, ptr, NULL,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+    zwp_confined_pointer_v1_add_listener(cf, &cf_listener, NULL);
+    CHECK(wait_for(&cf_confined, 500), "confined at once when the pointer is already there");
+    CHECK(seen.pc_active && !seen.pc_lock, "the shell heard a confinement");
+    on_server(task_leave, NULL);
+    CHECK(wait_for(&cf_unconfined, 500), "unconfined on leave");
+    zwp_confined_pointer_v1_destroy(cf);
+    zwp_relative_pointer_v1_destroy(rel);
+    wl_pointer_destroy(ptr);
+    wl_display_roundtrip(dpy);
+}
+
 static void test_seat_v1_pointer(void) {
     struct wl_seat* seat1 = wl_registry_bind(registry, seat_gname, &wl_seat_interface, 1);
     struct wl_pointer* ptr = wl_seat_get_pointer(seat1);
@@ -2367,6 +2497,7 @@ int main(void) {
     wayland_server_on_output_config(server, cb_outcfg, NULL);
     wayland_server_on_toplevel_size_hints(server, cb_size_hints, NULL);
     wayland_server_on_toplevel_parent(server, cb_parent, NULL);
+    wayland_server_on_pointer_constraint(server, cb_constraint, NULL);
     wayland_server_on_new_popup(server, cb_new_popup, NULL);
     wayland_server_on_subsurface_placed(server, cb_sub_placed, NULL);
     wayland_server_on_subsurface_unmapped(server, cb_sub_unmapped, NULL);
@@ -2411,6 +2542,7 @@ int main(void) {
         test_toplevel_parent();
         test_primary_selection();
         test_primary_via_data_control();
+        test_pointer_constraints();
         test_seat_v1_pointer();
         test_unmap();
     } else {

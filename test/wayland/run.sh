@@ -55,6 +55,8 @@ gen xdg-toplevel-drag-v1                        "$SYS/staging/xdg-toplevel-drag/
 gen wlr-virtual-pointer-unstable-v1             "$REPO/shell/protocols/wlr-virtual-pointer-unstable-v1.xml"
 gen virtual-keyboard-unstable-v1                "$REPO/shell/protocols/virtual-keyboard-unstable-v1.xml"
 gen primary-selection-unstable-v1               "$SYS/unstable/primary-selection/primary-selection-unstable-v1.xml"
+gen pointer-constraints-unstable-v1             "$SYS/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml"
+gen relative-pointer-unstable-v1                "$SYS/unstable/relative-pointer/relative-pointer-unstable-v1.xml"
 
 SAN=()
 WANT="${STARLING_WL_SANITIZE:-address,undefined}"

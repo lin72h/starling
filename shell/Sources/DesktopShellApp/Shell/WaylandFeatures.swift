@@ -89,6 +89,52 @@ extension _DesktopShellState {
                win.rect.top + (win.isFullscreen ? 0 : DesktopTheme.kTitleBarHeight))
     }
 
+    /// A window's content area on screen (the frame less the title bar).
+    func _contentRect(of win: WindowInfo) -> Rect {
+        let o = _contentOrigin(of: win)
+        let h = win.rect.height - (win.isFullscreen ? 0 : DesktopTheme.kTitleBarHeight)
+        return Rect.fromLTWH(o.dx, o.dy, win.rect.width, max(h, 1))
+    }
+
+    /// The engine reports a warp we asked for as an ordinary move to that
+    /// point; the constraint code must not read it as the user's.
+    func _isInjectEcho(_ p: Offset) -> Bool {
+        guard let i = _injectedPointer else { return false }
+        return abs(i.dx - p.dx) < 0.75 && abs(i.dy - p.dy) < 0.75
+    }
+
+    /// The pointer moved (root listener). Under a lock: the delta since the
+    /// last position goes to the client as relative motion and the cursor
+    /// is warped back to the anchor; the warp's own echo only resets the
+    /// last position. Under a confinement: a cursor outside the content is
+    /// put back on its nearest edge.
+    func _constraintPointerMoved(_ p: Offset, echo: Bool) {
+        if let lock = _pointerLock {
+            if echo {
+                _lockLast = p
+                return
+            }
+            let dx = p.dx - _lockLast.dx, dy = p.dy - _lockLast.dy
+            _lockLast = p
+            if dx != 0 || dy != 0 {
+                waylandIntegration?.sendRelativeMotion(surfaceId: lock.surfaceId, dx: dx, dy: dy)
+            }
+            if abs(p.dx - _lockAnchor.dx) >= 0.75 || abs(p.dy - _lockAnchor.dy) >= 0.75 {
+                _inject(_lockAnchor, buttons: Int64(_lastButtons))
+            }
+            return
+        }
+        if let c = _pointerConfine, !echo,
+           let win = windowManager.windows.first(where: { $0.id == c.windowId }) {
+            let r = _contentRect(of: win)
+            let cx = min(max(p.dx, r.left), r.right - 1)
+            let cy = min(max(p.dy, r.top), r.bottom - 1)
+            if cx != p.dx || cy != p.dy {
+                _inject(Offset(cx, cy), buttons: Int64(_lastButtons))
+            }
+        }
+    }
+
     private func _inject(_ logical: Offset, buttons: Int64, wheelDx: Double = 0, wheelDy: Double = 0) {
         guard let view = drmViewHandle else { return }
         let x = min(max(logical.dx, 0), max(screenWidth - 1, 0))
@@ -133,6 +179,44 @@ extension _DesktopShellState {
                 synthesized: false)
             self._noteUserActivity()
             _ = self._keyRouter?(keyData)
+        }
+
+        // zwp_pointer_constraints. A lock: the cursor disappears and is
+        // held at the window's content centre — the engine clamps the
+        // pointer to the screen, so the centre gives the mouse the most
+        // room in every direction — and every move becomes relative
+        // motion for the client (_constraintPointerMoved). When it ends
+        // the cursor comes back where the client asked, or where it was.
+        // A confinement just keeps the cursor inside the content.
+        wayland.onPointerConstraint = { [weak self] windowId, surfaceId, lock, active, hint in
+            guard let self = self else { return }
+            if !lock {
+                if active {
+                    self._pointerConfine = (surfaceId, windowId)
+                } else if self._pointerConfine?.surfaceId == surfaceId {
+                    self._pointerConfine = nil
+                }
+                return
+            }
+            if active {
+                guard let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
+                self._pointerLock = (surfaceId, windowId, self._lastPointer)
+                DesktopCursor.hide()
+                let r = self._contentRect(of: win)
+                let center = Offset(r.left + r.width / 2, r.top + r.height / 2)
+                self._lockAnchor = center
+                self._lockLast = self._lastPointer
+                self._inject(center, buttons: Int64(self._lastButtons))
+            } else if let lock = self._pointerLock, lock.surfaceId == surfaceId {
+                self._pointerLock = nil
+                DesktopCursor.show()
+                var target = lock.restore
+                if let h = hint, let win = self.windowManager.windows.first(where: { $0.id == lock.windowId }) {
+                    let o = self._contentOrigin(of: win)
+                    target = Offset(o.dx + h.dx, o.dy + h.dy)
+                }
+                self._inject(target, buttons: Int64(self._lastButtons))
+            }
         }
 
         // A warp moves the real cursor, for a surface the pointer is over.

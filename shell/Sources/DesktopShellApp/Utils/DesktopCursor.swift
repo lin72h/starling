@@ -24,12 +24,38 @@ public enum DesktopCursor {
     /// Set by main.swift once the DRM view is alive.
     nonisolated(unsafe) public static var shapeSetter: ((CursorShape) -> Void)?
 
+    /// Set by main.swift too: hides the hardware sprite (true) or lets a
+    /// shape show again (false).
+    nonisolated(unsafe) public static var hiddenSetter: ((Bool) -> Void)?
+
     /// Last shape we asked for — avoids redundant calls on every hover tick.
     nonisolated(unsafe) private static var lastShape: CursorShape = .default
+    /// While hidden (a pointer lock), shape requests are remembered, not
+    /// applied — every hover handler on the desktop asks for a shape, and
+    /// any one of them would otherwise bring the sprite back.
+    nonisolated(unsafe) private static var hidden = false
 
     public static func setShape(_ shape: CursorShape) {
         guard shape != lastShape else { return }
         lastShape = shape
+        if hidden { return }
         shapeSetter?(shape)
+    }
+
+    public static func hide() {
+        guard !hidden else { return }
+        hidden = true
+        hiddenSetter?(true)
+    }
+
+    public static func show() {
+        guard hidden else { return }
+        hidden = false
+        hiddenSetter?(false)
+        // Re-apply through a different shape: the engine skips a shape it
+        // believes is current, and the sprite it hid must be re-uploaded.
+        let wanted = lastShape
+        shapeSetter?(wanted == .default ? .text : .default)
+        shapeSetter?(wanted)
     }
 }

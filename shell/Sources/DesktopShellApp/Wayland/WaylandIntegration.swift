@@ -147,6 +147,10 @@ private enum WaylandEvent: @unchecked Sendable {
     case virtualKey(evdev: UInt32, keysym: UInt32, text: String, pressed: Bool)
     /// wp_pointer_warp: put the pointer at (x, y) of the surface.
     case pointerWarp(surfaceId: UInt32, x: Double, y: Double)
+    /// zwp_pointer_constraints: a lock or confinement came into force or
+    /// ended; a lock's end may carry a cursor position hint (surface units).
+    case pointerConstraint(surfaceId: UInt32, lock: Bool, active: Bool,
+                           hintX: Double?, hintY: Double?)
     /// wl_data_device drag: `active` while a drag is on; the icon surface
     /// (0 = none) is a role of its own, drawn at the pointer.
     case dragIcon(surfaceId: UInt32, active: Bool)
@@ -161,6 +165,8 @@ private enum WaylandCommand: @unchecked Sendable {
     case configureToplevel(surfaceId: UInt32, width: Int32, height: Int32)
     /// A 0x0 configure: the client picks its size (a dialog).
     case configureToplevelNatural(surfaceId: UInt32)
+    /// Focus moved: every pointer lock and confinement ends.
+    case breakPointerConstraints
     case closeToplevel(surfaceId: UInt32)
     case flushClients
     case updateScale(scale: Int32, fractional120: UInt32)
@@ -380,6 +386,14 @@ class WaylandIntegration {
     var onVirtualKey: ((_ evdev: UInt32, _ keysym: UInt32, _ text: String, _ pressed: Bool) -> Void)?
     /// wp_pointer_warp_v1: (x, y) are logical, surface-local.
     var onPointerWarp: ((_ surfaceId: UInt32, _ x: Double, _ y: Double) -> Void)?
+    /// A pointer lock (lock=true) or confinement on a window came into force
+    /// or ended. The hint, on a lock's end, is where the client wants the
+    /// cursor back, content-relative in logical pixels.
+    var onPointerConstraint: ((_ windowId: String, _ surfaceId: UInt32, _ lock: Bool,
+                               _ active: Bool, _ hint: Offset?) -> Void)?
+    /// The surface a pointer lock is in force on: its client gets relative
+    /// motion from the shell's root listener and no absolute motion.
+    private(set) var lockedSurface: UInt32? = nil
     /// A drag-and-drop began or ended.
     var onDragStateChanged: ((_ active: Bool) -> Void)?
     /// The drag's icon surface appeared (its id and texture) or went (nil).
@@ -692,6 +706,13 @@ class WaylandIntegration {
                                         pressed: pressed != 0))
         }, ctx)
 
+        wayland_server_on_pointer_constraint(server, { (ctx, surfaceId, lock, active, hasHint, hx, hy) in
+            let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
+            this.queueEvent(.pointerConstraint(surfaceId: surfaceId, lock: lock != 0, active: active != 0,
+                                               hintX: hasHint != 0 ? hx : nil,
+                                               hintY: hasHint != 0 ? hy : nil))
+        }, ctx)
+
         wayland_server_on_pointer_warp(server, { (ctx, surfaceId, x, y) in
             let this = Unmanaged<WaylandIntegration>.fromOpaque(ctx!).takeUnretainedValue()
             this.queueEvent(.pointerWarp(surfaceId: surfaceId, x: x, y: y))
@@ -816,6 +837,8 @@ class WaylandIntegration {
                 wayland_server_configure_toplevel(server, surfaceId, w, h)
             case .configureToplevelNatural(let surfaceId):
                 wayland_server_configure_toplevel_natural(server, surfaceId)
+            case .breakPointerConstraints:
+                wayland_server_break_pointer_constraints(server)
             case .closeToplevel(let surfaceId):
                 wayland_server_close_toplevel(server, surfaceId)
             case .flushClients:
@@ -1007,6 +1030,15 @@ class WaylandIntegration {
                 onVirtualKey?(evdev, keysym, text, pressed)
             case .pointerWarp(let surfaceId, let x, let y):
                 onPointerWarp?(surfaceId, x * surfaceToLogical, y * surfaceToLogical)
+            case .pointerConstraint(let surfaceId, let lock, let active, let hx, let hy):
+                if lock { lockedSurface = active ? surfaceId : (lockedSurface == surfaceId ? nil : lockedSurface) }
+                if let windowId = surfaceWindows[surfaceId] {
+                    var hint: Offset? = nil
+                    if let hx = hx, let hy = hy {
+                        hint = Offset(hx * surfaceToLogical, hy * surfaceToLogical)
+                    }
+                    onPointerConstraint?(windowId, surfaceId, lock, active, hint)
+                }
             case .dragIcon(let surfaceId, let active):
                 processDragIcon(surfaceId, active: active)
             case .toplevelDrag(let surfaceId, let xOff, let yOff, let active):
@@ -2045,6 +2077,22 @@ class WaylandIntegration {
     /// popup — on the desktop, the dock, the bar, an X11 window.
     private var _pressReachedClient = false
 
+    /// Relative pointer motion for a surface's client, in logical pixels.
+    func sendRelativeMotion(surfaceId: UInt32, dx: Double, dy: Double) {
+        guard let server = server else { return }
+        let timeMs = UInt32(DispatchTime.now().uptimeNanoseconds / 1_000_000)
+        let d = shellDpi / fractionalScale
+        wayland_server_pointer_relative_motion(server, surfaceId, timeMs, dx * d, dy * d)
+    }
+
+    /// Focus moved away from a constrained window: every lock and
+    /// confinement ends (the client hears unlocked/unconfined).
+    func breakPointerConstraints() {
+        guard server != nil else { return }
+        enqueueCommand(.breakPointerConstraints)
+        enqueueCommand(.flushClients)
+    }
+
     func notePointerDown() {
         let reached = _pressReachedClient
         _pressReachedClient = false
@@ -2181,6 +2229,7 @@ class WaylandIntegration {
             }
             wayland_server_pointer_enter(server, surfaceId, x, y)
             pointerFocusSurface = surfaceId
+            _lastAbsolute[surfaceId] = Offset(x, y)
         }
 
         switch phase {
@@ -2189,15 +2238,24 @@ class WaylandIntegration {
             _syncButtons(server, surfaceId: surfaceId, mask: buttons, timeMs: timeMs)
         case 1: // up
             _syncButtons(server, surfaceId: surfaceId, mask: buttons, timeMs: timeMs)
-        case 3: // move — a second button pressed or released mid-drag
-                // arrives as a move with a changed mask, not as down/up
+        case 3, 6: // move (a second button pressed or released mid-drag
+                   // arrives as a move with a changed mask, not as down/up)
+                   // or hover
             let d = shellDpi / fractionalScale
-            wayland_server_pointer_motion(server, surfaceId, timeMs, x * d, y * d)
-            _syncButtons(server, surfaceId: surfaceId, mask: buttons, timeMs: timeMs)
-        case 6: // hover
-            let d = shellDpi / fractionalScale
-            wayland_server_pointer_motion(server, surfaceId, timeMs, x * d, y * d)
-            _syncButtons(server, surfaceId: surfaceId, mask: 0, timeMs: timeMs)
+            if lockedSurface == surfaceId {
+                // Locked: the cursor is held; the root listener sends the
+                // relative motion. No absolute motion, per the protocol.
+            } else {
+                wayland_server_pointer_motion(server, surfaceId, timeMs, x * d, y * d)
+                if let last = _lastAbsolute[surfaceId] {
+                    let dx = x - last.dx, dy = y - last.dy
+                    if dx != 0 || dy != 0 {
+                        wayland_server_pointer_relative_motion(server, surfaceId, timeMs, dx * d, dy * d)
+                    }
+                }
+                _lastAbsolute[surfaceId] = Offset(x, y)
+            }
+            _syncButtons(server, surfaceId: surfaceId, mask: phase == 3 ? buttons : 0, timeMs: timeMs)
         default:
             break
         }
@@ -2209,6 +2267,8 @@ class WaylandIntegration {
     /// events arrive in. Every button used to be sent as BTN_LEFT: a
     /// right-click in any Wayland app was a left click.
     private var _heldButtons: [UInt32: Int64] = [:]
+    /// The last absolute position sent per surface, for relative motion.
+    private var _lastAbsolute: [UInt32: Offset] = [:]
     private static let _buttonCodes: [(mask: Int64, code: UInt32)] = [
         (1, 0x110),   // kPrimaryButton      → BTN_LEFT
         (2, 0x111),   // kSecondaryButton    → BTN_RIGHT

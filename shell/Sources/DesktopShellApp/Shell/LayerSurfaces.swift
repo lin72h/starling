@@ -433,6 +433,14 @@ extension _DesktopShellState {
     func _syncWaylandWindowState() {
         guard let wl = waylandIntegration else { return }
         wl.syncAllToplevelStates()
+        // A pointer lock or confinement belongs to the focused window:
+        // focus moving elsewhere (a shortcut, a click on another window,
+        // the window closing) ends it, and the client hears so.
+        if let lock = _pointerLock, windowManager.focusedWindowId != lock.windowId {
+            wl.breakPointerConstraints()
+        } else if let c = _pointerConfine, windowManager.focusedWindowId != c.windowId {
+            wl.breakPointerConstraints()
+        }
         _reportWindowPositions()
         wl.setWorkspaces(_workspaceEntries())
     }

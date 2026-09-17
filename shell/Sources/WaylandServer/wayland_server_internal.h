@@ -309,6 +309,11 @@ struct WaylandServer {
 
     // Relative pointer resources (WaylandRelativePointerResource.link)
     struct wl_list relative_pointers;
+    /* zwp_pointer_constraints: every lock/confine object, and where the
+     * human seat's pointer is (the surface last entered, 0 for none) so a
+     * constraint on that surface takes effect at once. */
+    struct wl_list pointer_constraints;      // PointerConstraint.link
+    uint32_t pointer_focus_id;
 
     struct wl_global* primary_selection_manager_global;
     struct wl_global* text_input_manager_global;
@@ -504,6 +509,12 @@ struct WaylandServer {
                                        int buffer_scale, int keep_alpha);
         /* xdg_toplevel min/max size hints, in surface coordinates, 0 =
          * unset. Applied on commit; the shell clamps its resizes to them. */
+        /* zwp_pointer_constraints: a lock (lock=1) or confine on the surface
+         * came into force (active=1) or ended. On the end of a lock the
+         * cursor position hint, if the client gave one, says where the
+         * cursor should reappear (surface coordinates). */
+        void (*on_pointer_constraint)(void* ctx, uint32_t surface_id, int lock, int active,
+                                      int has_hint, double hint_x, double hint_y);
         /* xdg_popup.reposition answered: the popup's new place and size
          * relative to its parent, to take effect with its next frame. */
         void (*on_popup_repositioned)(void* ctx, uint32_t surface_id,
@@ -834,6 +845,7 @@ struct WaylandPresentationFeedback {
 struct WaylandRelativePointerResource {
     struct wl_resource* resource;
     struct wl_list link;  // in WaylandServer.relative_pointers
+    int seat;             // the wl_pointer's seat: relative motion follows it
 };
 
 // Per-client input resource (pointer or keyboard)
@@ -861,6 +873,9 @@ enum WaylandInputEventType {
      * WARN_IF_OFF_LOOP_THREAD note below). fourcc in `button`,
      * modifier in `modifier`. */
     WL_DMABUF_DEMOTE = 10,
+    /* Relative pointer motion (zwp_relative_pointer): x, y carry the delta
+     * in surface units; delivered to the target client's relative pointers. */
+    WL_PTR_RELATIVE = 11,
 };
 
 struct WaylandPointerEvent {
@@ -1123,6 +1138,14 @@ void wayland_popup_grab_dismiss_all(struct WaylandServer* server);
  * re-placed for the shell; a commit cached under sync mode is applied. */
 void wayland_subsurface_restacked(struct WaylandSurface* subsurface);
 void wayland_subsurface_apply_cached(struct WaylandSurface* subsurface);
+
+/* Pointer constraints (wayland_pointer_constraints.c): the human seat's
+ * pointer entered/left a surface; the shell breaks every constraint; a
+ * constrained surface died. */
+void wayland_pointer_constraints_focus(struct WaylandServer* server, uint32_t surface_id, int entered);
+void wayland_pointer_constraints_break(struct WaylandServer* server);
+void wayland_pointer_constraints_surface_destroyed(struct WaylandServer* server,
+                                                   struct WaylandSurface* surface);
 
 /* Server teardown for the per-server lists that no client resource owns. */
 void wayland_security_context_fini(struct WaylandServer* server);

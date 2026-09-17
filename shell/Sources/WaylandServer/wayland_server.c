@@ -5,6 +5,7 @@
 #define _GNU_SOURCE  /* pipe2 */
 #endif
 #include "wayland_server_internal.h"
+#include "relative-pointer-unstable-v1-protocol.h"
 #include "xdg-shell-protocol.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -495,6 +496,10 @@ static void deferred_input_send_one(WaylandServer* server,
          * point a mouse-only client can be handed a selection it missed. */
         wayland_data_device_offer_on_interaction(server, surface);
         wayland_primary_selection_offer_on_interaction(server, surface);
+        if (ev->seat == 0) {
+            server->pointer_focus_id = surface->id;
+            wayland_pointer_constraints_focus(server, surface->id, 1);
+        }
         break;
     }
     case WL_PTR_LEAVE: {
@@ -502,6 +507,22 @@ static void deferred_input_send_one(WaylandServer* server,
         FOR_EACH_INPUT_OF_CLIENT(ir, &server->pointer_resources, target) {
             wl_pointer_send_leave(ir->resource, serial, surface->resource);
             pointer_frame(ir->resource);
+        }
+        if (ev->seat == 0) {
+            if (server->pointer_focus_id == surface->id) server->pointer_focus_id = 0;
+            wayland_pointer_constraints_focus(server, surface->id, 0);
+        }
+        break;
+    }
+    case WL_PTR_RELATIVE: {
+        uint64_t utime = (uint64_t)ev->time_ms * 1000u;
+        struct WaylandRelativePointerResource* rp;
+        wl_list_for_each(rp, &server->relative_pointers, link) {
+            if (wl_resource_get_client(rp->resource) != target || rp->seat != ev->seat) continue;
+            zwp_relative_pointer_v1_send_relative_motion(rp->resource,
+                (uint32_t)(utime >> 32), (uint32_t)utime,
+                wl_fixed_from_double(ev->x), wl_fixed_from_double(ev->y),
+                wl_fixed_from_double(ev->x), wl_fixed_from_double(ev->y));
         }
         break;
     }
@@ -638,6 +659,19 @@ void wayland_server_pointer_motion(WaylandServer* server,
         .time_ms = time_ms, .x = x, .y = y
     };
     deferred_input_enqueue(server, &ev);
+}
+
+void wayland_server_pointer_relative_motion(WaylandServer* server, uint32_t surface_id,
+                                            uint32_t time_ms, double dx, double dy) {
+    struct WaylandPointerEvent ev = {
+        .type = WL_PTR_RELATIVE, .surface_id = surface_id, .time_ms = time_ms, .x = dx, .y = dy
+    };
+    deferred_input_enqueue(server, &ev);
+}
+
+void wayland_server_break_pointer_constraints(WaylandServer* server) {
+    WARN_IF_OFF_LOOP_THREAD(server, "break_pointer_constraints");
+    wayland_pointer_constraints_break(server);
 }
 
 void wayland_server_pointer_pressed_outside(WaylandServer* server) {
@@ -840,6 +874,7 @@ DEF_CB_SETTER(surface_commit)
 DEF_CB_SETTER(shm_surface_commit)
 DEF_CB_SETTER(toplevel_parent)
 DEF_CB_SETTER(popup_repositioned)
+DEF_CB_SETTER(pointer_constraint)
 DEF_CB_SETTER(toplevel_size_hints)
 DEF_CB_SETTER(subsurface_placed)
 DEF_CB_SETTER(subsurface_unmapped)

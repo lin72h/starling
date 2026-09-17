@@ -682,6 +682,8 @@ static void surface_destroy_resource(struct wl_resource* resource) {
         wl_resource_set_user_data(surface->background_effect_resource, NULL);
     wayland_zones_surface_destroyed(surface->server, surface);
     wayland_shortcuts_inhibit_surface_destroyed(surface->server, surface);
+    wayland_pointer_constraints_surface_destroyed(surface->server, surface);
+    if (surface->server->pointer_focus_id == surface->id) surface->server->pointer_focus_id = 0;
 
     /* Children hold a raw pointer to us. Destroying a parent while a
      * subsurface still references it left that pointer dangling, and the

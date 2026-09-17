@@ -433,6 +433,25 @@ void wayland_server_on_virtual_pointer(WaylandServer* server,
 void wayland_server_on_virtual_key(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t evdev_key, uint32_t keysym,
                const char* utf8, int pressed), void* ctx);
+/* zwp_pointer_constraints: a pointer lock (lock=1) or confinement on the
+ * surface came into force (active=1) or ended. While a lock is in force the
+ * shell hides and holds the cursor and sends relative motion only; while a
+ * confinement is, it keeps the cursor inside the surface. A lock's end may
+ * carry a cursor position hint (surface coordinates) for where the cursor
+ * should reappear. */
+void wayland_server_on_pointer_constraint(WaylandServer* server,
+    void (*cb)(void* ctx, uint32_t surface_id, int lock, int active,
+               int has_hint, double hint_x, double hint_y), void* ctx);
+
+/* Relative pointer motion for the surface's client (zwp_relative_pointer):
+ * a delta in surface coordinates, sent whether or not a lock is in force. */
+void wayland_server_pointer_relative_motion(WaylandServer* server, uint32_t surface_id,
+                                            uint32_t time_ms, double dx, double dy);
+
+/* End every pointer constraint in force — the shell moved focus elsewhere
+ * (a shortcut, a click on another window). One-shot ones are spent. */
+void wayland_server_break_pointer_constraints(WaylandServer* server);
+
 /* wp_pointer_warp: a client wants the pointer at (x, y) of its surface. */
 void wayland_server_on_pointer_warp(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id, double x, double y), void* ctx);

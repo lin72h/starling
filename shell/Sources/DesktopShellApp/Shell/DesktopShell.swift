@@ -287,6 +287,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The last relative-motion base for a virtual pointer, until the
     /// injected event has come back through the root listener.
     var _injectedPointer: Offset? = nil
+    /// zwp_pointer_constraints in force (WaylandFeatures.swift): a lock
+    /// holds the cursor at `anchor` (hidden) and turns every move into
+    /// relative motion for its client, `last` being where the pointer was
+    /// last seen so coalesced moves are not double-counted; `restore` is
+    /// where the cursor was when the lock began. A confinement keeps the
+    /// cursor inside its window's content.
+    var _pointerLock: (surfaceId: UInt32, windowId: String, restore: Offset)? = nil
+    var _pointerConfine: (surfaceId: UInt32, windowId: String)? = nil
+    var _lockAnchor = Offset(0, 0)
+    var _lockLast = Offset(0, 0)
     var _layerSurfaceLayerStates: [String: LayerSurfacesLayerState] = [:]
     /// ext_session_lock: a locker holds the session. The desktop draws its
     /// lock surfaces over black and nothing else, and no key or click
@@ -4225,14 +4235,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 waylandIntegration?.notePointerDown()
             },
             onPointerMove: { [self] e in
+                let echo = _isInjectEcho(e.position)
                 _lastPointer = e.position; _lastButtons = e.buttons; _injectedPointer = nil
+                _constraintPointerMoved(e.position, echo: echo)
                 _dragPointerMoved(e.position)
             },
             onPointerUp: { [self] e in
                 _lastPointer = e.position; _lastButtons = 0; _injectedPointer = nil
                 _dragPointerReleased(e.position)
             },
-            onPointerHover: { [self] e in _lastPointer = e.position; _injectedPointer = nil },
+            onPointerHover: { [self] e in
+                let echo = _isInjectEcho(e.position)
+                _lastPointer = e.position; _injectedPointer = nil
+                _constraintPointerMoved(e.position, echo: echo)
+            },
             behavior: .translucent,
             child: _buildShellRoot(context))
     }
