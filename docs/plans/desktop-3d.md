@@ -7,9 +7,10 @@ a live texture on a pane of glass, facing the viewer, lit and shadowed by the
 scene behind it. Turning 3D off folds the scene back into the flat wallpaper
 and the windows settle back onto their 2D rectangles.
 
-Branch: `desktop-3d`. Nothing is built yet. This note records what the tree
-already gives us, what has been tried before and why it failed, the design
-that avoids those failures, and the spike that proves the primitive.
+Branch: `desktop-3d`. **Phase 0 is built and passed on the dev box
+(2026-09-16)** — see its results under the phase. This note records what the
+tree already gives us, what has been tried before and why it failed, the
+design that avoids those failures, and the spike that proves the primitive.
 
 ## Prior art, and why every one of them was an effect
 
@@ -227,6 +228,59 @@ Run it on the Linux dev box, not the Mac: the macOS shell has not been
 built since 0.2 and its texture path is Metal/IOSurface. The layer and
 hit-test code are shared, so a macOS run proves less than it costs.
 
+#### Results (2026-09-16, dev box, eDP 2560x1600 @ scale 2)
+
+What landed: `Shell/Desktop3D.swift` (the pose: focal 1.5 × screen width,
+yaw up to 35° toward the centre, pushed back to 0.7×, near-plane guard on
+the four corners), the window-stack builder wraps every window's slot in a
+`Transform` (identity when flat — it takes RenderTransform's plain
+translation paint path, so a flat window is not resampled; always present
+so the slot's widget TYPE never changes on focus, which would remount the
+subtree), `DesktopWindow` samples the client texture at `.medium` only when
+tilted, and three ways in: Ctrl+Shift+3, the broker op
+`{"op":"desktop_3d","on":true|false}` (unauthenticated, for tooling), and
+`STARLING_3D_SPIKE=1` to start in it. The scene: Chrome ×2 (Wayland
+dma-buf), weston-terminal (wl_shm), Calculator (first-party), tiled.
+
+1. **Composites.** Skia draws the imported external texture through the
+   perspective matrix; chrome, shadow and border tilt with it. Both buffer
+   paths (dma-buf and wl_shm) and the first-party child app render.
+2. **Hover reaches the right element.** Hovering one screen point over the
+   tilted Chrome lit the cell under it and Chrome reported page coordinates
+   inside that cell; the same point unprojected differently from the flat
+   layout, exactly as the tilt predicts.
+3. **A click lands on the right pixel.** Clicking that same point selected
+   the same cell (Chrome painted it green after it came forward and
+   flattened). `RenderTransform.hitTestChildren`'s homogeneous divide is
+   correct as ported; no input code was touched.
+4. **Text reads at `.medium`.** Cell labels in a tilted window minified to
+   ~0.6× stay legible. Cost, same pointer sweep with 3 tilted windows
+   (one a 2560x1460 texture) vs flat, `STARLING_FRAME_LOG=1`: UI thread
+   per frame 0.34 → 0.39 ms median (noise); raster thread 5% → 9% of a
+   core over the sweep (~0.4 → 0.7 ms per hover frame). No mip cache was
+   built; at this cost it is not needed yet. GPU time was not measured.
+5. **Drag: the premise does not arise.** A press on a tilted window brings
+   it to front, which focuses it, which flattens it on the same frame — so
+   no window is ever dragged while tilted. The local-space delta fix was
+   tried and is WRONG for this design: the framework freezes the hit-test
+   transform at pointer-down for the whole gesture, so with the window
+   already flat the unprojected deltas overshoot by 1/scale (measured: the
+   window moved 1.43× the pointer). Screen-space deltas (unchanged code)
+   are right. A window that stays posed while dragged is Phase 1's arc
+   drag, and it has to keep the pose through the press for either fix to
+   apply.
+
+Also learned, none of it 3D's fault:
+
+- Chrome opens at the full work area on a 1280x800 logical screen (its own
+  small-display default; `--window-size` is ignored on Wayland), and
+  weston-terminal did the same, so every new window stacked at one pose.
+  Tiling is the quick way to a spread-out scene for tests.
+- `app-run chrome` on `main` still passes `--force-device-scale-factor`
+  and draws Chrome at 2× (dpr 4); the fix lives on `computer-use`.
+  `STARLING_APP_SCALE=1` neutralises it for a test.
+- The broker has no read-back for the mode; the op without `on` toggles.
+
 ### Phase 1 — tier 0 environment, and the mode
 
 - `WindowInfo` gains `pose`; `rect` stays. A `Camera` per output.
@@ -255,8 +309,11 @@ hit-test code are shared, so a macOS run proves less than it costs.
 
 - **`Transform` does no near-plane clipping.** Reject any pose whose corners
   project with `w <= 0`; Skia draws garbage rather than clipping.
-- **Drag deltas are in screen space.** Tilted windows need the delta
-  unprojected (Phase 0 item 5).
+- **Drag deltas are in screen space, and must stay so while a press
+  flattens the window.** The hit-test transform is frozen at pointer-down
+  for the whole gesture; unprojecting deltas through it after the window
+  has gone flat overshoots by 1/scale (Phase 0 item 5). Unproject only if
+  the pose is kept through the drag.
 - **Partial repaint dies during camera motion.** Pointer parallax means the
   camera moves whenever the pointer does, which dirties every window every
   frame: a full-frame composite at 4K. One quad per window should be cheap

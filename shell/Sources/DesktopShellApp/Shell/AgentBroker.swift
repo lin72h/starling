@@ -551,6 +551,16 @@ final class AgentBroker: @unchecked Sendable {
             return
         }
 
+        // The 3D desktop spike (docs/plans/desktop-3d.md): set or toggle it
+        // from tooling. The chord needs a real keyboard, and the drive
+        // tool's injected keys do not reach the shell on every box.
+        if op == "desktop_3d" {
+            let on = (req["on"] as? Bool) ?? !shell._desktop3D
+            shell.setState { shell._desktop3D = on }
+            conn.send(["id": id, "ok": true, "on": on])
+            return
+        }
+
         // Live dock geometry, for tooling that needs to click a dock icon.
         // Unscoped for the same reason as subscribe_apps: read-only, and it
         // reports only where things already are on screen.

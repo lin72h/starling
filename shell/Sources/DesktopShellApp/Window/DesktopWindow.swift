@@ -18,7 +18,7 @@ class DesktopWindow: StatelessWidget {
         // No sourceRect needed — MAXIMIZED state tells Chrome to skip CSD
         // shadows, so the buffer matches the content area exactly (like
         // Hyprland). The texture stretches to fill the content area.
-        var content: Widget = TextureWidget(textureId: texId, filterQuality: .low)
+        var content: Widget = TextureWidget(textureId: texId, filterQuality: contentFilterQuality)
         if windowInfo.flipTextureY {
             content = Transform(
                 transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
@@ -37,7 +37,7 @@ class DesktopWindow: StatelessWidget {
             let dpi = currentShellDpi
             var layers: [Widget] = [Positioned(left: 0, top: 0, right: 0, bottom: 0, child: content)]
             for cs in windowInfo.childSurfaces {
-                var surf: Widget = TextureWidget(textureId: cs.textureId, filterQuality: .low)
+                var surf: Widget = TextureWidget(textureId: cs.textureId, filterQuality: contentFilterQuality)
                 if cs.flipY {
                     surf = Transform(
                         transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
@@ -159,6 +159,10 @@ class DesktopWindow: StatelessWidget {
     /// the cursor is currently in the system status bar area. Ignored when
     /// the window is not fullscreen (title bar is always shown then).
     let isTopBarRevealed: Bool
+    /// How the client's texture is sampled. `.low` (one bilinear tap) for a
+    /// window drawn 1:1; `.medium` when it is drawn through a perspective
+    /// pose and minified, where one tap aliases.
+    let contentFilterQuality: FilterQuality
     let onBringToFront: (() -> Void)?
     let onMove: ((Offset) -> Void)?
     let onResize: ((ResizeEdge, Offset) -> Void)?
@@ -172,6 +176,7 @@ class DesktopWindow: StatelessWidget {
         windowInfo: WindowInfo,
         isFocused: Bool,
         isTopBarRevealed: Bool = false,
+        contentFilterQuality: FilterQuality = .low,
         onBringToFront: (() -> Void)? = nil,
         onMove: ((Offset) -> Void)? = nil,
         onResize: ((ResizeEdge, Offset) -> Void)? = nil,
@@ -183,6 +188,7 @@ class DesktopWindow: StatelessWidget {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
         self.isTopBarRevealed = isTopBarRevealed
+        self.contentFilterQuality = contentFilterQuality
         self.onBringToFront = onBringToFront
         self.onMove = onMove
         self.onResize = onResize

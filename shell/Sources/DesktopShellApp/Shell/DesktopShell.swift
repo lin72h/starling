@@ -254,7 +254,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool)] = [:]
 
     /// macOS-style fullscreen auto-hide: when a fullscreen window is on top,
     /// the desktop status bar and the window's title bar are hidden until the
@@ -648,6 +648,17 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// ~250ms. Long enough that a rebuild (~100ms at 4K) is not always in
     /// flight, short enough that a stop request is consumed promptly.
     static let kPumpFloorTicks = 8
+
+    /// Phase 0 of the 3D desktop (docs/plans/desktop-3d.md, Desktop3D.swift):
+    /// every UNFOCUSED window on the host is lifted onto a perspective arc
+    /// facing the viewer; the focused one is drawn untransformed,
+    /// pixel-exact. The wallpaper stays flat and there is no environment
+    /// yet — this exists to prove that a live client composites, hit-tests
+    /// and drags correctly under a perspective Transform. Ctrl+Shift+3
+    /// toggles it, the broker's `desktop_3d` op sets it, and
+    /// STARLING_3D_SPIKE=1 starts in it.
+    var _desktop3D: Bool =
+        (ProcessInfo.processInfo.environment["STARLING_3D_SPIKE"] ?? "") == "1"
 
     var _missionControlOpen = false
     /// The monitor Mission Control was invoked on — its windows, its space
@@ -2578,6 +2589,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     self._activateScreensaver()
                     return true
                 }
+                // Ctrl+Shift+3 — the 3D desktop spike (docs/plans/desktop-3d.md,
+                // Phase 0). Shift-gated like the others.
+                if phys == 0x20 && self._shiftPressed && keyData.type == .down {
+                    self.setState { self._desktop3D.toggle() }
+                    return true
+                }
             }
 
             guard let focusedId = self.windowManager.focusedWindowId,
@@ -4427,6 +4444,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             let windowTopBarRevealed = win.isFullscreen && win.id == topmostWindow?.id
                 ? _topBarRevealed : false
 
+            // An edge-drag-carried window ignores the slide offset: it
+            // stays pinned under the cursor while the desktop slides.
+            let windowDx = win.id == _spaceSlide?.carried ? 0 : layerDx
+            // 3D spike: an unfocused window's pose on the arc, from where
+            // it sits on screen right now. nil = flat (focused, fullscreen,
+            // off the host, or past the near plane).
+            let pose = (_desktop3D && !isFocused && !win.isFullscreen)
+                ? _desktop3DPose(rect: win.rect.translate(windowDx, 0)) : nil
+            let tilted = pose != nil
+
             // Reuse cached widget when only position changed (drag).
             // updateChild's identity check (===) skips the entire subtree rebuild.
             let window: DesktopWindow
@@ -4435,13 +4462,18 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                cached.width == win.rect.width,
                cached.height == win.rect.height,
                cached.isFullscreen == win.isFullscreen,
-               cached.isTopBarRevealed == windowTopBarRevealed {
+               cached.isTopBarRevealed == windowTopBarRevealed,
+               cached.isTilted == tilted {
                 window = cached.widget
             } else {
                 window = DesktopWindow(
                     windowInfo: win,
                     isFocused: isFocused,
                     isTopBarRevealed: windowTopBarRevealed,
+                    // A tilted window is perspective-sampled, and mostly
+                    // minified: `.low` is one bilinear tap and aliases
+                    // there (Mission Control's lesson).
+                    contentFilterQuality: tilted ? .medium : .low,
                     onBringToFront: { [self] in
                         setState {
                             windowManager.bringToFront(winId)
@@ -4469,7 +4501,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         requestWindowTitleBarDoubleTap(winId)
                     }
                 )
-                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed)
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted)
             }
 
             // Open zoom plays only when the window is genuinely appearing
@@ -4477,9 +4509,40 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // mounts because a space switch brought its desktop on screen.
             let animateOpen = win.pendingOpenAnimation
             win.pendingOpenAnimation = false
-            // An edge-drag-carried window ignores the slide offset: it
-            // stays pinned under the cursor while the desktop slides.
-            let windowDx = win.id == _spaceSlide?.carried ? 0 : layerDx
+            // Zoom out of the dock icon on first appearance (and on
+            // restore from minimize — both mount a fresh element);
+            // shrink-out on close, with teardown deferred to the
+            // animation's end.
+            var body: Widget = WindowLifecycleAnimation(
+                closing: _closingWindows.contains(winId),
+                minimizing: _minimizingWindows.contains(winId),
+                animateOpen: animateOpen,
+                onClosed: { [self] in _finalizeWindowClose(winId) },
+                onMinimized: { [self] in _finalizeWindowMinimize(winId) },
+                zoomFrom: _dockIconCenter(appId: win.appId, title: win.title).map {
+                    Offset($0.dx - (win.rect.left + win.rect.width / 2),
+                           $0.dy - (win.rect.top + win.rect.height / 2))
+                },
+                child: window
+            )
+            // Always under a Transform, so the slot keeps its widget TYPE
+            // across focus changes and the toggle — a type change remounts
+            // the whole window subtree. Identity takes RenderTransform's
+            // plain-translation paint path (no layer, no resampling), so a
+            // flat window stays pixel-exact; the note's "skipped, not
+            // near-identity" rule holds. Tilted: the pivot is the screen
+            // centre, handed over in this window's own coordinates.
+            // Hit-testing runs the same matrix backwards
+            // (RenderTransform.hitTestChildren, homogeneous divide), so the
+            // client still gets positions in its own space.
+            body = Transform(
+                transform: pose?.matrix ?? Matrix4.identity(),
+                origin: pose.map {
+                    Offset($0.pivot.dx - (win.rect.left + windowDx),
+                           $0.pivot.dy - win.rect.top)
+                },
+                child: body
+            )
             children.append(
                 Positioned(
                     key: ValueKey(winId),
@@ -4487,22 +4550,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     top: win.rect.top,
                     width: win.rect.width,
                     height: win.rect.height,
-                    // Zoom out of the dock icon on first appearance (and on
-                    // restore from minimize — both mount a fresh element);
-                    // shrink-out on close, with teardown deferred to the
-                    // animation's end.
-                    child: WindowLifecycleAnimation(
-                        closing: _closingWindows.contains(winId),
-                        minimizing: _minimizingWindows.contains(winId),
-                        animateOpen: animateOpen,
-                        onClosed: { [self] in _finalizeWindowClose(winId) },
-                        onMinimized: { [self] in _finalizeWindowMinimize(winId) },
-                        zoomFrom: _dockIconCenter(appId: win.appId, title: win.title).map {
-                            Offset($0.dx - (win.rect.left + win.rect.width / 2),
-                                   $0.dy - (win.rect.top + win.rect.height / 2))
-                        },
-                        child: window
-                    )
+                    child: body
                 )
             )
         }
