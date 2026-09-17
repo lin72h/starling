@@ -1,16 +1,91 @@
-# The 3D desktop — the wallpaper becomes a place, apps float in it
+# The 3D desktop — a room you stand in, with your windows in it
 
-Goal: the desktop stays **2D by default**. Turning 3D on builds a **3D scene
-out of the current wallpaper** and lifts every app window off the plane into
-it, floating in front of the user the way windows float in visionOS: each one
-a live texture on a pane of glass, facing the viewer, lit and shadowed by the
-scene behind it. Turning 3D off folds the scene back into the flat wallpaper
-and the windows settle back onto their 2D rectangles.
+Turning 3D on puts you inside a modelled room, with every app window
+hanging in it as a pane of glass at a real place. You walk with the
+keyboard, step up to a window and it is pixel-exact again, and turning
+3D off puts the flat desktop back exactly as it was.
 
-Branch: `desktop-3d`. **Phases 0 and 1 are built and verified on the dev
-box (2026-09-16)** — see the results under each phase. This note records what the
-tree already gives us, what has been tried before and why it failed, the
-design that avoids those failures, and the spike that proves the primitive.
+Branch: `desktop-3d`.
+
+## Where it stands (2026-09-17)
+
+Working, on the dev box:
+
+- **A real camera.** WASD or the arrows to walk, Q/E to turn, R/F to
+  rise and sink, Home to return to where you started, Space to step up
+  to the window in front of you. Alt drives it while a window has the
+  keyboard, because something is focused almost all of the time.
+- **Windows are panes in the room**, sorted far to near, back-face
+  culled and near-plane guarded — and still windows: clicking one across
+  the room lands on the right client pixel and typing reaches the client,
+  because the whole projection·view·model chain rides in the `Transform`
+  the shell already had and `RenderTransform` runs it backwards.
+- **The room is a real 3D asset**, not geometry anyone typed: CC0
+  furniture from Poly Haven, placed in a generated shell (floor, walls,
+  ceiling, a wall of windows), with the light baked in.
+- **Lit by a captured sky.** One HDRI is the view through the windows
+  AND the room's light: its sun casts the shadows, and the rest of it
+  becomes nine spherical-harmonic coefficients that say how that sky
+  lights a surface facing any direction.
+- **The 2D contract holds.** At t = 0 no window gets a matrix at all and
+  the wallpaper slot shows the plain wallpaper, so leaving 3D is the
+  flat desktop exactly. `test/functional.py --only "3D desktop"` measures
+  it, and refuses to run with tiling on, where a maximised window covers
+  the whole room and the check cannot see anything.
+
+## How it is built
+
+Nothing about the room is computed at runtime. Three tools bake it and
+the shell reads the result:
+
+```
+  build/tools/room-fetch.py    CC0 furniture from Poly Haven (~20 MB)
+  build/tools/room_gltf.py     as much glTF as those exports use
+  build/tools/room_hdri.py     Radiance .hdr, spherical harmonics, the sun
+  build/tools/room-import.py   bakes everything into three files
+        |
+        v
+  shell/Resources/Room/room.mesh          geometry + the sky's light
+                      room-diffuse.png    2k atlas, base colour
+                      room-arm.png        2k atlas, occlusion/rough/metal
+                      room-sky.png        the sky, square-rooted to 8-bit
+```
+
+`room.mesh` is `STARROOM`, a version, three counts, then the sky's light
+(nine SH triples, the sun's direction and colour, the sky texture's
+range), then an interleaved vertex array —
+`pos(3) nrm(3) uv(2) ao(1) sun(1) mat(1)` — and 32-bit indices.
+
+**Why the split matters.** The room can be rearranged, re-lit or
+replaced without rebuilding the shell, and iterating on how it looks
+costs 25 seconds instead of a build, a restart and a screenshot. The
+shell has nothing to get wrong: it reads a file, uploads it, draws it.
+
+Ambient occlusion is 64 cosine-weighted rays per vertex against a voxel
+grid of the real triangles; daylight is one ray per vertex traced back
+to the window openings. Both are per VERTEX, so the subdivision of a
+surface is the resolution of every shadow that falls on it.
+
+## The road here, and what it ruled out
+
+The direction changed twice, and both dead ends are worth not repeating.
+
+1. **The wallpaper wrapped around you.** A cylinder centred on the eye
+   is depth-flat by construction — every point is the same distance
+   away — so it is indistinguishable from the flat picture through a
+   desktop lens, and no tuning changes that.
+2. **The wallpaper reconstructed as a 3D scene**, using a monocular
+   depth map to put every pixel back at its real distance. This works,
+   and is in the history at `523bc18` if it is ever wanted: from the
+   spot the photograph was taken from it IS the photograph, and a step
+   sideways is real parallax. It was dropped because the modelled room
+   looked better, and because a single photo has nothing behind
+   anything — wander more than about two metres and its holes open up.
+3. **Hand-modelled furniture.** A sofa built from eight axis-aligned
+   boxes reads as polystyrene however well it is lit, because a
+   silhouette is the first thing anyone sees. This was not a lighting
+   problem and not a materials problem, and no amount of either fixed
+   it. Real assets did, immediately.
 
 ## Prior art, and why every one of them was an effect
 
@@ -102,52 +177,24 @@ distance, yaw). Switching modes animates between them and never overwrites
 one with the other, so leaving 3D puts every window back exactly where it
 was, and re-entering finds the arrangement the user made in the scene.
 
-### The environment, generated from the wallpaper
+### The environment
 
-Three tiers. Each is a strict improvement on the one below and each
-degrades to it when its input is missing, so the feature ships at tier 0
-and gets better without changing shape.
+**Superseded — kept because its findings are still true.** The original
+design generated the environment from the user's wallpaper, in three
+tiers: a wrap, then a depth-map relief, then occlusion layers. What it
+is now is above; what that attempt established, and which still holds
+for anyone who revisits it:
 
-**Tier 0 — the alcove.** The wallpaper hangs on the far wall of a box,
-filling about two thirds of the view; the floor, ceiling and two side
-walls grow out of its four edges and come toward the viewer, carrying the
-picture's own colours mirrored forward, blurred, and falling into the
-dark as they arrive. The floor is the wallpaper's lower band reflected: a
-wet floor the windows will stand over. Panning the eye produces parallax
-between the near floor and the far wall. Works for any still, and is all
-a video wallpaper (`AerialPlayer`) will ever get.
-
-This started as a **wrap** — the wallpaper on a cylinder segment of about
-120° around the camera — and that does not work on a monitor: a cylinder
-centred on the eye is the same distance away everywhere, so it has no
-depth to show, and the part that curves is off the edges of the screen
-anyway. A headset gets away with it because the environment *is* the
-display and you turn your head. See Phase 1.5.
-
-**Tier 1 — depth.** A depth map turns the wall into a relief: a 256×135
-grid displaced in the vertex shader by the depth texture, so a camera move
-separates the bridge towers from the sky. Depth maps for the **bundled**
-wallpapers are precomputed and checked in beside the JPEG
-(`golden-gate-dark.depth.png`), so the shipped desktop needs no model at
-all. For a user-supplied wallpaper, an optional helper
-(`starling-wallpaper-depth`, monocular depth such as Depth Anything V2
-small through ONNX Runtime on the CPU, seconds per image) writes the depth
-map next to the cached crop *at wallpaper-set time*, never in the shell
-process. No helper installed means tier 0 for that image.
-
-**Tier 2 — layers.** Thresholding the depth map gives sky / ground /
-subject layers. A window pushed far enough back slides *behind* the
-subject: the browser goes behind the bridge tower. Speculative, and only
-worth it once tiers 0–1 have shown people leave windows in the scene.
-
-Whatever the tier, the environment renders as **one texture** in the
-wallpaper's slot: the raster-thread callback draws the scene from the
-camera the platform thread last published (the same mailbox pattern
-`GLRenderer.advanceAnimation` uses today), into an FBO with a depth buffer.
-Window *shadows* and floor *reflections* are drawn there too — the renderer
-is handed each window's pose and its GL texture name, both already in that
-context — so a window visibly rests in the scene rather than being pasted
-over it.
+- A cylinder centred on the eye cannot show depth (see "The road here").
+- A monocular depth map of a LANDSCAPE photograph holds a ground plane
+  and nothing else: 54% of the bundled wallpaper's map is in the darkest
+  tenth, and sky, bridge and headland all sit between 0.00 and 0.19,
+  because they genuinely are at infinity. The model is not failing.
+- Inverse depth has to be inverted into distance before it is useful.
+  The same numbers that read as "a ground plane and nothing else" open
+  back out into a scene when they are: the water at 3 m, the sky at 420.
+- The wallpaper is not gone. It hangs in the room, framed, over the
+  fireplace — which is where a picture belongs.
 
 ### The windows, visionOS-style
 
@@ -518,65 +565,143 @@ Three traps paid for:
   stage was enough. Always read the program info log; the shader logs
   are silent on this.
 
-### Phase 2 — depth, light, and windows that rest in the scene
+### Phase 3 — the room becomes a real asset (2026-09-17)
 
-- ~~Window shadows and floor reflections in the environment texture~~ —
-  done as far as the geometry allows, which is a screen-space shadow and
-  no reflection at all. See Phase 2a's results for why the physical
-  versions of both are invisible here.
-- ~~Per-window glass tint from the scene's light buffer~~ — done, and
-  with no light buffer: the wallpaper's own pixels answer it on the CPU.
-- ~~Precomputed depth map for the bundled wallpaper; the relief mesh~~ —
-  done, along with the helper (`build/tools/wallpaper-depth.py`), which
-  is what a user's own wallpaper would be run through at set time. What
-  it buys on a landscape is a ground plane; see Phase 2b.
+Hand-modelled boxes out, Poly Haven's CC0 library in, and the whole room
+moved offline into `room-import.py`. See "How it is built". 144k
+triangles, 12 MB of checked-in assets.
 
-### Phase 3 — camera moves and layers
+Assets had to be chosen against a triangle budget as much as a look:
+Poly Haven's big potted plant is 176k triangles on its own and a set of
+encyclopaedias is 67k. Both are lovely up close; neither survives being
+seen from across a room.
 
-- Mission Control as dolly-back, spaces as pans, open/close along z.
-- Tier 2 occlusion layers — **not earned by this wallpaper**, and the
-  reason is in Phase 2b: a landscape has no near subject for a window to
-  go behind. Worth revisiting only for a picture that does.
+### Phase 4 — lit by a real sky (2026-09-17)
 
-## Traps to expect
+One HDRI (`meadow_2`) is both the view through the windows and the
+room's light. The importer reads the Radiance file directly, takes the
+sun's direction and colour from the brightest region, and projects the
+REST of the sky onto nine spherical harmonics for the ambient.
 
-- **`Transform` does no near-plane clipping.** Reject any pose whose corners
-  project with `w <= 0`; Skia draws garbage rather than clipping.
-- **Drag deltas are in screen space, and must stay so while a press
-  flattens the window.** The hit-test transform is frozen at pointer-down
-  for the whole gesture; unprojecting deltas through it after the window
-  has gone flat overshoots by 1/scale (Phase 0 item 5). Unproject only if
-  the pose is kept through the drag.
-- **Partial repaint dies during camera motion.** Pointer parallax means the
-  camera moves whenever the pointer does, which dirties every window every
-  frame: a full-frame composite at 4K. One quad per window should be cheap
-  on the 680M, but the engine's damage tracking
-  (`docs/plans/engine-partial-repaint.md`) buys nothing there. Measure; and
-  quantise the parallax so a still pointer means a still camera.
-- **Client geometry is untouched.** Never resize a client because it
-  receded. A 4K buffer sampled into 300px is wasteful but correct; a client
-  re-laid-out at 300px is wrong and flashes on the way back.
-- **Depth generation never runs in the shell.** A model in the shell
-  process is a stall on the platform thread and a dependency in the .deb.
-  It is a helper, at set time, and optional.
-- **Multi-output.** One scene, one camera per output; a window straddling
-  outputs is seen from two cameras. `hostSlideWindows` is the code that has
-  to become camera-aware.
-- **Root-mode artefacts** (repo `CLAUDE.md`): a third-party client's input
-  behaviour under a tilt must be confirmed in the VM as `tester` before it
-  is called a compositor bug.
-- **macOS keeps 2D.** The environment renderer is GL; the macOS shell would
-  need a Metal one, and the macOS shell is not currently built at all.
+- **Remove the sun before projecting.** Leaving it in counts it twice;
+  the symptom is an ambient several times too bright and shadows that
+  have to be crushed to compensate.
+- **A sky cannot light a ceiling**, which sees no sky at all. Bounce off
+  the floor stays an explicit term, or the ceiling is black.
+- The bake warns when the sun is not on the window side. It was not,
+  first time, and the room came out with 0% of its surfaces in daylight.
+
+### Still open
+
+- The room reads a little brown and dim; there is nothing on the walls.
+  Both are 25-second experiments now rather than rebuilds.
+- A second environment, to prove the pipeline moves. The CC0 library can
+  furnish a clifftop over the sea, a pine forest, a workshop, a back
+  alley or a lunar surface, and there are 997 skies.
+- Making the environment a setting the user picks, the way wallpapers
+  already are.
+- Mission Control as a dolly back, spaces as pans, open/close along z —
+  the views the shell already has, as camera moves over unchanged poses.
+
+## Traps paid for
+
+Every one of these cost real time, and every one is silent — no error,
+no warning, just a wrong picture that looks like a different bug.
+
+**Matrices and the layer tree**
+
+- **A projection matrix with a trivial z row is SINGULAR**, and
+  `RenderTransform` neither paints nor hit-tests a matrix it cannot
+  invert. Every window vanished. Give the z row a real projection even
+  though nothing reads the z.
+- **`Transform` does no near-plane clipping.** Reject any pose whose
+  corners project with w near zero; Skia draws garbage rather than
+  clipping.
+- **Drag deltas are in screen space and must stay so.** The framework
+  freezes the hit-test transform at pointer-down for the whole gesture,
+  so unprojecting deltas through it after a press has flattened the
+  window overshoots by 1/scale (measured 1.43×).
+
+**GL, inside the engine's context**
+
+- **Skia leaves depth WRITES off**, so `glClear(GL_DEPTH_BUFFER_BIT)` is
+  a no-op: the buffer keeps its garbage, every fragment fails the test,
+  and nothing draws while the colour clear still works.
+- **GL row 0 is the BOTTOM of an engine external texture.** Do not flip
+  y in the projection. Measure, do not assume.
+- **mediump is fp16.** Procedural noise that hashes uv in metres reaches
+  hundreds of thousands over a room-sized floor, past fp16's 65504. It
+  overflows to infinity, `sin(inf)` is NaN, and the fragment comes out
+  pure black in a stepped patch that looks exactly like a geometry bug.
+- **A uniform's precision must match across stages** in GLSL ES 1.00 or
+  the program fails to LINK with no compile error. Read the program info
+  log.
+- **`packed` is a reserved word in GLSL.**
+- **The engine's image codec returns PREMULTIPLIED RGBA.** Anything
+  stored in an alpha channel as data has already been multiplied into
+  the colour by the time it arrives. An HDR sky packed as RGB×alpha
+  decodes to black.
+
+**The bake**
+
+- **Baked light is per VERTEX**, so a surface's subdivision is the
+  resolution of every shadow on it. A wall at 28 cm per cell turns the
+  edge of a sun patch into a staircase.
+- **Ambient occlusion shows its sampling noise as blotches** the size of
+  the mesh's cells. Fourteen rays looked fine on a graph and like dirt
+  on a wall; 64 is enough.
+- **A relief of all zeros is indistinguishable from no relief**, and
+  both look like a working flat wall. The mesh builder logs the range of
+  what it computed for exactly this reason.
+- **The material numbering lives in the importer.** When the shader had
+  an older copy, its "rides with the eye" test matched the CEILING
+  instead of the sky, and the room simply had no ceiling.
+
+**The shell around it**
+
+- **A session that comes up with 3D ALREADY ON never runs the enter
+  path**, so anything hung off that path never happens — the windows had
+  no places in the room and the scene's clock never started. Hang setup
+  off the thing it belongs to, not off the mode change.
+- **The 3D functional check needs tiling OFF.** A maximised window
+  covers the whole room and the focused window is drawn flat, so
+  entering changes nothing a screenshot can see and it reads as a dead
+  feature. The check refuses to run now.
+- **A dirty session fails the 2D-contract check for no reason.** After
+  an hour of driving, two screenshots of the same untouched desktop
+  differed by 12,902 pixels (a blinking caret) while the real residue
+  was 264. Restart the shell before believing a small diff.
+- **Root-mode artefacts** (repo `CLAUDE.md`): a third-party client's
+  input behaviour under a pose must be confirmed in the VM as `tester`
+  before it is called a compositor bug.
+- **macOS keeps 2D.** The renderer is GL and the macOS shell is not
+  currently built at all.
+
+## Measured out — do not build these
+
+Each was tried or worked through and does not pay at this geometry. The
+numbers are here so nobody re-derives them.
+
+- **Floor reflections of windows.** Windows float about a third of the
+  way to the far wall and well above the floor, so a mirrored image
+  lands at −1.40 in NDC — off the bottom of the screen — and only
+  arrives when a window is pushed nearly to the wall.
+- **Shadows cast by windows onto what is behind them.** The surface
+  behind is further from the eye, so the shadow projects at 60–77% of
+  the window's on-screen size and lands entirely behind it. This is why
+  every UI in the world fakes drop shadows in screen space.
+- **Tier 2 occlusion layers for a photographic environment.** A
+  landscape has no near subject for a window to go behind, only the
+  ground under the viewer — a thin strip at the picture's bottom edge. A
+  window clipped by it reads as a glitch.
 
 ## Open questions
 
-- Focal length: a short lens makes side windows dramatic and unreadable; a
-  long one looks like a flat scale. Start at focal = 1.5 × screen width and
-  tune against a real chat window on the arc.
-- Arc distance versus window size: visionOS puts windows about 1.5 m away
-  and scales them so a "point" stays a fixed visual angle. On a monitor the
-  focused window is pixel-exact by rule, so the question is only how much
-  smaller the neighbours get. Start at 0.7×.
-- Whether a depth map from a photograph reads as a *place* or as a
-  pop-up book. Tier 0's wrap is safe; tier 1 is the bet, and the bundled
-  wallpaper is the one image it must look right on.
+- How much of the room should a user be able to change? The environment
+  wants to be a setting, like wallpapers; whether the furniture should
+  move is a different question.
+- Whether a window should be able to rest ON something — a pane leaning
+  on the console, a small one on the coffee table. It needs surface
+  detection the bake could supply.
+- Whether walking is the right verb. Stepping up to a window works well;
+  free walking is pleasant but nobody needs it to get work done.
