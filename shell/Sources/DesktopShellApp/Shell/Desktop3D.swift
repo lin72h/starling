@@ -1270,6 +1270,16 @@ extension _DesktopShellState {
             }
             i += m; course += 1
         }
+        // The brick being dragged rides the pointer, out in front of the
+        // wall, where the pointer's ray meets that plane.
+        if let d = _desktop3DBrickDrag, d.dragging, let idx = out.firstIndex(where: { $0.app == d.app }) {
+            let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+            let cam = _desktop3DEffectiveCamera(_desktop3DT)
+            let plane = WindowPose3D(x: sc.x, y: sc.base, z: sc.z + 0.4, yaw: 0, scale: 1, placed: true)
+            if let (u, v) = _desktop3DPlaneHit(d.at, camera: cam, host: host, pose: plane) {
+                out[idx].x = sc.x + u; out[idx].y = sc.base + v; out[idx].z = sc.z + 0.4
+            }
+        }
         return out
     }
 
@@ -1354,7 +1364,7 @@ extension _DesktopShellState {
     /// The sign under a screen point, if any: each is a billboard facing
     /// the viewer, so its screen box is its centre projected and its size
     /// over its depth — nearest wins where two overlap.
-    func _desktop3DSignAt(_ screen: Offset) -> String? {
+    func _desktop3DSignAt(_ screen: Offset, excluding: String? = nil) -> String? {
         let host = displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         guard host.width > 0, _desktop3DT >= 1 else { return nil }
@@ -1362,7 +1372,7 @@ extension _DesktopShellState {
         let view = Self._view(cam)
         let focal = _desktop3DFocalPx(host)
         var best: (app: String, depth: Double)? = nil
-        for s in _desktop3DSigns() {
+        for s in _desktop3DSigns() where s.app != excluding {
             let v = view.perspectiveTransform(Vector3(s.x, s.y, s.z))
             let depth = -v.z
             guard depth > 0.1 else { continue }
@@ -1379,7 +1389,7 @@ extension _DesktopShellState {
             }
             if best == nil || depth < best!.depth { best = (s.app, depth) }
         }
-        for b in _desktop3DSculpture() {
+        for b in _desktop3DSculpture() where b.app != excluding {
             // A block: its projected box, a little generous for the corners.
             let v = view.perspectiveTransform(Vector3(b.x, b.y, b.z))
             let depth = -v.z
@@ -1406,6 +1416,70 @@ extension _DesktopShellState {
         guard let app = _desktop3DSignAt(screen) else { return }
         _desktop3DLog("sign \(app) clicked")
         _launchOrFocusApp(app)
+    }
+
+    /// How far the pointer moves with the button down before a press on
+    /// a brick is a drag and not a click.
+    static let k3DBrickDragSlop = 8.0
+
+    /// The button goes down on the world. On a brick of the building it
+    /// may be the start of a drag — a click is decided on release; on any
+    /// other sign it is a click.
+    func _desktop3DSignDown(_ screen: Offset) {
+        guard let app = _desktop3DSignAt(screen) else { return }
+        if _desktop3DSculpture().contains(where: { $0.app == app }) {
+            _desktop3DBrickDrag = (app, screen, screen, false)
+        } else {
+            _desktop3DLog("sign \(app) clicked")
+            _launchOrFocusApp(app)
+        }
+    }
+
+    /// The pointer moves with the button down: past the slop the brick
+    /// leaves the wall and follows it, and the brick it is over comes
+    /// forward to say "here".
+    func _desktop3DSignMove(_ screen: Offset) {
+        guard var d = _desktop3DBrickDrag else { return }
+        d.at = screen
+        if !d.dragging {
+            let dx = screen.dx - d.start.dx, dy = screen.dy - d.start.dy
+            if dx * dx + dy * dy > Self.k3DBrickDragSlop * Self.k3DBrickDragSlop { d.dragging = true }
+        }
+        let target = d.dragging ? _desktop3DSignAt(screen, excluding: d.app) : nil
+        setState {
+            _desktop3DBrickDrag = d
+            if d.dragging { _desktop3DHoveredSign = target }
+        }
+    }
+
+    /// The button comes up: a drag dropped on another brick swaps the two
+    /// apps' places in the dock's order — the building is laid out from
+    /// it, so the flat dock follows — and a press that never became a
+    /// drag is a click.
+    func _desktop3DSignUp(_ screen: Offset) {
+        guard let d = _desktop3DBrickDrag else { return }
+        if d.dragging {
+            let target = _desktop3DSignAt(screen, excluding: d.app)
+            _desktop3DLog("brick \(d.app) dropped on \(target ?? "nothing")")
+            setState {
+                _desktop3DBrickDrag = nil
+                _desktop3DHoveredSign = target
+                guard let target, target != d.app else { return }
+                // A running app that is not pinned takes a place in the
+                // order by being moved, the way "Keep in Dock" gives it one.
+                for app in [d.app, target] where !dockAppOrder.contains(app) {
+                    dockAppOrder.append(app)
+                    _dockRemovedByUser.remove(app)
+                }
+                guard let from = dockAppOrder.firstIndex(of: d.app),
+                      let to = dockAppOrder.firstIndex(of: target) else { return }
+                dockAppOrder.swapAt(from, to)
+            }
+        } else {
+            setState { _desktop3DBrickDrag = nil }
+            _desktop3DLog("sign \(d.app) clicked")
+            _launchOrFocusApp(d.app)
+        }
     }
 
     /// The world's frame tile (world.json `pane_frame`), decoded into a

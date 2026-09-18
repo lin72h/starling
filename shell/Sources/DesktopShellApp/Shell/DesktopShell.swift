@@ -357,7 +357,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// Apps the user took out of the dock by hand. Remembered so that
     /// re-deriving the dock after a registry change can restore an app that
     /// came back without resurrecting one the user deliberately removed.
-    private var _dockRemovedByUser: Set<String> = []
+    var _dockRemovedByUser: Set<String> = []
 
     /// What the shell knows about each app's liveness.
     ///
@@ -693,6 +693,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DHoveredSign: String? = nil
     /// Per app, the texture its block in the sculpture wears (Desktop3D).
     var _appFaceTextures: [String: Int64] = [:]
+    /// A brick of the building under the pointer's button: the app, where
+    /// the button went down, where the pointer is, and whether it has
+    /// moved far enough to be a drag rather than a click (Desktop3D).
+    var _desktop3DBrickDrag: (app: String, start: Offset, at: Offset, dragging: Bool)? = nil
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -4473,7 +4477,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     // opens its app.
                     wallpaperWidget = _desktop3DVoxel
                         ? Listener(
-                            onPointerDown: { [self] e in _desktop3DSignClick(e.position) },
+                            onPointerDown: { [self] e in _desktop3DSignDown(e.position) },
+                            onPointerMove: { [self] e in _desktop3DSignMove(e.position) },
+                            onPointerUp: { [self] e in _desktop3DSignUp(e.position) },
                             onPointerHover: { [self] e in _desktop3DSignHover(e.position) },
                             behavior: .opaque,
                             child: room)

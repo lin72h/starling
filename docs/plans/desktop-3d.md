@@ -1350,6 +1350,23 @@ course, in front of it would hide its face. The offset walk and the
 twist of the stack are gone; the running bond is what makes it not a
 straight pile.
 
+### Phase 18 — the bricks move (2026-09-18)
+
+"Are those icons movable?" Now they are, the way the flat dock's are:
+press a brick, move past eight pixels and it leaves the wall and rides
+the pointer (where the pointer's ray meets a plane 40 cm in front of
+the wall); the brick it is over comes forward and its name stands over
+the roof; release and the two swap places in the dock's order — which
+the building is laid out from, so the flat dock follows. A press that
+never moves is still a click. A running app that is not pinned takes a
+place in the order by being moved, as "Keep in Dock" gives it one.
+
+**Harness trap (the second of the day):** `shell-drive down` in its own
+invocation is a CLICK — the process exits, the virtual mouse goes with
+it, and the kernel releases the button. A drag is `down`, the `move`s
+and `up` in ONE invocation. The first run "didn't drag" and opened the
+app instead, and the log said exactly that.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
