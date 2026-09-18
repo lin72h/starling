@@ -1102,7 +1102,7 @@ extension _DesktopShellState {
                                  radius: w.planetRadius,
                                  r: colour.r, g: colour.g, b: colour.b, glow: 0))
             if let tex = _desktop3DAppLabelTexture(appId) {
-                labels.append(SceneLabel(id: tex, x: planet.x, y: planet.y + w.planetRadius + 0.26,
+                labels.append(SceneLabel(id: tex, texture: tex, x: planet.x, y: planet.y + w.planetRadius + 0.26,
                                          z: planet.z, width: 0.40, height: 0.47))
             }
             let moons = windows.filter { $0.appId == appId }.sorted { $0.id < $1.id }
@@ -1151,7 +1151,14 @@ extension _DesktopShellState {
         let spread = min(200.0, 60.0 * Double(max(n - 1, 0))) * Double.pi / 180
         for (i, win) in ordered.enumerated() {
             let f = n == 1 ? 0.0 : Double(i) / Double(n - 1) - 0.5
-            let phi = -Double.pi / 2 + f * spread
+            var phi = -Double.pi / 2 + f * spread
+            if w.tower != nil {
+                // With the tower in the middle, nothing stands straight
+                // behind it from the door: the windows flank it, first to
+                // the right, then the left, and on round.
+                let k = Double(i / 2), side = i % 2 == 0 ? 1.0 : -1.0
+                phi = -Double.pi / 2 + side * (Self.k3DTowerClearDeg + 30.0 * k) * Double.pi / 180
+            }
             let x = w.hub.x + w.ringRadius * cos(phi)
             let z = w.hub.z + w.ringRadius * sin(phi)
             let h = win.rect.height * s
@@ -1168,12 +1175,136 @@ extension _DesktopShellState {
             let cz = ps.map { $0.z }.reduce(0, +) / Double(ps.count)
             let top = ps.map { $0.top }.max() ?? 0
             // Read from across the square: a metre wide.
-            labels.append(SceneLabel(id: tex, x: cx, y: top + 0.7, z: cz, width: 1.0, height: 1.17))
+            labels.append(SceneLabel(id: tex, texture: tex, x: cx, y: top + 0.7, z: cz, width: 1.0, height: 1.17))
+        }
+        // The signs: the dock's apps, standing round the near side of the
+        // pool. Their key is offset from the nameplates', which share the
+        // same textures.
+        for s in _desktop3DSigns() {
+            guard let tex = _desktop3DAppLabelTexture(s.app) else { continue }
+            labels.append(SceneLabel(id: Self.k3DSignIdBase + tex, texture: tex,
+                                     x: s.x, y: s.y, z: s.z, width: s.w, height: s.h, yaw: s.yaw))
         }
         var changed = env.setOrbs([])
         if env.setLabels(labels.sorted { $0.id < $1.id }) { changed = true }
         if changed { registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId) }
         #endif
+    }
+
+    // MARK: The signs — the dock, standing in the square
+
+    static let k3DSignIdBase: Int64 = 1_000_000
+    /// The ring the signs stand on, as a fraction of the windows' ring:
+    /// round the pool, inside the arc the windows make.
+    static let k3DSignRing = 0.6
+    static let k3DSignWidth = 0.8
+    static let k3DSignHeight = 0.94        // the label texture's 256x300
+    static let k3DSignHoverScale = 1.2
+
+    /// A sign to the next, centre to centre; the most in one row before
+    /// the row is wider than the view from the entrance; and where the
+    /// rows behind stand — up and back, like seats, so each row shows
+    /// over the one in front.
+    static let k3DSignPitch = 1.25
+    static let k3DSignsPerRow = 6
+    static let k3DSignRowRise = 1.05
+    static let k3DSignRowBack = 0.7
+    /// On the tower: the signs' floor pitch, the first floor above the
+    /// pool, and how far in front of the wall they hang.
+    static let k3DTowerFloor = 1.0
+    static let k3DTowerFirstFloor = 1.5
+    static let k3DTowerSignOut = 0.04
+    /// The first window's angle from dead ahead, so it clears the tower.
+    static let k3DTowerClearDeg = 32.0
+
+    /// Where the dock's apps stand in the city: a row along the near side
+    /// of the pool, facing whoever comes in from the entrance, in the
+    /// dock's order left to right. A sign is the app's tile and name
+    /// (the same texture the nameplates use), and it is a launcher: a
+    /// click opens the app, which then takes its place on the windows'
+    /// arc. The Launchpad has no place here — the square IS the launcher.
+    /// (An arc round the pool was tried first: from the entrance its
+    /// ends turn away and the outer signs stack up on screen.)
+    func _desktop3DSigns() -> [(app: String, x: Double, y: Double, z: Double, w: Double, h: Double, yaw: Double?)] {
+        guard let w = _desktop3DWorld, w.kind == .voxel else { return [] }
+        let apps = _dockDisplayApps.filter { $0 != "launcher" }
+        let n = apps.count
+        guard n > 0 else { return [] }
+        if let t = w.tower {
+            // The app tower: signs fixed on its front face, floor by
+            // floor from the pool up, the dock's first apps lowest —
+            // nearest eye level. Two columns; three when the dock is long.
+            let cols = n <= 14 ? 2 : 3
+            let pitch = cols == 2 ? 1.3 : 0.95
+            return apps.enumerated().map { i, app in
+                let floor = i / cols, col = i % cols
+                let x = t.x + (Double(col) - Double(cols - 1) / 2) * pitch
+                let y = t.base + Self.k3DTowerFirstFloor + Double(floor) * Self.k3DTowerFloor
+                let k = app == _desktop3DHoveredSign ? Self.k3DSignHoverScale : 1.0
+                return (app, x, y, t.z + t.half + Self.k3DTowerSignOut,
+                        Self.k3DSignWidth * k, Self.k3DSignHeight * k, 0.0)
+            }
+        }
+        let z0 = w.hub.z + w.ringRadius * Self.k3DSignRing
+        let rows = (n + Self.k3DSignsPerRow - 1) / Self.k3DSignsPerRow
+        let perRow = (n + rows - 1) / rows
+        return apps.enumerated().map { i, app in
+            let row = i / perRow, col = i % perRow
+            let inRow = min(perRow, n - row * perRow)
+            // +x is the viewer's right from the entrance; each row is
+            // centred on its own.
+            let x = w.hub.x + (Double(col) - Double(inRow - 1) / 2) * Self.k3DSignPitch
+            let z = z0 - Double(row) * Self.k3DSignRowBack
+            let k = app == _desktop3DHoveredSign ? Self.k3DSignHoverScale : 1.0
+            return (app, x, w.ground(x, z) + 1.15 + Double(row) * Self.k3DSignRowRise, z,
+                    Self.k3DSignWidth * k, Self.k3DSignHeight * k, nil)
+        }
+    }
+
+    /// The sign under a screen point, if any: each is a billboard facing
+    /// the viewer, so its screen box is its centre projected and its size
+    /// over its depth — nearest wins where two overlap.
+    func _desktop3DSignAt(_ screen: Offset) -> String? {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        guard host.width > 0, _desktop3DT >= 1 else { return nil }
+        let cam = _desktop3DEffectiveCamera(_desktop3DT)
+        let view = Self._view(cam)
+        let focal = _desktop3DFocalPx(host)
+        var best: (app: String, depth: Double)? = nil
+        for s in _desktop3DSigns() {
+            let v = view.perspectiveTransform(Vector3(s.x, s.y, s.z))
+            let depth = -v.z
+            guard depth > 0.1 else { continue }
+            if let yaw = s.yaw {
+                // Fixed on a wall: where the ray meets its plane.
+                let pose = WindowPose3D(x: s.x, y: s.y, z: s.z, yaw: yaw, scale: 1, placed: true)
+                guard let (u, vv) = _desktop3DPlaneHit(screen, camera: cam, host: host, pose: pose),
+                      abs(u) <= s.w / 2, abs(vv) <= s.h / 2 else { continue }
+            } else {
+                let sx = host.center.dx + focal * v.x / depth
+                let sy = host.center.dy - focal * v.y / depth
+                let hw = focal * s.w / depth / 2, hh = focal * s.h / depth / 2
+                guard abs(screen.dx - sx) <= hw, abs(screen.dy - sy) <= hh else { continue }
+            }
+            if best == nil || depth < best!.depth { best = (s.app, depth) }
+        }
+        return best?.app
+    }
+
+    /// Pointer over the world: the sign under it grows a little.
+    func _desktop3DSignHover(_ screen: Offset) {
+        let hit = _desktop3DSignAt(screen)
+        if hit != _desktop3DHoveredSign {
+            setState { _desktop3DHoveredSign = hit }
+        }
+    }
+
+    /// A click on the world: a sign opens its app.
+    func _desktop3DSignClick(_ screen: Offset) {
+        guard let app = _desktop3DSignAt(screen) else { return }
+        _desktop3DLog("sign \(app) clicked")
+        _launchOrFocusApp(app)
     }
 
     /// The world's frame tile (world.json `pane_frame`), decoded into a

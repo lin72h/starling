@@ -299,6 +299,7 @@ SOLID = np.array([i for i, (name, faces) in enumerate(BLOCKS) if faces and name 
 
 CELL = 12        # a city block: 4 of street, then the lot
 G = 4            # ground level: the surface block's y
+TOWER_H = 8      # the app tower, in blocks above the pool
 
 # Building styles: the wall block, its window, its lit window, how the
 # windows are laid out, and the roof parapet.
@@ -475,9 +476,11 @@ def build_city(size, seed, plaza_r=13):
                     and rng.random() < 0.15 and blocks[tx, G + 1, tz] == AIR:
                 blocks[tx, G, tz] = B["grass"]
                 plant_tree(blocks, rng, tx, G + 1, tz)
-    # The square: a low pool in the middle (nothing tall, so the windows
-    # across the square are in view from the door), lamp posts, trees in
-    # beds of flowers at the corners.
+    # The square: a pool in the middle with a sandstone tower rising out
+    # of it — the app tower, whose front face (toward the entrance, +z)
+    # carries the desktop's launcher signs — lamp posts, and trees in
+    # beds of flowers at the corners. The windows stand round the tower,
+    # never straight behind it from the door.
     for dx in range(-3, 4):
         for dz in range(-3, 4):
             r = max(abs(dx), abs(dz))
@@ -485,7 +488,11 @@ def build_city(size, seed, plaza_r=13):
                 blocks[c + dx, G + 1, c + dz] = B["concrete"]
             elif r <= 2:
                 blocks[c + dx, G + 1, c + dz] = B["water"]
-    blocks[c, G + 1, c] = B["lamp"]
+    for dx in range(-1, 2):
+        for dz in range(-1, 2):
+            blocks[c + dx, G + 1:G + 1 + TOWER_H, c + dz] = B["sandstone"]
+            blocks[c + dx, G + TOWER_H, c + dz] = B["cornice"]
+    blocks[c, G + 1 + TOWER_H, c] = B["lamp"]
     for sx, sz in ((-9, -9), (9, -9), (-9, 9), (9, 9)):
         props.append(("lamp", c + sx, G + 1, c + sz, 3))
     for sx, sz in ((-12, -12), (12, -12), (-12, 12), (12, 12)):
@@ -728,6 +735,10 @@ def main() -> int:
         # The windows' frames are blocks of this world: a plank tile,
         # one per `block` metres, a `margin` wide and `depth` deep.
         "pane_frame": {"texture": "frame.png", "block": 0.25, "margin": 0.25, "depth": 0.25},
+        # The app tower: its centre, half-width, the pool level its base
+        # stands on and the height of its top. The launcher signs hang on
+        # its +z face.
+        "tower": {"x": 0.0, "z": 0.0, "half": 1.5, "base": float(G + 1), "top": float(G + 1 + TOWER_H)},
     }
     with open(os.path.join(a.out, "world.json"), "w") as f:
         json.dump(world, f)

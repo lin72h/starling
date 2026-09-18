@@ -44,9 +44,12 @@ struct SceneOrb: Equatable {
 
 /// A label in the scene: a shell-drawn texture on a quad that faces the viewer.
 struct SceneLabel: Equatable {
-    var id: Int64          // the engine texture id, which is also the key
+    var id: Int64          // the label's key in the scene
+    var texture: Int64     // the engine texture it shows (several labels may share one)
     var x = 0.0, y = 0.0, z = 0.0
     var width = 0.3, height = 0.3
+    /// nil: a billboard, always facing the viewer; else fixed, 0 = +z.
+    var yaw: Double? = nil
 }
 
 /// What a world is, read from its world.json. The room is the default
@@ -91,6 +94,10 @@ struct World3D {
     /// block tile image in the world's directory, laid `block` metres to
     /// a tile over a frame `margin` wide and `depth` deep.
     var paneFrame: (texture: String, block: Double, margin: Double, depth: Double)? = nil
+    /// A walking world's tower at the hub, if it has one: where the
+    /// launcher's signs hang (on its +z face) and what the windows keep
+    /// clear of.
+    var tower: (x: Double, z: Double, half: Double, base: Double, top: Double)? = nil
 
     static func load(_ dir: String) -> World3D {
         var w = World3D()
@@ -106,6 +113,11 @@ struct World3D {
             w.pointLight = (pos[0], pos[1], pos[2], col[0], col[1], col[2], cd)
         }
         if let h = j["hub"] as? [Double], h.count == 3 { w.hub = (h[0], h[1], h[2]) }
+        if let t = j["tower"] as? [String: Any],
+           let x = t["x"] as? Double, let z = t["z"] as? Double, let half = t["half"] as? Double,
+           let base = t["base"] as? Double, let top = t["top"] as? Double {
+            w.tower = (x, z, half, base, top)
+        }
         if let v = j["sun_radius"] as? Double { w.sunRadius = v }
         if let v = j["planet_orbit"] as? Double { w.planetOrbit = v }
         if let v = j["planet_radius"] as? Double { w.planetRadius = v }
@@ -154,7 +166,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     private typealias SetPointLightFn = @convention(c) (OpaquePointer?, UnsafePointer<Float>?, UnsafePointer<Float>?, Float) -> Void
     private typealias SetOrbFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, UnsafePointer<Float>?, Float) -> Int32
     private typealias RemoveIdFn = @convention(c) (OpaquePointer?, Int64) -> Void
-    private typealias SetLabelFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, UInt32, Int32, Int32) -> Int32
+    private typealias SetLabelFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, Float, UInt32, Int32, Int32) -> Int32
 
     /// The world this renderer shows, from its directory's world.json.
     let world: World3D
@@ -285,9 +297,10 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
         knownOrbs = live
         var liveLabels = Set<Int64>()
         for l in labels {
-            guard let tex = sceneTexture?(l.id), tex.name != 0 else { continue }
+            guard let tex = sceneTexture?(l.texture), tex.name != 0 else { continue }
             var c: [Float] = [Float(l.x), Float(l.y), Float(l.z)]
             if fnSetLabel(room, l.id, &c, Float(l.width), Float(l.height),
+                          l.yaw.map { Float($0) } ?? Float.nan,
                           tex.name, Int32(tex.width), Int32(tex.height)) == 0 { liveLabels.insert(l.id) }
         }
         for id in knownLabels.subtracting(liveLabels) { fnRemoveLabel(room, id) }

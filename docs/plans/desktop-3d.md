@@ -38,7 +38,9 @@ touching anything.
   them, no dock or status bar. A window clicked from across the square
   is walked up to (one at reading distance takes the click as a click;
   the first person to play clicked Terminal from 17 m and nothing
-  happened, because that was wired for the orrery only). The city is
+  happened, because that was wired for the orrery only). **The dock is
+  a tower in the pool** with the apps as signs on its face (Phase 14),
+  and windows wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
   shopfronts facing the square under awnings and signs, roof tanks and
@@ -1256,6 +1258,43 @@ crosses the fullscreen reveal's hide zone — the revealed title bar was
 "dead to clicks" for an hour because the click was in a second
 invocation. Reveal and click in ONE invocation, or start each with a
 move to the top edge. A real mouse never does this.
+
+### Phase 14 — the app tower (2026-09-18)
+
+"We should have a place to open apps, similar to the dock. In the
+centre of the city?" — and then, "stack those icons like a building".
+So: a sandstone tower, 3 blocks square and 8 tall, rises out of the
+pool in the middle of the square, and the dock's apps hang on its
+front face as signs, two columns, floor by floor from the pool up (the
+dock's first apps lowest, nearest eye level; three columns past
+fourteen). A sign is the app's tile and name — the nameplate texture —
+and a click on it opens the app, which takes its place on the arc.
+Hovering one grows it a fifth. The Launchpad has no sign: the square is
+the launcher.
+
+Three things had to give:
+
+- **Labels could only face the viewer.** `sr_room_set_label` takes a
+  `yaw` now (NaN = billboard); a sign on a wall keeps its facing, so
+  from the side it is a sign on a wall and not a card that swivels
+  through the stone. Hit-testing is the pane's ray-plane test for
+  those, the projected-box test for billboards.
+- **A label's id was its texture id**, and the signs share the
+  nameplates' textures. `SceneLabel` carries `texture` separately; the
+  signs' ids are offset by a million.
+- **Nothing may stand straight behind the tower from the door.** The
+  windows' arc no longer puts one dead ahead: the first flanks the
+  tower at 32°, the next at −32°, then ±62°, and on round.
+
+The world's `tower` in world.json (centre, half-width, base, top) is
+what the shell hangs the signs on; a world without one gets the signs
+in a row on the near side of its hub (rows of six, stacked like seats).
+An arc of signs round the pool was tried first and rejected: from the
+entrance the ends turn away and stack up.
+
+The pointer reaches the world through a Listener round the
+environment's texture — the wallpaper slot — in the city only; a click
+that hits no sign still does what it did (drops the window's focus).
 
 ### Still open
 

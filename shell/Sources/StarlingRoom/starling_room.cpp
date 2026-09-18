@@ -116,6 +116,8 @@ struct Label {
     int texW = 0, texH = 0;
     float3 centre{};
     float width = 0, height = 0;
+    bool fixedYaw = false;
+    float yaw = 0;
 };
 
 /// One window in the room: the client's picture on a quad, in a slab.
@@ -427,8 +429,9 @@ int sr_room_render(sr_room* r) {
         rot[3] = float4{ 0, 0, 0, 1 };
         for (auto& kv : r->labels) {
             Label& l = kv.second;
+            const mat4f facing = l.fixedYaw ? mat4f::rotation(l.yaw, float3{ 0, 1, 0 }) : rot;
             tcm.setTransform(tcm.getInstance(l.entity),
-                    mat4f::translation(l.centre) * rot
+                    mat4f::translation(l.centre) * facing
                     * mat4f::scaling(float3{ l.width, l.height, 1.0f }));
         }
     }
@@ -838,7 +841,7 @@ void sr_room_remove_orb(sr_room* r, int64_t id) {
 }
 
 int sr_room_set_label(sr_room* r, int64_t id, const float centre[3],
-                      float width, float height,
+                      float width, float height, float yaw,
                       uint32_t gl_texture, int tex_w, int tex_h) {
     if (!ensureOrbGeometry(r)) return -1;
     Engine& e = *r->engine;
@@ -874,6 +877,8 @@ int sr_room_set_label(sr_room* r, int64_t id, const float centre[3],
     }
     l.centre = float3{ centre[0], centre[1], centre[2] };
     l.width = width; l.height = height;
+    l.fixedYaw = !std::isnan(yaw);
+    l.yaw = l.fixedYaw ? yaw : 0.0f;
     return 0;
 }
 

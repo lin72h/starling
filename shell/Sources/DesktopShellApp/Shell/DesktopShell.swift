@@ -689,6 +689,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _orbit3D: (theta: Double, radius: Double, height: Double)? = nil
     /// App labels drawn for the scene, by app id.
     var _appLabelTextures: [String: Int64] = [:]
+    /// The app whose sign in the square the pointer is over (Desktop3D).
+    var _desktop3DHoveredSign: String? = nil
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -4464,7 +4466,16 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         Opacity(opacity: min(1, _desktop3DT * 1.6), child: room),
                     ])
                 } else {
-                    wallpaperWidget = room
+                    // In the city the world takes the pointer too: the
+                    // signs round the pool are the dock, and a click on one
+                    // opens its app.
+                    wallpaperWidget = _desktop3DVoxel
+                        ? Listener(
+                            onPointerDown: { [self] e in _desktop3DSignClick(e.position) },
+                            onPointerHover: { [self] e in _desktop3DSignHover(e.position) },
+                            behavior: .opaque,
+                            child: room)
+                        : room
                 }
             } else if wallpaperPreset == .still, wallpaperTextureId >= 0 {
                 wallpaperWidget = TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low)

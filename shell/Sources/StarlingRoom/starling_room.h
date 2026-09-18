@@ -97,10 +97,12 @@ SR_EXPORT int sr_room_set_orb(sr_room*, int64_t id, const float centre[3], float
                               const float colour[3], float glow);
 SR_EXPORT void sr_room_remove_orb(sr_room*, int64_t id);
 
-/// A label: a texture with alpha on a quad `width` x `height` metres that
-/// always faces the viewer, centred on `centre`.
+/// A label: a texture with alpha on a quad `width` x `height` metres
+/// centred on `centre`. With `yaw` NaN it always faces the viewer (a
+/// nameplate); otherwise it faces that way (0 = +z), fixed, like a sign
+/// on a wall.
 SR_EXPORT int sr_room_set_label(sr_room*, int64_t id, const float centre[3],
-                                float width, float height,
+                                float width, float height, float yaw,
                                 uint32_t gl_texture, int tex_w, int tex_h);
 SR_EXPORT void sr_room_remove_label(sr_room*, int64_t id);
 
