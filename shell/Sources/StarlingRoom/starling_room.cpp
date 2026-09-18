@@ -597,11 +597,12 @@ bool ensureBlockGeometry(sr_room* r) {
         { { 0, 1, 0 }, { 1, 0, 0 }, { 0, 0, -1 } },
         { { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } },
     };
+    // One rule for every face, the top included: (0,0) at the corner
+    // that is bottom-left seen from outside — for the top, seen from in
+    // front and above, the front-left — and a word on it reads from the
+    // front. (Turning the top's picture "to fix it" was a misreading of
+    // a screenshot; it was right.)
     const float uvs[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
-    // The top face, seen from in front and above, reads its picture
-    // turned half round by the side faces' rule, so the top and the
-    // bottom take the picture turned half round the other way.
-    const float uvsFlipped[4][2] = { { 1, 1 }, { 0, 1 }, { 0, 0 }, { 1, 0 } };
     std::vector<float3> normals;
     for (int f = 0; f < 6; f++) {
         const float3 n = faces[f][0], u = faces[f][1], v = faces[f][2];
@@ -609,10 +610,9 @@ bool ensureBlockGeometry(sr_room* r) {
         const float3 corners[4] = { c - u * 0.5f - v * 0.5f, c + u * 0.5f - v * 0.5f,
                                     c + u * 0.5f + v * 0.5f, c - u * 0.5f + v * 0.5f };
         const uint16_t b = uint16_t(f * 4);
-        const auto& uv = (f >= 4) ? uvsFlipped : uvs;
         for (int i = 0; i < 4; i++) {
             r->cubeVerts.insert(r->cubeVerts.end(),
-                    { corners[i].x, corners[i].y, corners[i].z, uv[i][0], uv[i][1] });
+                    { corners[i].x, corners[i].y, corners[i].z, uvs[i][0], uvs[i][1] });
             normals.push_back(n);
         }
         r->cubeIdx.insert(r->cubeIdx.end(), { b, uint16_t(b + 1), uint16_t(b + 2), b, uint16_t(b + 2), uint16_t(b + 3) });

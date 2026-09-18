@@ -1438,9 +1438,9 @@ press answers; a press anywhere else is a no. Placed once, where the
 viewer stood when they pressed; walk round it and it is a board on
 the square.
 
-The cube's top face took its picture turned half round (the side
-faces' UV rule, seen from above); tops and bottoms now take it turned
-back, so a word on a block's top reads from the front.
+(A word on a block's top already read from the front; a screenshot
+misread as upside-down cost two rebuilds "fixing" it. Crop and zoom
+before believing a small render.)
 
 ### Still open
 
