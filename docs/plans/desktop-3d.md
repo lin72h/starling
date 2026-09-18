@@ -48,8 +48,9 @@ they said.
   reveal shows the bar alone, no status bar).
 - **The dock is a small building of bricks in the pool**, each app a
   lit block with its colour and glyph. Hover lights one and names it;
-  double-click opens its app, whose window pops up in front of you
-  (or brings its open window to you); press and drag carries it —
+  a click opens its app, whose window pops up in front of you (or
+  brings its open window to you), and whatever was already in front
+  steps back behind it; press and drag carries it —
   anywhere in the city, at the distance it was picked up, the wheel
   pushing and pulling, riding over other bricks — and let go, it
   falls onto whatever is under it. **The bricks have weight:** pull one
@@ -60,7 +61,7 @@ they said.
 - **Driving it**: `~/tmp/filament/play.sh` (the session scratchpad
   copy) starts the dev shell with the city and turns 3D on;
   `shell-drive` for input — one invocation per gesture (`down`, moves,
-  `up`; `dblclick` for a double-click); the `[3D] bricks settled:` log
+  `up`; `click` on a brick opens its app); the `[3D] bricks settled:` log
   line for positions, checked pairwise for overlap by a script, never
   by eye; `[Input] UP` against the shot's line before reading a
   screenshot of a drag. Transitions: `record-start/stop` + an ffmpeg
@@ -1637,6 +1638,31 @@ twenty seconds stops and says so in the log rather than burn a core.
 **Reading a screenshot of a drag:** check `[Input] UP` against the
 shot's line in the log before calling a brick's position wrong. The
 carry ends where the button does, not where the picture was taken.
+
+### Phase 32 — one click opens (2026-09-18)
+
+"Click box does not bring up window." The log showed what happened:
+four presses on bricks over the session, each one a single click —
+`sign terminal clicked`, and nothing after it — because Phase 29 had
+made a single click do nothing and only a double-click open. A
+double-click still worked when driven (`dblclick` → `open terminal`
+→ the window in front at 1:1), so the mechanism was fine; the gesture
+was the wrong one. Now a click on a brick — a press that never
+becomes a drag — opens its app, the way one click on the dock does,
+and the second click of a double-click is let through as nothing, so
+a double-click opens once and never twice (`_desktop3DBrickClicked`).
+Drag is untouched: it is still decided by the slop, before release.
+
+Seen while proving it: a second window popped up onto the SAME plane
+as the first (both "one pixel per pixel ahead"), and two panes on one
+plane fight for every pixel — the Calculator's picture drawn over
+the Terminal's while the Terminal had the keyboard, its orange keys
+speckled where the depths crossed. Now a pop-up steps whatever
+already stands on that plane back behind it (`_desktop3DPopUpWindow`:
+the slab's depth plus five centimetres each, nearest first, the
+higher of two at one depth first), so the newest window is the one in
+front, exactly 1:1, and the others read as a pile behind it — the
+flat desktop's stacking, given depth.
 
 ### Still open
 

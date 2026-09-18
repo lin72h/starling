@@ -703,10 +703,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _sceneTitleBars: [String: (key: String, tex: Int64)] = [:]
     /// Per window, the block of its title bar the pointer is over.
     var _sceneTitleHover: [String: Int] = [:]
-    /// A brick was double-clicked and its app is starting: its first
-    /// window pops up in front of the viewer instead of on the arc.
+    /// A brick was clicked and its app is starting: its first window
+    /// pops up in front of the viewer instead of on the arc.
     var _desktop3DPopUp: String? = nil
-    /// The last single click on a brick, for telling a double-click.
+    /// The last click on a brick, so the second click of a double-click
+    /// does not open the app twice.
     var _desktop3DBrickClick: (app: String, at: Double)? = nil
     /// (See BrickBody below the class.)
     /// The bricks of the building as bodies with weight, by app

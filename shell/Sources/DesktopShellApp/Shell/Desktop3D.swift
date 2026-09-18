@@ -287,7 +287,7 @@ extension _DesktopShellState {
             for win in fresh {
                 if _desktop3DPopUp == win.appId {
                     _desktop3DPopUp = nil
-                    win.pose3D = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
+                    _desktop3DPopUpWindow(win, host: host, w: w)
                     let id = win.id
                     // After this build: focus is state, and this runs inside one.
                     let work: () -> Void = { [weak self] in
@@ -372,18 +372,59 @@ extension _DesktopShellState {
         return WindowPose3D(x: x, y: y, z: z, yaw: -c.yaw, scale: 1, placed: true)
     }
 
-    /// A brick was clicked (a press that never became a drag): the second
-    /// click on the same brick within half a second opens its app.
+    /// A window pops up in front of the viewer, and whatever already
+    /// stands on that plane steps back behind it — a slab's depth and a
+    /// hand each, nearest first — so the newest is the one in front and
+    /// the rest read as a pile behind it, the way a new window lands on
+    /// top on the flat desktop. Two panes on one plane fight for every
+    /// pixel, and the one drawn last wins, whichever has the keyboard.
+    func _desktop3DPopUpWindow(_ win: WindowInfo, host: Rect, w: World3D) {
+        let pose = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
+        win.pose3D = pose
+        let c = _camera3D
+        let fwd = (x: sin(c.yaw), z: -cos(c.yaw))
+        let along = { (p: WindowPose3D) in (p.x - c.x) * fwd.x + (p.z - c.z) * fwd.z }
+        let front = along(pose)
+        let step = (w.paneFrame?.depth ?? 0.035) + 0.05
+        let s = Self.k3DMetresPerPx
+        // The pile: every other placed window within a few steps of the
+        // plane, nearest first, the higher of two at one depth first.
+        var pile: [(win: WindowInfo, at: Double)] = []
+        for other in windowManager.visibleWindows where other.id != win.id && other.pose3D.placed {
+            let at: Double = along(other.pose3D)
+            if at > front - step / 2, at < front + 6 * step { pile.append((other, at)) }
+        }
+        pile.sort { (a: (win: WindowInfo, at: Double), b: (win: WindowInfo, at: Double)) -> Bool in
+            if abs(a.at - b.at) > 0.01 { return a.at < b.at }
+            return a.win.zIndex > b.win.zIndex
+        }
+        for (i, entry) in pile.enumerated() {
+            let other = entry.win, at = entry.at
+            let want: Double = front + Double(i + 1) * step
+            guard abs(want - at) > 0.001 else { continue }
+            var p = other.pose3D
+            p.x += fwd.x * (want - at)
+            p.z += fwd.z * (want - at)
+            p.y = max(p.y, w.ground(p.x, p.z) + other.rect.height * s / 2 + 0.05)
+            other.pose3D = p
+        }
+        _desktop3DLog("pop up \(win.title): \(pile.count) behind")
+    }
+
+    /// A brick was clicked (a press that never became a drag): its app
+    /// opens, the way one click on the dock opens an app. The second click
+    /// of a double-click — the same brick again within half a second — is
+    /// let through as nothing, so a double-click opens the app once too.
     static let k3DDoubleClick = 0.5
 
     func _desktop3DBrickClicked(_ app: String) {
         let now = Date.timeIntervalSinceReferenceDate
         if let last = _desktop3DBrickClick, last.app == app, now - last.at < Self.k3DDoubleClick {
             _desktop3DBrickClick = nil
-            _desktop3DOpenApp(app)
-        } else {
-            _desktop3DBrickClick = (app, now)
+            return
         }
+        _desktop3DBrickClick = (app, now)
+        _desktop3DOpenApp(app)
     }
 
     /// Open an app from its brick: a window it already has pops up in
@@ -395,7 +436,7 @@ extension _DesktopShellState {
         let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         if let win = windowManager.visibleWindows.last(where: { $0.appId == app && !$0.isFullscreen }) {
             setState {
-                win.pose3D = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
+                _desktop3DPopUpWindow(win, host: host, w: w)
                 windowManager.bringToFront(win.id)
                 windowManager.focusedWindowId = win.id
             }
