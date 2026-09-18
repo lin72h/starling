@@ -40,16 +40,19 @@ touching anything.
   shopfronts facing the square under awnings and signs, roof tanks and
   aerials, crosswalks and lamp posts — and **the window frames are
   blocks of the world** (world.json `pane_frame`), not the room's wood.
-- **Entering** fades the world up through the wallpaper over the 600 ms
-  tween while the windows lift off the desktop; leaving is the reverse;
-  t = 0 is still the exact flat desktop.
+- **Entering** is a dolly where the world asks for one (`camera_home.dolly`,
+  the city: 6 m over a 1 s tween): the world comes up through the
+  wallpaper while the viewer glides in, and the windows leave the desktop
+  last, taking their places in the square as the viewer arrives. Leaving
+  is the reverse, windows first. The room keeps its 600 ms fade. t = 0 is
+  still the exact flat desktop, wherever the dolly starts.
 - **Driving it**: `~/tmp/filament/{compare,panes,panes-drag,city}.py`
   stop GDM, run the dev shell with a world, enter, drive, screenshot,
   restore GDM. The broker socket is root-only in dev mode. Transitions
   are checked with `shell-drive record-start/stop` and an ffmpeg tile.
 
-**Next**: a dolly-in instead of the fade; walking through walls (the
-heightmap is level and nothing is solid); the room's walls read as
+**Next**: walking through walls (the heightmap is level and nothing is
+solid); the room's walls read as
 concrete; packaging (`libc++1`, the Filament build on the build box,
 and the city is not staged — `STARLING_ROOM_DIR` still points at
 `~/tmp/filament/voxel`).
@@ -1186,6 +1189,36 @@ cells).
   status — `tail` — not the renderer's, which is how the AMD render
   node "never ran". `/dev/dri` renumbered again today: the AMD node is
   `renderD128` and the NVIDIA device is gone from the list.
+
+### Phase 12 — the entrance is a dolly (2026-09-17)
+
+The fade was a cross-dissolve between two stills. Now the camera moves:
+a world can ask for a dolly (`camera_home.dolly`, metres), and entering
+starts that far behind the home spot and glides up to it over the tween
+— 1 s for a dolly world, the room's 600 ms otherwise. Three things had
+to move together for t = 0 to stay the exact 2D desktop:
+
+- **The flat pose follows the camera.** It was "the plane in front of the
+  HOME camera at one pixel per pixel"; it is now the plane in front of
+  the *tween's* camera at t, so while the viewer is still six metres
+  back the flat windows ride along in front of them, pixel-exact.
+- **The camera the tween describes** runs from the dolly start to
+  wherever the viewer is standing (the home spot on entry; on leave,
+  wherever they walked to — so leaving still walks them back). The lean
+  is applied on top, scaled by t as before.
+- **The windows move on t².** With everything on t the windows shrank
+  away in the first 150 ms, before the world was visible enough to
+  receive them. On t² they stay on the desktop while the world comes up
+  (the wallpaper's opacity ramp is 1.6·t, so the world is fully there by
+  60%) and the glide begins, and fly to their places in the square as
+  the viewer arrives — they get their block frames mid-flight. Leaving,
+  the same curve brings them home first, while the world is still
+  there under them.
+
+Verified with `shell-drive record-start/stop` and an ffmpeg tile of
+every frame of the moving second (`~/tmp/filament/city-enter.py`,
+`enter2/`): 1023 ms measured from the frame differences, the staging
+as described. The GL room and the Filament room are unchanged (dolly 0).
 
 ### Still open
 

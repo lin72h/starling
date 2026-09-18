@@ -4449,9 +4449,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     // the Filament room has no picture wall to unfold from,
                     // so it comes up through the wallpaper as the windows
                     // lift off it, and goes the same way.
+                    // Up by the time the tween is well under way, so a
+                    // world entered by dolly is seen arriving rather than
+                    // dissolving in at the end of the glide.
                     wallpaperWidget = Stack(fit: .expand, children: [
                         TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low),
-                        Opacity(opacity: _desktop3DT, child: room),
+                        Opacity(opacity: min(1, _desktop3DT * 1.6), child: room),
                     ])
                 } else {
                     wallpaperWidget = room

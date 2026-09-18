@@ -724,7 +724,7 @@ def main() -> int:
         "ring_radius": 7.5,
         "heightmap": {"origin": [origin[0], origin[1]], "size": [a.size, a.size],
                       "heights": surface.T.reshape(-1).tolist()},   # [x][z] order
-        "camera_home": {"radius": 10.5, "height": 0.0},
+        "camera_home": {"radius": 10.5, "height": 0.0, "dolly": 6.0},
         # The windows' frames are blocks of this world: a plank tile,
         # one per `block` metres, a `margin` wide and `depth` deep.
         "pane_frame": {"texture": "frame.png", "block": 0.25, "margin": 0.25, "depth": 0.25},

@@ -84,6 +84,9 @@ struct World3D {
     var moonScale = 0.12
     var cameraRadius = 5.2
     var cameraHeight = 1.0
+    /// Entering is a dolly: the viewer starts this many metres behind the
+    /// home spot and glides up to it over the tween (0: no dolly).
+    var cameraDolly = 0.0
     /// What the windows' frames are made of, if not the plain slab: a
     /// block tile image in the world's directory, laid `block` metres to
     /// a tile over a frame `margin` wide and `depth` deep.
@@ -111,6 +114,7 @@ struct World3D {
         if let c = j["camera_home"] as? [String: Any] {
             if let v = c["radius"] as? Double { w.cameraRadius = v }
             if let v = c["height"] as? Double { w.cameraHeight = v }
+            if let v = c["dolly"] as? Double { w.cameraDolly = v }
         }
         if let sun = j["sun"] as? [String: Any],
            let d = sun["dir"] as? [Double], d.count == 3,

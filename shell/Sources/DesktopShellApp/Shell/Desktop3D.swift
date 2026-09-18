@@ -133,6 +133,7 @@ extension _DesktopShellState {
     static let k3DStep = 0.22
     static let k3DTurn = 2.6 * Double.pi / 180
     static let k3DTransitionMs = 600
+    static let k3DDollyTransitionMs = 1000
 
     var _desktop3DActive: Bool { _desktop3DT > 0 }
 
@@ -226,16 +227,31 @@ extension _DesktopShellState {
     }
 
     /// Where a window hangs when it is simply showing its 2D rect: the
-    /// plane in front of the home camera at which one logical pixel is
-    /// one screen pixel.
-    func _desktop3DFlatPose(rect: Rect, host: Rect) -> WindowPose3D {
-        let home = _desktop3DHomeCamera(host)
+    /// plane in front of `camera` at which one logical pixel is one
+    /// screen pixel. The camera is the tween's (`_desktop3DTweenCamera`),
+    /// so while the entrance dollies the viewer forward the flat windows
+    /// ride along in front of it, and t = 0 is the exact 2D desktop from
+    /// wherever the dolly starts. (Assumes the camera looks down -z,
+    /// which every world's home does.)
+    func _desktop3DFlatPose(rect: Rect, host: Rect, camera: Camera3D) -> WindowPose3D {
         let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
         return WindowPose3D(
-            x: (rect.center.dx - host.center.dx) * Self.k3DMetresPerPx,
-            y: home.y - (rect.center.dy - host.center.dy) * Self.k3DMetresPerPx,
-            z: home.z - d1,
+            x: camera.x + (rect.center.dx - host.center.dx) * Self.k3DMetresPerPx,
+            y: camera.y - (rect.center.dy - host.center.dy) * Self.k3DMetresPerPx,
+            z: camera.z - d1,
             yaw: 0, placed: true)
+    }
+
+    /// Where the entrance starts: the world's dolly length behind the
+    /// home spot, along its facing. The home spot itself in a world with
+    /// no dolly (the room), so nothing there changes.
+    func _desktop3DDollyStart(_ host: Rect) -> Camera3D {
+        var c = _desktop3DHomeCamera(host)
+        let d = _desktop3DWorld?.cameraDolly ?? 0
+        guard d > 0 else { return c }
+        c.x -= sin(c.yaw) * d
+        c.z += cos(c.yaw) * d
+        return c
     }
 
     // MARK: Laying the windows out
@@ -317,17 +333,25 @@ extension _DesktopShellState {
     /// walks the viewer back to their desk however far they had wandered,
     /// and the flat desktop it lands on is exact rather than approximate.
     func _desktop3DEffectiveCamera(_ t: Double) -> Camera3D {
-        let home = _desktop3DHomeCamera(displayLayout?.host.logicalRect
+        let c = _desktop3DTweenCamera(t)
+        return t > 0 ? _desktop3DLeaned(c, t) : c
+    }
+
+    /// The camera the tween puts the viewer at, before the lean: from the
+    /// dolly start (the home spot, or the world's dolly length behind it)
+    /// to wherever they are standing. Entering, that is a glide up to the
+    /// home spot; leaving, it walks them back from wherever they wandered.
+    func _desktop3DTweenCamera(_ t: Double) -> Camera3D {
+        let start = _desktop3DDollyStart(displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
-        guard t > 0 else { return home }
-        if t >= 1 { return _desktop3DLeaned(_camera3D, t) }
+        guard t > 0 else { return start }
+        if t >= 1 { return _camera3D }
         let c = _camera3D
-        return _desktop3DLeaned(
-            Camera3D(x: home.x + (c.x - home.x) * t,
-                     y: home.y + (c.y - home.y) * t,
-                     z: home.z + (c.z - home.z) * t,
-                     yaw: home.yaw + (c.yaw - home.yaw) * t,
-                     pitch: home.pitch + (c.pitch - home.pitch) * t), t)
+        return Camera3D(x: start.x + (c.x - start.x) * t,
+                        y: start.y + (c.y - start.y) * t,
+                        z: start.z + (c.z - start.z) * t,
+                        yaw: start.yaw + (c.yaw - start.yaw) * t,
+                        pitch: start.pitch + (c.pitch - start.pitch) * t)
     }
 
     // MARK: The lean — parallax from the pointer
@@ -536,16 +560,22 @@ extension _DesktopShellState {
 
     /// The window's place this frame: between the pose that reproduces
     /// its flat rect and the pose it has in the room.
+    ///
+    /// In a world entered by dolly the windows move on t², so they stay
+    /// on the desktop while the world comes up and the glide begins, and
+    /// take their places in the square as the viewer arrives — and,
+    /// leaving, come home first while the world is still there.
     func _desktop3DLerpPose(rect: Rect, host: Rect, t: Double,
                             pose: WindowPose3D) -> WindowPose3D {
-        let flat = _desktop3DFlatPose(rect: rect, host: host)
+        let flat = _desktop3DFlatPose(rect: rect, host: host, camera: _desktop3DTweenCamera(t))
         let target = pose.placed ? pose : flat
+        let k = (_desktop3DWorld?.cameraDolly ?? 0) > 0 ? t * t : t
         return WindowPose3D(
-            x: flat.x + (target.x - flat.x) * t,
-            y: flat.y + (target.y - flat.y) * t,
-            z: flat.z + (target.z - flat.z) * t,
-            yaw: flat.yaw + (target.yaw - flat.yaw) * t,
-            scale: 1 + (target.scale - 1) * t,
+            x: flat.x + (target.x - flat.x) * k,
+            y: flat.y + (target.y - flat.y) * k,
+            z: flat.z + (target.z - flat.z) * k,
+            yaw: flat.yaw + (target.yaw - flat.yaw) * k,
+            scale: 1 + (target.scale - 1) * k,
             placed: true)
     }
 
@@ -880,8 +910,11 @@ extension _DesktopShellState {
             return
         }
         if _desktop3DController == nil {
+            // A world entered by dolly gets a longer tween: the glide is
+            // the entrance, and 600 ms of it reads as a lurch.
+            let ms = (_desktop3DWorld?.cameraDolly ?? 0) > 0 ? Self.k3DDollyTransitionMs : Self.k3DTransitionMs
             let c = AnimationController(
-                duration: .milliseconds(Self.k3DTransitionMs), vsync: self)
+                duration: .milliseconds(ms), vsync: self)
             let curve = CurvedAnimation(parent: c, curve: Curves.easeInOutCubic)
             curve.addListener { [weak self] in
                 guard let self else { return }
