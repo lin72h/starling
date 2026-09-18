@@ -160,7 +160,7 @@ struct EnvironmentCamera: Equatable {
     var lightB: Double = 0.70
 }
 
-final class EnvironmentRenderer: GLRenderer {
+class EnvironmentRenderer: GLRenderer {
 
     // MARK: Tuning (world units: the flat quad sits 1.0 in front of the eye)
 

@@ -132,6 +132,27 @@ extension _DesktopShellState {
 
     var _desktop3DActive: Bool { _desktop3DT > 0 }
 
+    /// Whether the room renderer draws the windows itself, as panes in
+    /// its scene (Filament), rather than the layer tree drawing them over
+    /// the room. The widget stays either way: it is what the pointer hits.
+    var _desktop3DScene: Bool {
+        #if os(Linux)
+        return _environment is FilamentRoomRenderer
+        #else
+        return false
+        #endif
+    }
+
+    /// Where windows hang when the room draws them: on the side walls,
+    /// alternately left and right, from the far end (in view from the
+    /// door) toward the viewer. Centre height, first slot's z and the
+    /// spacing along the wall; a 1280-px window is 2.4 m wide.
+    static let k3DWallHeight = 1.6
+    static let k3DWallFirstZ = 1.5
+    static let k3DWallSpacing = 2.7
+    /// Off the wall by the frame's depth and a little air.
+    static let k3DWallOffset = 0.045
+
     /// STARLING_3D_LOG=1: what the camera is doing, on stderr.
     func _desktop3DLog(_ m: @autoclosure () -> String) {
         guard ProcessInfo.processInfo.environment["STARLING_3D_LOG"] == "1" else { return }
@@ -185,6 +206,24 @@ extension _DesktopShellState {
             .filter { !$0.pose3D.placed }
             .sorted { $0.rect.center.dx < $1.rect.center.dx }
         guard !fresh.isEmpty else { return false }
+        #if os(Linux)
+        if _desktop3DScene {
+            let taken = windowManager.visibleWindows.filter { $0.pose3D.placed }.count
+            let off = Room3D.halfW - Self.k3DWallOffset
+            for (i, win) in fresh.enumerated() {
+                let slot = taken + i
+                let left = slot % 2 == 0
+                win.pose3D = WindowPose3D(
+                    x: left ? -off : off,
+                    y: Self.k3DWallHeight,
+                    z: Self.k3DWallFirstZ + Double(slot / 2) * Self.k3DWallSpacing,
+                    // Facing into the room: +x off the left wall, -x off the right.
+                    yaw: left ? .pi / 2 : -.pi / 2,
+                    placed: true)
+            }
+            return true
+        }
+        #endif
         // In front of the viewer, not in front of the door: a window that
         // opens while you are down the other end of the hall should be
         // where you are looking.
@@ -360,10 +399,17 @@ extension _DesktopShellState {
         }
     }
 
-    /// World -> view: undo the camera's place and heading.
+    /// World -> view: undo the camera's place and heading. The camera
+    /// looks along (sin yaw, 0, -cos yaw) — what walking, stepping up and
+    /// the room renderer all use — and with the SDK's rotation matrices
+    /// that is rotationY(+yaw), not the -yaw the words "undo the heading"
+    /// suggest. The two signs were mirrored here for as long as every pane
+    /// faced straight down the hall (yaw 0 either way); the first pane on
+    /// a side wall vanished behind the near plane while the room showed
+    /// it dead ahead. Checked against EnvironmentRenderer.view numerically.
     static func _view(_ c: Camera3D) -> Matrix4 {
-        var m = Matrix4.rotationX(-c.pitch)
-        m.multiply(Matrix4.rotationY(-c.yaw))
+        var m = Matrix4.rotationX(c.pitch)
+        m.multiply(Matrix4.rotationY(c.yaw))
         m.multiply(Matrix4.translationValues(-c.x, -c.y, -c.z))
         return m
     }
@@ -541,9 +587,15 @@ extension _DesktopShellState {
         let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
         setState {
             // Square on to the pane, at the 1:1 distance, eye on its centre.
+            // The pane's normal is (sin yaw, 0, cos yaw) and the camera
+            // looks along (sin yaw, 0, -cos yaw), so looking back down the
+            // normal is yaw NEGATED — the same number only for a pane that
+            // faces straight down the hall, which is all the arc ever made,
+            // and which hid this: on a side wall the old value turned the
+            // viewer to face the opposite wall.
             _camera3D = Camera3D(x: p.x + sin(p.yaw) * d1, y: p.y,
                                  z: p.z + cos(p.yaw) * d1,
-                                 yaw: p.yaw, pitch: 0)
+                                 yaw: -p.yaw, pitch: 0)
             windowManager.bringToFront(winner.id)
         }
         _desktop3DPublishCamera()
@@ -793,6 +845,42 @@ extension _DesktopShellState {
         #endif
     }
 
+    /// The windows as the room renderer should draw them this frame:
+    /// every visible window with a client texture, at the pose the layer
+    /// tree is about to give its widget, so the two coincide.
+    func _desktop3DPublishPanes() {
+        #if os(Linux)
+        guard let env = _environment as? FilamentRoomRenderer,
+              let registry = drmTextureRegistry, let wl = waylandIntegration,
+              environmentTextureId >= 0 else { return }
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        let t = _desktop3DT
+        let s = Self.k3DMetresPerPx
+        let titleH = shellMetrics.titleBarHeight
+        var specs: [ScenePane] = []
+        for win in windowManager.visibleWindows where !win.isFullscreen {
+            guard let texId = win.textureId, win.rect.height > titleH else { continue }
+            let p = _desktop3DLerpPose(rect: win.rect, host: host, t: t, pose: win.pose3D)
+            specs.append(ScenePane(
+                id: Int64(texId), x: p.x, y: p.y, z: p.z, yaw: p.yaw,
+                width: win.rect.width * s, height: win.rect.height * s,
+                contentDy: -titleH / 2 * s,
+                contentWidth: win.rect.width * s,
+                contentHeight: (win.rect.height - titleH) * s,
+                // Filament's materials take texture row 0 as the TOP (its
+                // default flipUV), the opposite of the engine's external
+                // textures — so a buffer the widget flips, the pane does not.
+                flipY: !win.flipTextureY,
+                focused: win.id == windowManager.focusedWindowId))
+        }
+        if env.setPanes(specs) {
+            registry.setSceneMirror(ids: Set(specs.map { $0.id }), target: environmentTextureId)
+            registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId)
+        }
+        #endif
+    }
+
     // MARK: The environment
 
     /// The room behind the windows: a texture in the wallpaper's slot,
@@ -807,7 +895,21 @@ extension _DesktopShellState {
               wallpaperTextureId >= 0,
               let phys = PlatformDispatcher.instance.implicitView?.physicalSize,
               phys.width > 0, phys.height > 0 else { return false }
-        let renderer = EnvironmentRenderer(width: Int(phys.width), height: Int(phys.height))
+        // STARLING_ROOM=filament: the same slot, drawn by Filament (see
+        // Compositor/FilamentRoom.swift) from a glTF and a cmgen'd sky.
+        let renderer: EnvironmentRenderer
+        let env = ProcessInfo.processInfo.environment
+        if env["STARLING_ROOM"] == "filament" {
+            let dir = env["STARLING_ROOM_DIR"]
+                ?? Self.dataFilePath("room/filament").map { ($0 as NSString).deletingLastPathComponent + "/filament" }
+                ?? "room/filament"
+            let fr = FilamentRoomRenderer(width: Int(phys.width), height: Int(phys.height),
+                                          roomDir: dir)
+            fr.sceneTexture = { [weak registry] id in registry?.sceneTexture(id: id) }
+            renderer = fr
+        } else {
+            renderer = EnvironmentRenderer(width: Int(phys.width), height: Int(phys.height))
+        }
         renderer.glProcAddressResolver = registry.glProcAddressResolver
         let source = wallpaperTextureId
         renderer.sourceTexture = { [weak registry] in registry?.sourceTexture(id: source) }
@@ -909,6 +1011,7 @@ extension _DesktopShellState {
         guard environmentTextureId >= 0, let registry = drmTextureRegistry,
               let wl = waylandIntegration else { return }
         _sceneTicker?.stop()
+        registry.setSceneMirror(ids: [], target: -1)
         registry.unregisterTexture(engine: wl.engine, id: environmentTextureId)
         environmentTextureId = -1
         _environment = nil

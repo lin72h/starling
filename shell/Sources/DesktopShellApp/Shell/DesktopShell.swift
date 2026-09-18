@@ -254,7 +254,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool)] = [:]
     /// The wallpaper as a coarse colour grid — the 3D desktop's light
     /// source, since the room's back wall is the picture itself.
     var _wallpaperLight: (cells: [Color], cols: Int, rows: Int)? = nil
@@ -4562,7 +4562,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // Anything new in the room needs a place in it before it can be
         // drawn there — including everything, in a session that came up
         // with the room already open.
-        if _desktop3DT > 0 { _desktop3DPlaceWindows() }
+        if _desktop3DT > 0 {
+            _desktop3DPlaceWindows()
+            // When the room draws the windows itself, tell it where they
+            // are before their widgets are built at the same places.
+            if _desktop3DScene { _desktop3DPublishPanes() }
+        }
         let camera3D = _desktop3DEffectiveCamera(_desktop3DT)
         let orderedWindows: [(win: WindowInfo, layerDx: Double)] = _desktop3DT > 0
             ? layerWindows.sorted {
@@ -4594,14 +4599,36 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 ? _desktop3DPlacement(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
                 : .flat
-            if case .hidden = placement { continue }
+            if case .hidden = placement {
+                _desktop3DLog("place \(win.title): HIDDEN rect=\(posedRect) pose=\(win.pose3D) cam=\(camera3D)")
+                continue
+            }
             var pose: (matrix: Matrix4, pivot: Offset)? = nil
             if case let .posed(m, pivot) = placement { pose = (m, pivot) }
+            if ProcessInfo.processInfo.environment["STARLING_3D_LOG"] == "1" {
+                if let (m, pivot) = pose {
+                    // Where the window's centre and top-left land on screen.
+                    func proj(_ x: Double, _ y: Double) -> String {
+                        let px = x - pivot.dx, py = y - pivot.dy
+                        func dot(_ r: Vector4) -> Double { r.x * px + r.y * py + r.w }
+                        let w = dot(m.getRow(3)), sx = dot(m.getRow(0)), sy = dot(m.getRow(1))
+                        return String(format: "(%.0f,%.0f w%.2f)", sx / w + pivot.dx, sy / w + pivot.dy, w)
+                    }
+                    _desktop3DLog("place \(win.title): posed rect=\(posedRect) centre->\(proj(posedRect.center.dx, posedRect.center.dy)) tl->\(proj(posedRect.left, posedRect.top)) pose=\(win.pose3D) cam=\(camera3D)")
+                } else {
+                    _desktop3DLog("place \(win.title): FLAT rect=\(posedRect) fullscreen=\(win.isFullscreen) t=\(_desktop3DT)")
+                }
+            }
             let tilted = pose != nil
             // The light it stands in: the part of the picture behind it,
             // and the haze its distance earns. Quantised, so one step of
             // the camera does not rebuild every window's subtree.
-            let roomLight = tilted
+            // In the room renderer's scene, the client's picture is drawn
+            // there — lit, framed, occluded — and the widget's content
+            // area is only what the pointer lands on. The room's own
+            // light cues (haze, edges, shadow) are the renderer's too.
+            let inScene = tilted && _desktop3DScene && win.textureId != nil
+            let roomLight = tilted && !inScene
                 ? _desktop3DRoomLight(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
                 : nil
@@ -4616,7 +4643,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                cached.isFullscreen == win.isFullscreen,
                cached.isTopBarRevealed == windowTopBarRevealed,
                cached.isTilted == tilted,
-               cached.roomLight == roomLight {
+               cached.roomLight == roomLight,
+               cached.sceneContent == inScene {
                 window = cached.widget
             } else {
                 window = DesktopWindow(
@@ -4656,9 +4684,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     onDepthScroll: { [self] (delta: Double) in
                         _desktop3DScroll(winId, delta: delta)
                     },
-                    roomLight: roomLight
+                    roomLight: roomLight,
+                    sceneContent: inScene
                 )
-                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight)
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene)
             }
 
             // Open zoom plays only when the window is genuinely appearing

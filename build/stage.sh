@@ -134,6 +134,12 @@ if [ -f "$SHELL_BUILD/$CONFIG/BUILD-STAMP" ]; then
     install -m644 "$SHELL_BUILD/$CONFIG/BUILD-STAMP" "$LIB/"
 fi
 install -m644 "$E/libflutter_engine.so" "$E/libflutter_linux_drm.so" "$LIB/"
+# The 3D desktop's Filament room renderer, if it has been built
+# (build/build-room.sh); the shell dlopens it beside itself and falls back
+# to its own GL room without it.
+if [ -f "$SHELL_BUILD/libstarling_room.so" ]; then
+    install -m644 "$SHELL_BUILD/libstarling_room.so" "$LIB/"
+fi
 
 # SwiftPM resource bundles (CupertinoIcons font, …): the generated accessor
 # fatals if the bundle isn't next to the executable. Ship every one.

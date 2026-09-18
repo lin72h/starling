@@ -24,8 +24,17 @@ class DesktopWindow: StatelessWidget {
         // No sourceRect needed — MAXIMIZED state tells Chrome to skip CSD
         // shadows, so the buffer matches the content area exactly (like
         // Hyprland). The texture stretches to fill the content area.
-        var content: Widget = TextureWidget(textureId: texId, filterQuality: contentFilterQuality)
-        if windowInfo.flipTextureY {
+        var content: Widget
+        if sceneContent {
+            // The picture is the room renderer's, drawn in its scene at
+            // this same place; this is only the surface the pointer
+            // lands on. A ColoredBox hit-tests opaque at alpha 0 — a
+            // trap elsewhere, exactly the point here.
+            content = ColoredBox(color: Color(0x00000000), child: SizedBox(expand: ()))
+        } else {
+            content = TextureWidget(textureId: texId, filterQuality: contentFilterQuality)
+        }
+        if windowInfo.flipTextureY && !sceneContent {
             content = Transform(
                 transform: Matrix4.diagonal3Values(1.0, -1.0, 1.0),
                 alignment: Alignment.center,
@@ -185,6 +194,9 @@ class DesktopWindow: StatelessWidget {
     /// toward the light actually behind it, and gives the pane a shadow
     /// so it reads as off the wall rather than painted on it.
     let roomLight: RoomLight?
+    /// The client's picture is drawn by the room renderer, in its scene;
+    /// the content area here is transparent and only takes the pointer.
+    let sceneContent: Bool
 
     init(
         windowInfo: WindowInfo,
@@ -199,7 +211,8 @@ class DesktopWindow: StatelessWidget {
         onClose: (() -> Void)? = nil,
         onTitleBarDoubleTap: (() -> Void)? = nil,
         onDepthScroll: ((Double) -> Void)? = nil,
-        roomLight: RoomLight? = nil
+        roomLight: RoomLight? = nil,
+        sceneContent: Bool = false
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -214,6 +227,7 @@ class DesktopWindow: StatelessWidget {
         self.onTitleBarDoubleTap = onTitleBarDoubleTap
         self.onDepthScroll = onDepthScroll
         self.roomLight = roomLight
+        self.sceneContent = sceneContent
     }
 
     /// The glass tint, leaned toward the light behind the window when the
@@ -308,22 +322,24 @@ class DesktopWindow: StatelessWidget {
         // X11 window gets none either: its cut-away parts must show what is
         // behind, not a frosted tint of it.
         if !isFullscreen && !windowInfo.isShaped {
-            stackChildren.append(
-                Positioned(
-                    fill: (),
-                    child: IgnorePointer(
-                        child: ClipRect(
-                            child: BackdropFilter(
-                                filter: ShellPalette.frostFilter(blurSigma: 18),
-                                child: ColoredBox(
-                                    color: glassTint,
-                                    child: SizedBox(expand: ())
-                                )
-                            )
+            let frost = IgnorePointer(
+                child: ClipRect(
+                    child: BackdropFilter(
+                        filter: ShellPalette.frostFilter(blurSigma: 18),
+                        child: ColoredBox(
+                            color: glassTint,
+                            child: SizedBox(expand: ())
                         )
                     )
                 )
             )
+            // With the picture drawn in the room's scene, the frost stays
+            // under the title bar only: over the content it would veil the
+            // pane the renderer put there.
+            stackChildren.append(sceneContent
+                ? Positioned(left: 0, top: 0, right: 0,
+                             height: DesktopTheme.kTitleBarHeight, child: frost)
+                : Positioned(fill: (), child: frost))
         }
         stackChildren.append(windowBody)
 

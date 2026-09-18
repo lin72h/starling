@@ -1,0 +1,605 @@
+// Copyright the Starling authors
+// SPDX-License-Identifier: Apache-2.0
+//
+// See starling_room.h. Filament is created on the caller's EGL display
+// with a context shared with the caller's; it runs on its own thread, so
+// the caller's context is never made current anywhere else and nothing
+// here touches the caller's GL state.
+
+#include "starling_room.h"
+
+#include <EGL/egl.h>
+
+#include <backend/platforms/PlatformEGLHeadless.h>
+#include <filament/Camera.h>
+#include <filament/ColorGrading.h>
+#include <filament/Engine.h>
+#include <filament/IndirectLight.h>
+#include <filament/LightManager.h>
+#include <filament/Options.h>
+#include <filament/RenderTarget.h>
+#include <filament/Renderer.h>
+#include <filament/Scene.h>
+#include <filament/Skybox.h>
+#include <filament/SwapChain.h>
+#include <filament/Texture.h>
+#include <filament/TransformManager.h>
+#include <filament/View.h>
+#include <filament/Viewport.h>
+#include <gltfio/AssetLoader.h>
+#include <gltfio/FilamentAsset.h>
+#include <gltfio/MaterialProvider.h>
+#include <gltfio/ResourceLoader.h>
+#include <gltfio/TextureProvider.h>
+#include <gltfio/materials/uberarchive.h>
+#include <image/Ktx1Bundle.h>
+#include <ktxreader/Ktx1Reader.h>
+#include <math/mat3.h>
+#include <math/mat4.h>
+#include <math/vec3.h>
+#include <filament/Box.h>
+#include <filament/IndexBuffer.h>
+#include <filament/Material.h>
+#include <filament/MaterialInstance.h>
+#include <filament/RenderableManager.h>
+#include <filament/TextureSampler.h>
+#include <filament/VertexBuffer.h>
+#include <geometry/SurfaceOrientation.h>
+#include <utils/EntityManager.h>
+#include <unordered_map>
+
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <vector>
+
+using namespace filament;
+using namespace filament::backend;
+using namespace filament::math;
+
+namespace {
+
+/// Filament's headless EGL platform, pointed at the caller's display
+/// instead of the default one — objects can only be shared between
+/// contexts on the same display.
+class StarlingPlatform final : public PlatformEGLHeadless {
+public:
+    explicit StarlingPlatform(EGLDisplay display) { setEglDisplay(display); }
+};
+
+bool readFile(const char* path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    auto n = f.tellg();
+    out.resize(size_t(n));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(out.data()), n);
+    return bool(f);
+}
+
+double nowMs() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
+// The pane materials, compiled by matc at build time (build-room.sh).
+static const uint8_t SCREEN_MAT[] = {
+#include "screen.inc"
+};
+static const uint8_t FRAME_MAT[] = {
+#include "frame.inc"
+};
+
+/// One window in the room: the client's picture on a quad, in a slab.
+struct Pane {
+    utils::Entity screen, frame;
+    MaterialInstance* screenMi = nullptr;
+    MaterialInstance* frameMi = nullptr;
+    Texture* texture = nullptr;
+    uint32_t glName = 0;
+    int texW = 0, texH = 0;
+};
+
+struct sr_room {
+    StarlingPlatform* platform = nullptr;
+    Engine* engine = nullptr;
+    Renderer* renderer = nullptr;
+    Scene* scene = nullptr;
+    View* view = nullptr;
+    Camera* camera = nullptr;
+    utils::Entity cameraEntity;
+    SwapChain* swapChain = nullptr;
+
+    gltfio::MaterialProvider* materials = nullptr;
+    gltfio::AssetLoader* loader = nullptr;
+    gltfio::ResourceLoader* resources = nullptr;
+    gltfio::TextureProvider* stb = nullptr;
+    gltfio::FilamentAsset* asset = nullptr;
+
+    image::Ktx1Bundle* iblBundle = nullptr;
+    image::Ktx1Bundle* skyBundle = nullptr;
+    Texture* iblTexture = nullptr;
+    Texture* skyTexture = nullptr;
+    IndirectLight* ibl = nullptr;
+    Skybox* skybox = nullptr;
+    utils::Entity sun;
+    bool haveSun = false;
+
+    // Panes: shared unit geometry, two materials, one Pane per window.
+    VertexBuffer* quadVb = nullptr;
+    IndexBuffer* quadIb = nullptr;
+    VertexBuffer* boxVb = nullptr;
+    IndexBuffer* boxIb = nullptr;
+    Material* screenMat = nullptr;
+    Material* frameMat = nullptr;
+    std::vector<float> boxVerts;          // pos(3) per vertex, kept alive for the upload
+    std::vector<float4> boxTangents;
+    // An unlit material's colour skips the exposure the lights are scaled
+    // by and goes straight to the tone mapper, so 1.0 is already "white
+    // before tone mapping": a screen reads bright against a sunlit room at
+    // a little over half of that.
+    float screenIntensity = 0.6f;
+    std::unordered_map<int64_t, Pane> panes;
+
+    Texture* output = nullptr;
+    RenderTarget* target = nullptr;
+    uint32_t outputName = 0;
+    int width = 0, height = 0;
+    int frames = 0;
+};
+
+extern "C" {
+
+sr_room* sr_room_create(void* egl_display, void* shared_egl_context) {
+    auto* r = new sr_room();
+    r->platform = new StarlingPlatform(static_cast<EGLDisplay>(egl_display));
+    r->engine = Engine::Builder()
+            .backend(Engine::Backend::OPENGL)
+            .platform(r->platform)
+            .sharedContext(shared_egl_context)
+            .build();
+    if (!r->engine) {
+        fprintf(stderr, "[room] Filament engine failed to start\n");
+        delete r;
+        return nullptr;
+    }
+    r->renderer = r->engine->createRenderer();
+    r->scene = r->engine->createScene();
+    r->view = r->engine->createView();
+    r->cameraEntity = utils::EntityManager::get().create();
+    r->camera = r->engine->createCamera(r->cameraEntity);
+    // A swap chain is required by the frame API; on a GBM display there is
+    // no pbuffer to back it, and the frame is rendered into our render
+    // target instead, so the surface it lacks is never drawn to.
+    r->swapChain = r->engine->createSwapChain(16, 16, 0);
+
+    r->view->setScene(r->scene);
+    r->view->setCamera(r->camera);
+    // STARLING_ROOM_FX=lean drops the effects that cost the most at
+    // 2560x1600 (multisampling, ambient occlusion, bloom); the shadows and
+    // tone mapping stay. For measuring what the look is worth.
+    const char* fx = getenv("STARLING_ROOM_FX");
+    const bool lean = fx && strcmp(fx, "lean") == 0;
+    r->view->setPostProcessingEnabled(true);
+    r->view->setAntiAliasing(View::AntiAliasing::FXAA);
+    MultiSampleAntiAliasingOptions msaa;
+    msaa.enabled = !lean;
+    msaa.sampleCount = 4;
+    r->view->setMultiSampleAntiAliasingOptions(msaa);
+    r->view->setShadowingEnabled(true);
+    r->view->setShadowType(ShadowType::PCF);
+    AmbientOcclusionOptions ao;
+    ao.enabled = !lean;
+    r->view->setAmbientOcclusionOptions(ao);
+    BloomOptions bloom;
+    bloom.enabled = !lean;
+    bloom.strength = 0.06f;
+    r->view->setBloomOptions(bloom);
+    DynamicResolutionOptions dr;
+    dr.enabled = false;
+    r->view->setDynamicResolutionOptions(dr);
+    r->view->setDithering(Dithering::TEMPORAL);
+
+    Renderer::ClearOptions clear;
+    clear.clearColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+    clear.clear = true;
+    r->renderer->setClearOptions(clear);
+    // Filament skips a frame it judges the GPU cannot finish in time; we
+    // render on demand and wait, so there is never a frame to protect.
+    Renderer::FrameRateOptions fr;
+    fr.headRoomRatio = 0.0f;
+    fr.interval = 1;
+    r->renderer->setFrameRateOptions(fr);
+
+    r->camera->setExposure(16.0f, 1.0f / 125.0f, 100.0f);
+    if (const char* n = getenv("STARLING_ROOM_SCREEN")) r->screenIntensity = float(atof(n));
+    return r;
+}
+
+int sr_room_load(sr_room* r, const char* glb_path, const char* ibl_ktx_path,
+                 const char* skybox_ktx_path) {
+    double t0 = nowMs();
+    std::vector<uint8_t> glb;
+    if (!readFile(glb_path, glb)) {
+        fprintf(stderr, "[room] cannot read %s\n", glb_path);
+        return -1;
+    }
+    r->materials = gltfio::createUbershaderProvider(
+            r->engine, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
+    gltfio::AssetConfiguration ac{};
+    ac.engine = r->engine;
+    ac.materials = r->materials;
+    r->loader = gltfio::AssetLoader::create(ac);
+    r->asset = r->loader->createAsset(glb.data(), uint32_t(glb.size()));
+    if (!r->asset) {
+        fprintf(stderr, "[room] %s is not a glTF the loader accepts\n", glb_path);
+        return -2;
+    }
+    gltfio::ResourceConfiguration rc{};
+    rc.engine = r->engine;
+    rc.normalizeSkinningWeights = true;
+    r->resources = new gltfio::ResourceLoader(rc);
+    r->stb = gltfio::createStbProvider(r->engine);
+    r->resources->addTextureProvider("image/png", r->stb);
+    r->resources->addTextureProvider("image/jpeg", r->stb);
+    if (!r->resources->loadResources(r->asset)) {
+        fprintf(stderr, "[room] resources of %s failed to load\n", glb_path);
+        return -3;
+    }
+    r->asset->releaseSourceData();
+    r->scene->addEntities(r->asset->getRenderableEntities(),
+                          r->asset->getRenderableEntityCount());
+    double t1 = nowMs();
+
+    std::vector<uint8_t> ibl, sky;
+    if (!readFile(ibl_ktx_path, ibl) || !readFile(skybox_ktx_path, sky)) {
+        fprintf(stderr, "[room] cannot read the sky (%s, %s)\n", ibl_ktx_path, skybox_ktx_path);
+        return -4;
+    }
+    r->iblBundle = new image::Ktx1Bundle(ibl.data(), uint32_t(ibl.size()));
+    r->skyBundle = new image::Ktx1Bundle(sky.data(), uint32_t(sky.size()));
+    r->iblTexture = ktxreader::Ktx1Reader::createTexture(r->engine, *r->iblBundle, false,
+                                                         nullptr, nullptr);
+    r->skyTexture = ktxreader::Ktx1Reader::createTexture(r->engine, *r->skyBundle, false,
+                                                         nullptr, nullptr);
+    float3 sh[9];
+    if (!r->iblBundle->getSphericalHarmonics(sh)) {
+        fprintf(stderr, "[room] %s carries no spherical harmonics (cmgen --format=ktx writes them)\n",
+                ibl_ktx_path);
+        return -5;
+    }
+    r->ibl = IndirectLight::Builder()
+            .reflections(r->iblTexture)
+            .irradiance(3, sh)
+            .intensity(30000.0f)
+            .build(*r->engine);
+    r->scene->setIndirectLight(r->ibl);
+    r->skybox = Skybox::Builder().environment(r->skyTexture).showSun(false).build(*r->engine);
+    r->scene->setSkybox(r->skybox);
+    fprintf(stderr, "[room] loaded %s: %zu renderables in %.0f ms, sky in %.0f ms\n",
+            glb_path, r->asset->getRenderableEntityCount(), t1 - t0, nowMs() - t1);
+    return 0;
+}
+
+void sr_room_set_light(sr_room* r, const float sun_dir[3], const float sun_colour[3],
+                       float sun_lux, float ibl_lux) {
+    if (r->ibl) r->ibl->setIntensity(ibl_lux);
+    if (r->haveSun) {
+        r->scene->remove(r->sun);
+        r->engine->getLightManager().destroy(r->sun);
+        utils::EntityManager::get().destroy(r->sun);
+        r->haveSun = false;
+    }
+    if (sun_lux <= 0) return;
+    r->sun = utils::EntityManager::get().create();
+    // Filament's direction is the way the light TRAVELS.
+    float3 d = normalize(float3{ -sun_dir[0], -sun_dir[1], -sun_dir[2] });
+    LightManager::Builder(LightManager::Type::SUN)
+            .color({ sun_colour[0], sun_colour[1], sun_colour[2] })
+            .intensity(sun_lux)
+            .direction(d)
+            .sunAngularRadius(1.9f)
+            .castShadows(true)
+            .build(*r->engine, r->sun);
+    r->scene->addEntity(r->sun);
+    r->haveSun = true;
+}
+
+void sr_room_set_exposure(sr_room* r, float aperture, float shutter, float iso) {
+    r->camera->setExposure(aperture, shutter, iso);
+}
+
+int sr_room_set_output(sr_room* r, uint32_t gl_texture, int width, int height) {
+    if (r->output && r->outputName == gl_texture && r->width == width && r->height == height) {
+        return 0;
+    }
+    if (r->target) { r->engine->destroy(r->target); r->target = nullptr; }
+    if (r->output) { r->engine->destroy(r->output); r->output = nullptr; }
+    r->output = Texture::Builder()
+            .width(uint32_t(width))
+            .height(uint32_t(height))
+            .levels(1)
+            .sampler(Texture::Sampler::SAMPLER_2D)
+            .format(Texture::InternalFormat::RGBA8)
+            .usage(Texture::Usage::COLOR_ATTACHMENT | Texture::Usage::SAMPLEABLE)
+            .import(intptr_t(gl_texture))
+            .build(*r->engine);
+    r->target = RenderTarget::Builder()
+            .texture(RenderTarget::AttachmentPoint::COLOR, r->output)
+            .build(*r->engine);
+    r->view->setRenderTarget(r->target);
+    r->view->setViewport({ 0, 0, uint32_t(width), uint32_t(height) });
+    r->outputName = gl_texture;
+    r->width = width;
+    r->height = height;
+    return r->output && r->target ? 0 : -1;
+}
+
+void sr_room_set_camera(sr_room* r, const float view[16], const float proj[16],
+                        float near_plane, float far_plane) {
+    mat4f v, p;
+    memcpy(&v, view, sizeof(v));
+    memcpy(&p, proj, sizeof(p));
+    // No y flip: Filament's GL backend writes a render-target texture the
+    // way raw GL does, clip y = -1 in row 0, and the engine shows row 0 at
+    // the bottom of the screen. (A flip was added once on the word of a
+    // test tool that wrote its picture bottom row first; the desktop
+    // showed the room upside down. Measure on the desktop, not the tool.)
+    r->camera->setCustomProjection(mat4(p), double(near_plane), double(far_plane));
+    r->camera->setModelMatrix(inverse(v));
+}
+
+int sr_room_render(sr_room* r) {
+    if (!r->target) return -1;
+    double t0 = nowMs();
+    if (r->renderer->beginFrame(r->swapChain)) {
+        r->renderer->render(r->view);
+        r->renderer->endFrame();
+    } else {
+        fprintf(stderr, "[room] beginFrame declined\n");
+    }
+    r->engine->flushAndWait();
+    if (r->frames < 3 || (r->frames % 300) == 0) {
+        fprintf(stderr, "[room] frame %d: %.1f ms\n", r->frames, nowMs() - t0);
+    }
+    r->frames++;
+    return 0;
+}
+
+void sr_room_equirect_direction(float u, float v, float out_dir[3]) {
+    // cmgen's equirectangular mapping (CubemapUtils::toRectilinear, inverted):
+    // u = (atan2(x, z) / pi + 1) / 2, v = (1 - asin(y) * 2 / pi) / 2.
+    const float phi = (u * 2.0f - 1.0f) * float(M_PI);
+    const float lat = (1.0f - v * 2.0f) * float(M_PI) / 2.0f;
+    const float cl = cosf(lat);
+    out_dir[0] = cl * sinf(phi);
+    out_dir[1] = sinf(lat);
+    out_dir[2] = cl * cosf(phi);
+}
+
+} // extern "C"
+
+namespace {
+
+// A unit quad in the xy plane facing +z, uv (0,0) at the bottom left —
+// GL's texel row 0 — and a unit box, both scaled into place per pane by
+// the transform component.
+const float kQuad[] = {
+    -0.5f, -0.5f, 0.0f, 0.0f, 0.0f,
+     0.5f, -0.5f, 0.0f, 1.0f, 0.0f,
+     0.5f,  0.5f, 0.0f, 1.0f, 1.0f,
+    -0.5f,  0.5f, 0.0f, 0.0f, 1.0f,
+};
+const uint16_t kQuadIdx[] = { 0, 1, 2, 0, 2, 3 };
+
+bool ensurePaneGeometry(sr_room* r) {
+    if (r->quadVb) return true;
+    Engine& e = *r->engine;
+    r->screenMat = Material::Builder().package(SCREEN_MAT, sizeof(SCREEN_MAT)).build(e);
+    r->frameMat = Material::Builder().package(FRAME_MAT, sizeof(FRAME_MAT)).build(e);
+    if (!r->screenMat || !r->frameMat) {
+        fprintf(stderr, "[room] pane materials failed to load\n");
+        return false;
+    }
+    r->quadVb = VertexBuffer::Builder()
+            .vertexCount(4).bufferCount(1)
+            .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3, 0, 20)
+            .attribute(VertexAttribute::UV0, 0, VertexBuffer::AttributeType::FLOAT2, 12, 20)
+            .build(e);
+    r->quadVb->setBufferAt(e, 0, VertexBuffer::BufferDescriptor(kQuad, sizeof(kQuad)));
+    r->quadIb = IndexBuffer::Builder().indexCount(6)
+            .bufferType(IndexBuffer::IndexType::USHORT).build(e);
+    r->quadIb->setBuffer(e, IndexBuffer::BufferDescriptor(kQuadIdx, sizeof(kQuadIdx)));
+
+    // Six faces, four vertices each, wound counter-clockwise seen from
+    // outside; a lit material wants its normals as tangent frames.
+    const float3 faces[6][3] = {
+        { { 0, 0, 1 }, { 1, 0, 0 }, { 0, 1, 0 } },
+        { { 0, 0, -1 }, { -1, 0, 0 }, { 0, 1, 0 } },
+        { { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 } },
+        { { -1, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 } },
+        { { 0, 1, 0 }, { 1, 0, 0 }, { 0, 0, -1 } },
+        { { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } },
+    };
+    std::vector<float3> normals;
+    std::vector<uint16_t> idx;
+    for (int f = 0; f < 6; f++) {
+        const float3 n = faces[f][0], u = faces[f][1], v = faces[f][2];
+        const float3 c = n * 0.5f;
+        const float3 corners[4] = { c - u * 0.5f - v * 0.5f, c + u * 0.5f - v * 0.5f,
+                                    c + u * 0.5f + v * 0.5f, c - u * 0.5f + v * 0.5f };
+        const uint16_t b = uint16_t(f * 4);
+        for (const float3& p : corners) {
+            r->boxVerts.push_back(p.x); r->boxVerts.push_back(p.y); r->boxVerts.push_back(p.z);
+            normals.push_back(n);
+        }
+        const uint16_t tri[6] = { b, uint16_t(b + 1), uint16_t(b + 2), b, uint16_t(b + 2), uint16_t(b + 3) };
+        idx.insert(idx.end(), tri, tri + 6);
+    }
+    r->boxTangents.resize(24);
+    auto* orientation = geometry::SurfaceOrientation::Builder()
+            .vertexCount(24).normals(normals.data()).build();
+    orientation->getQuats(reinterpret_cast<quatf*>(r->boxTangents.data()), 24);
+    delete orientation;
+    r->boxVb = VertexBuffer::Builder()
+            .vertexCount(24).bufferCount(2)
+            .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3, 0, 12)
+            .attribute(VertexAttribute::TANGENTS, 1, VertexBuffer::AttributeType::FLOAT4, 0, 16)
+            .build(e);
+    r->boxVb->setBufferAt(e, 0, VertexBuffer::BufferDescriptor(
+            r->boxVerts.data(), r->boxVerts.size() * sizeof(float)));
+    r->boxVb->setBufferAt(e, 1, VertexBuffer::BufferDescriptor(
+            r->boxTangents.data(), r->boxTangents.size() * sizeof(float4)));
+    static uint16_t boxIdx[36];
+    memcpy(boxIdx, idx.data(), sizeof(boxIdx));
+    r->boxIb = IndexBuffer::Builder().indexCount(36)
+            .bufferType(IndexBuffer::IndexType::USHORT).build(e);
+    r->boxIb->setBuffer(e, IndexBuffer::BufferDescriptor(boxIdx, sizeof(boxIdx)));
+    return true;
+}
+
+void destroyPane(sr_room* r, Pane& p) {
+    Engine& e = *r->engine;
+    r->scene->remove(p.screen);
+    r->scene->remove(p.frame);
+    e.destroy(p.screen);
+    e.destroy(p.frame);
+    utils::EntityManager::get().destroy(p.screen);
+    utils::EntityManager::get().destroy(p.frame);
+    if (p.screenMi) e.destroy(p.screenMi);
+    if (p.frameMi) e.destroy(p.frameMi);
+    if (p.texture) e.destroy(p.texture);
+    p = Pane{};
+}
+
+} // namespace
+
+extern "C" {
+
+int sr_room_set_pane(sr_room* r, int64_t id, const float centre[3], float yaw,
+                     float width, float height, float content_dy,
+                     float content_w, float content_h,
+                     uint32_t gl_texture, int tex_w, int tex_h,
+                     int flip_y, int focused) {
+    if (!ensurePaneGeometry(r)) return -1;
+    Engine& e = *r->engine;
+    auto& tcm = e.getTransformManager();
+    Pane& p = r->panes[id];
+    if (p.screen.isNull()) {
+        auto& em = utils::EntityManager::get();
+        p.screen = em.create();
+        p.frame = em.create();
+        p.screenMi = r->screenMat->createInstance();
+        p.frameMi = r->frameMat->createInstance();
+        p.frameMi->setParameter("baseColor", float3{ 0.20f, 0.14f, 0.09f });
+        p.frameMi->setParameter("roughness", 0.55f);
+        RenderableManager::Builder(1)
+                .boundingBox({ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } })
+                .material(0, p.screenMi)
+                .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, r->quadVb, r->quadIb, 0, 6)
+                .culling(true).castShadows(false).receiveShadows(false)
+                .build(e, p.screen);
+        RenderableManager::Builder(1)
+                .boundingBox({ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } })
+                .material(0, p.frameMi)
+                .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, r->boxVb, r->boxIb, 0, 36)
+                .culling(true).castShadows(true).receiveShadows(true)
+                .build(e, p.frame);
+        tcm.create(p.screen);
+        tcm.create(p.frame);
+        r->scene->addEntity(p.screen);
+        r->scene->addEntity(p.frame);
+    }
+    if (gl_texture != p.glName || tex_w != p.texW || tex_h != p.texH) {
+        if (p.texture) e.destroy(p.texture);
+        p.texture = Texture::Builder()
+                .width(uint32_t(std::max(tex_w, 1))).height(uint32_t(std::max(tex_h, 1)))
+                .levels(1).sampler(Texture::Sampler::SAMPLER_2D)
+                .format(Texture::InternalFormat::RGBA8)
+                .usage(Texture::Usage::SAMPLEABLE)
+                .import(intptr_t(gl_texture))
+                .build(e);
+        p.glName = gl_texture; p.texW = tex_w; p.texH = tex_h;
+        TextureSampler sampler(TextureSampler::MinFilter::LINEAR, TextureSampler::MagFilter::LINEAR);
+        sampler.setWrapModeS(TextureSampler::WrapMode::CLAMP_TO_EDGE);
+        sampler.setWrapModeT(TextureSampler::WrapMode::CLAMP_TO_EDGE);
+        p.screenMi->setParameter("content", p.texture, sampler);
+    }
+    p.screenMi->setParameter("flipY", flip_y ? 1.0f : 0.0f);
+    p.screenMi->setParameter("intensity", r->screenIntensity);
+    p.frameMi->setParameter("baseColor", focused ? float3{ 0.30f, 0.21f, 0.13f }
+                                                 : float3{ 0.20f, 0.14f, 0.09f });
+
+    // The slab: a margin round the window and a few centimetres deep,
+    // its front face on the pane's plane and its body toward the wall.
+    // The picture floats a hair in front of the slab so they never fight.
+    const float margin = 0.04f, depth = 0.035f;
+    const mat4f place = mat4f::translation(float3{ centre[0], centre[1], centre[2] })
+            * mat4f::rotation(yaw, float3{ 0, 1, 0 });
+    tcm.setTransform(tcm.getInstance(p.frame),
+            place * mat4f::translation(float3{ 0, 0, -depth / 2 })
+                  * mat4f::scaling(float3{ width + 2 * margin, height + 2 * margin, depth }));
+    tcm.setTransform(tcm.getInstance(p.screen),
+            place * mat4f::translation(float3{ 0, content_dy, 0.003f })
+                  * mat4f::scaling(float3{ content_w, content_h, 1.0f }));
+    return 0;
+}
+
+void sr_room_remove_pane(sr_room* r, int64_t id) {
+    auto it = r->panes.find(id);
+    if (it == r->panes.end()) return;
+    destroyPane(r, it->second);
+    r->panes.erase(it);
+}
+
+void sr_room_set_screen_intensity(sr_room* r, float intensity) {
+    r->screenIntensity = intensity;
+    for (auto& kv : r->panes) kv.second.screenMi->setParameter("intensity", intensity);
+}
+
+void sr_room_destroy(sr_room* r) {
+    if (!r) return;
+    if (r->engine) {
+        r->engine->flushAndWait();
+        for (auto& kv : r->panes) destroyPane(r, kv.second);
+        r->panes.clear();
+        if (r->quadVb) r->engine->destroy(r->quadVb);
+        if (r->quadIb) r->engine->destroy(r->quadIb);
+        if (r->boxVb) r->engine->destroy(r->boxVb);
+        if (r->boxIb) r->engine->destroy(r->boxIb);
+        if (r->screenMat) r->engine->destroy(r->screenMat);
+        if (r->frameMat) r->engine->destroy(r->frameMat);
+        if (r->asset) {
+            r->scene->removeEntities(r->asset->getRenderableEntities(),
+                                     r->asset->getRenderableEntityCount());
+            r->loader->destroyAsset(r->asset);
+        }
+        delete r->resources;
+        delete r->stb;
+        if (r->materials) { r->materials->destroyMaterials(); delete r->materials; }
+        if (r->loader) gltfio::AssetLoader::destroy(&r->loader);
+        if (r->haveSun) { r->scene->remove(r->sun); r->engine->getLightManager().destroy(r->sun); }
+        if (r->target) r->engine->destroy(r->target);
+        if (r->output) r->engine->destroy(r->output);
+        if (r->skybox) r->engine->destroy(r->skybox);
+        if (r->ibl) r->engine->destroy(r->ibl);
+        if (r->iblTexture) r->engine->destroy(r->iblTexture);
+        if (r->skyTexture) r->engine->destroy(r->skyTexture);
+        r->engine->destroyCameraComponent(r->cameraEntity);
+        r->engine->destroy(r->view);
+        r->engine->destroy(r->scene);
+        r->engine->destroy(r->renderer);
+        r->engine->destroy(r->swapChain);
+        Engine::destroy(&r->engine);
+    }
+    delete r->iblBundle;
+    delete r->skyBundle;
+    delete r->platform;
+    delete r;
+}
+
+} // extern "C"

@@ -1,0 +1,19 @@
+// The slab a window hangs in: a plain lit surface, so the room's sun and
+// sky fall on it and it casts a shadow on the wall like a picture frame.
+material {
+    name : frame,
+    shadingModel : lit,
+    parameters : [
+        { type : float3, name : baseColor },
+        { type : float, name : roughness }
+    ]
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        material.baseColor.rgb = materialParams.baseColor;
+        material.roughness = materialParams.roughness;
+        material.metallic = 0.0;
+    }
+}

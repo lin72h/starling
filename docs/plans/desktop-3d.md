@@ -720,6 +720,220 @@ rather than confirmed: every window in the test scene faces down the
 hall, because nothing in the shell can yet move a window around the arc.
 The grab is what would let it be measured.
 
+### Phase 7 — the room rendered by Filament (2026-09-17)
+
+A spike, on the question "would a real renderer make this easier": the
+same room, in the same wallpaper slot, from the same camera, drawn by
+[Filament](https://github.com/google/filament) instead of the
+hand-written GL and the offline bake. It works, on the desktop, and the
+comparison is `~/tmp/filament/desk-filament2.png` against `desk-gl.png`.
+
+**What it is.** Filament is a rendering library, not a game engine: it
+does not own the process, the window or the input. It is created on the
+engine's own EGL display with a context that SHARES the engine's, runs on
+its own thread, and draws straight into the texture the registry made
+for the wallpaper slot. `sr_room_render` waits for the GPU, so the
+engine samples a finished picture on the same frame. Nothing about the
+windows, the input or the chrome changed: they are still widgets under a
+`Transform`, exactly as before.
+
+```
+  build/tools/room-glb.py      the room as ordinary glTF: the generated shell,
+                               the CC0 furniture with its own textures, NO
+                               baked light; plus the sky as two .hdr for cmgen
+  cmgen (Filament's tool)      -> room_ibl.ktx (the light), room_skybox.ktx (the view)
+  shell/Sources/StarlingRoom/  starling_room.{h,cpp}: a C surface over Filament
+  build/build-room.sh          -> libstarling_room.so (+ roomtest, a stand-alone check)
+  build/build-filament.sh      Filament itself, built the one way that can share
+                               the engine's context
+  Compositor/FilamentRoom.swift  EnvironmentRenderer subclass: dlopens the shim
+                               and stands in the slot when STARLING_ROOM=filament
+```
+
+The shell finds the library beside its own binary (`stage.sh` copies it
+from the scratch when it has been built) and the room's files in
+`STARLING_ROOM_DIR`. Without either, the slot falls back to the GL room.
+
+**What Filament gave for free that the bake did by hand**: shadow maps
+(the chairs cast onto the floor, the window frames cut the sun patches
+sharply — the bake's per-vertex daylight was a staircase), specular from
+the sky on the chairs' varnish, ambient occlusion, bloom, tone mapping,
+MSAA. The room reads brighter and more neutral than the GL one, which
+the note above had already called brown and dim.
+
+**Cost, measured** (2560x1600, dev box):
+
+| | |
+|---|---|
+| engine up, context shared | 42 ms |
+| room loaded (12 renderables, 11.5 MB glTF) | 84–115 ms |
+| first frame (shader compile) | 70–190 ms |
+| frame, every effect on | 8–13 ms |
+| frame, `STARLING_ROOM_FX=lean` (no MSAA/AO/bloom) | 3.6 ms |
+| library | 4.6 MB, plus `libc++1` at runtime |
+
+A frame is only rendered when the camera moves; the scene clock is
+ignored (`tick` is a no-op) because this room is still.
+
+**Traps paid for, all silent:**
+
+- **The prebuilt Linux release cannot be used.** Its OpenGL backend is
+  GLX-only and desktop-GL-only; a context that shares the engine's
+  textures must be an EGL context on the engine's GBM display. Build
+  from source with `FILAMENT_SUPPORTS_EGL_ON_LINUX`, which is the GLES
+  flavour of the backend over EGL — the engine's own API.
+- **`FILAMENT_USE_EXTERNAL_GLES3` is not what its name says.** It
+  EXCLUDES the OpenGL backend from the build. The libraries build, the
+  shim's link fails on every `OpenGLDriver` symbol, and an hour goes to
+  wondering why the backend archive has three object files in it.
+- **Materials must be compiled for the MOBILE shader model** in that
+  configuration, and the tree only does so when it thinks the target is
+  a phone. `build-filament.sh` patches `MATC_TARGET`; without it every
+  material fails to load at runtime.
+- **A GBM display has no pbuffers.** Filament's headless swap chain logs
+  `eglChooseConfig() didn't find any matching config` once and carries
+  on with `EGL_NO_SURFACE` (Mesa supports surfaceless contexts); the
+  frame goes into our render target, never to that surface. The line is
+  noise, not a failure.
+- **Filament is built `-fno-rtti`.** A class derived from one of its
+  platforms in a translation unit WITH rtti needs typeinfo Filament
+  never emitted (`undefined reference to typeinfo for PlatformEGLHeadless`).
+  The shim compiles `-fno-rtti -fno-exceptions` to match.
+- **`-fvisibility=hidden` hides the C API too.** The exported functions
+  carry an explicit default-visibility attribute.
+- **Mesa shares between GL and GLES contexts** (an ES 2 context and a GL
+  4.6 core context on the same GBM display see each other's textures —
+  measured, `~/tmp/filament/sharetest.c`), so the desktop-GL build would
+  also have worked. The GLES build was kept because it is the engine's
+  API and needs no bluegl.
+- **cmgen's equirectangular convention is the mirror of `room_hdri`'s**
+  (`(sin φ, ·, +cos φ)` against `(sin φ, ·, −cos φ)`). The exporter
+  mirrors the columns and turns them half a circle before cmgen, so the
+  sun found by `find_sun` is the sun the skybox shows. Do not add a
+  second convention anywhere.
+- **The light is not the whole sky.** Filament lights every surface from
+  the full sphere, so the ceiling came out meadow-green and the walls
+  sky-blue. The exporter paints the ground half of the LIGHT (not the
+  view) with the floor's colour times what falls on it — the note's
+  "a sky cannot light a ceiling; bounce off the floor stays an explicit
+  term", one more time.
+- **Filament writes the texture the way raw GL does** — clip y = −1 in
+  row 0, which the engine shows at the bottom. `roomtest` first wrote
+  its PPM bottom row first, the picture looked upside down, a y-flip was
+  added, and the DESKTOP then showed the room upside down. Measure on the
+  desktop; the tool now writes rows last-to-first so an upright PPM is an
+  upright room.
+- **The dev shell's broker socket is root-only** (`/tmp/xdg-starling-0`,
+  mode 0700). An unprivileged driver silently finds the packaged
+  session's STALE socket instead and gets `Connection refused`; run the
+  broker call through `sudo`. And do not run `run-desktop.sh` itself
+  from a root process: nested `sudo` makes `SUDO_USER` root and the
+  stage step exits 2 with no output.
+
+**Not done, in the order it would go:**
+
+- The shell's surfaces are flat colours (floor, walls, ceiling, joinery);
+  the GL room's procedural boards and plaster are gone. Poly Haven has
+  CC0 textures for both; the glTF takes them like any other material.
+- Exposure and light strengths are first guesses (`STARLING_ROOM_SUN_LUX`,
+  `_IBL_LUX`, `_EXPOSURE` tune them live). The floor reads pale.
+- The unfold is gone: this renderer ignores `t`, so entering pops from
+  the wallpaper to the room at the home camera. The 2D contract holds
+  (t = 0 still shows the plain wallpaper), but the 600 ms morph needs a
+  camera path instead of the old vertex mix.
+- The sky through the windows is a 512-per-face cubemap from the 1k
+  HDRI; `room-fetch.py` can take the 4k one.
+- Windows are still not in Filament's scene. That is the next question
+  the plan asks, and it costs what the "3D composite" discussion said:
+  input and chrome. Filament makes the drawing half of it a textured
+  quad — `Texture::Builder::import` takes the client texture's GL name.
+- Packaging: `libc++1` becomes a runtime dependency of the .deb, and
+  `build-filament.sh` a one-off on the build box (docs/BUILDING.md).
+
+### Phase 8 — the windows hang in the scene (2026-09-17)
+
+With Filament drawing the room, the windows go INTO it: each one is a
+pane in Filament's scene, hung flat on a side wall in a dark wood slab,
+its client texture on an unlit quad. The widget the layer tree had for
+that window stays exactly where it was, at exactly the same pose — it
+just stops painting its content. That is the whole trick: the room draws
+the picture (lit, framed, occluded, shadowed), the widget takes the
+pointer, and because both are built from the same camera and the same
+pose they coincide to the pixel. No new input code; the title bar is
+still the shell's, drawn over the pane.
+
+Verified on the desktop (`~/tmp/filament/panes5/`, `input1/`):
+
+- Two windows hang on the side walls, title bars sitting on them.
+- Space steps up to the pane ahead and the window is 1:1, crisp, its
+  chrome aligned with the frame.
+- A click on the Terminal pane from across the room focuses it, typed
+  commands run, and the pane on the wall shows the output as it prints —
+  the client's frames reach the scene live.
+
+```
+  shell/Sources/StarlingRoom/materials/   screen.mat (unlit, the client's picture)
+                                          frame.mat (lit, the slab)
+  sr_room_set_pane / sr_room_remove_pane  a pane per window, by texture id
+  LinuxTextureRegistry.sceneTexture       the client texture, imported the way
+                                          the engine's own callback imports it
+  LinuxTextureRegistry.setSceneMirror     a client frame -> a room frame
+  FilamentRoomRenderer.setPanes           the pane list, synced each frame
+  Desktop3D._desktop3DPublishPanes        poses -> panes, before the widgets
+  DesktopWindow(sceneContent:)            content area transparent, frost only
+                                          under the title bar
+```
+
+**The layout**: side walls only, alternately left and right from the far
+end toward the viewer, centre 1.6 m up, 2.7 m apart. From the door only
+the far slots are in view — a wall is a wall — and Space or a turn
+brings the rest round.
+
+**Two bugs this uncovered that predate Filament, both invisible while
+every pane faced straight down the hall:**
+
+- **`Desktop3D._view` mirrored yaw and pitch** against the room
+  renderer, the walking code and the step-up. The widgets and the room
+  turned opposite ways; the first pane on a side wall vanished behind
+  the near plane while the room showed it dead ahead. The SDK's
+  `rotationY(θ)` maps +z to (sin θ, 0, cos θ), so a camera that looks
+  along (sin yaw, 0, −cos yaw) needs `rotationY(+yaw)` — not the −yaw
+  that "undo the heading" suggests. Checked numerically against
+  `EnvironmentRenderer.view`.
+- **Step-up turned the camera to face the pane's normal, not the
+  pane.** The camera yaw is the pane's yaw NEGATED; for yaw 0 the two are
+  the same number, which is why it worked.
+
+**Traps paid for:**
+
+- **An unlit material skips exposure.** Lights are pre-scaled by the
+  camera's exposure; an unlit colour goes straight to the tone mapper.
+  A screen "intensity" of 25 000 (the IBL's units) made every pane
+  pure white with a coloured halo; 0.6 is a bright screen.
+- **Filament's default `flipUV` puts texture row 0 at the TOP**, the
+  opposite of the engine's external textures — so a buffer the widget
+  flips (Wayland), the pane does not, and vice versa.
+- **The widget's frosted-glass backdrop covers the pane.** With the
+  content transparent, the window's own frost layer still filled the
+  whole rect and showed a blurred room where the client should be. For
+  a scene pane it now sits under the title bar only.
+- **The engine only imports a client's buffer when it composites it.**
+  A pane the engine no longer draws would keep its first frame forever;
+  the registry now imports on the renderer's behalf and turns a client
+  frame into a room frame (`setSceneMirror`).
+- **Filament's shadow map is coarse on a wall**: the slab's shadow has a
+  staircase edge. Cascades or a larger map are a setting away.
+- Testing: the dev shell's broker socket is root-only; `key space` with
+  a window focused goes to the window (click the floor first); a click
+  meant for the floor lands on a 1:1 pane that fills the screen.
+
+**Still to do:** push/pull along the wall instead of off it; dragging a
+pane along the wall; occlusion by furniture is free now but nothing
+stands in front of a wall; the 1:1 step-up distance is derived from the
+LOGICAL width (1.74 m), which the arc layout shares; the pane's rounded
+corners vs the slab's square ones; per-frame cost while a video plays
+in a pane (every client frame is a room frame, 4–13 ms).
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

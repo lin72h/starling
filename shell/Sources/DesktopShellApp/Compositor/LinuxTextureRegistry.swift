@@ -352,6 +352,41 @@ class LinuxTextureRegistry: @unchecked Sendable {
         return (entry.glTextureName, entry.width, entry.height)
     }
 
+    /// The GL texture behind an engine texture id, imported or refreshed
+    /// exactly as the engine's own callback would do it — for a renderer
+    /// that draws the client's picture inside its scene (the 3D desktop's
+    /// panes) instead of the engine compositing it. Raster thread only,
+    /// GL context current, and never with the registry lock held.
+    func sceneTexture(id: Int64) -> (name: UInt32, width: Int, height: Int)? {
+        var out = FlutterOpenGLTexture()
+        guard populateTexture(id: id, width: 0, height: 0, textureOut: &out),
+              out.name != 0 else { return nil }
+        return (out.name, Int(out.width), Int(out.height))
+    }
+
+    /// Textures mirrored into a scene: a new frame on any of them is also a
+    /// new frame of the scene's own texture, or the scene would keep
+    /// showing the client's last picture while the engine, no longer
+    /// compositing that client itself, never asked for a newer one.
+    private var sceneMirror: (ids: Set<Int64>, target: Int64) = ([], -1)
+
+    func setSceneMirror(ids: Set<Int64>, target: Int64) {
+        lock.lock()
+        sceneMirror = (ids, target)
+        lock.unlock()
+    }
+
+    /// Every "this texture has a new frame" goes through here.
+    private func frameAvailable(engine: OpaquePointer, id: Int64) {
+        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        lock.lock()
+        let mirror = sceneMirror
+        lock.unlock()
+        if mirror.target >= 0, mirror.ids.contains(id) {
+            markGLTextureDirty(engine: engine, id: mirror.target)
+        }
+    }
+
     /// Marks a GL-rendered texture as needing a re-render and tells the
     /// engine the texture has new content.
     func markGLTextureDirty(engine: OpaquePointer, id: Int64) {
@@ -396,7 +431,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         lock.unlock()
         RecordingService.noteSourceContentChanged(textureId: id)
 
-        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        frameAvailable(engine: engine, id: id)
         FlutterEngineScheduleFrame(engine)
     }
 
@@ -461,7 +496,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         lock.unlock()
         RecordingService.noteSourceContentChanged(textureId: id)
 
-        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        frameAvailable(engine: engine, id: id)
         FlutterEngineScheduleFrame(engine)
     }
 
@@ -500,7 +535,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         RecordingService.noteSourceContentChanged(textureId: id)
 
         // Tell the rasterizer the texture has new content (clears cached image).
-        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        frameAvailable(engine: engine, id: id)
         // Trigger a full frame rebuild. Using ScheduleFrame instead of relying
         // on Mark's internal ScheduleFrame(false) avoids a Skia crash in
         // DrawLastLayerTrees on VMware SVGA3D (repeated re-render-same-tree
@@ -534,7 +569,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
         entry.dirty = true
         lock.unlock()
         RecordingService.noteSourceContentChanged(textureId: id)
-        FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
+        frameAvailable(engine: engine, id: id)
         FlutterEngineScheduleFrame(engine)
     }
 
