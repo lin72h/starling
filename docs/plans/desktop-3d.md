@@ -1598,6 +1598,21 @@ and a dragged pane stays where it was dragged.
 Harness note: two `click`s in a row are too slow to be a double-click
 (each spawns a process); use `dblclick`.
 
+### Phase 30 — the grid (2026-09-18)
+
+"The boxes still overlap" — and the numbers said they did not: the
+one brick RESTED on the other, a third of a brick over its edge, and
+from the entrance the two flush front faces read as one sunk lump. Two
+answers. Bricks that have come to rest snap to a quarter-brick grid
+(`_desktop3DSnapBricks`, when the ticker is about to stop: lowest
+first, only to a free spot on the same ground, and one more step for
+the footing after) — the building's courses are on that grid, a half
+overhang tips (the centre on the edge is the tipping point), a quarter
+stands, and nothing is ever a third over. And every face has a dark
+edge now, so two bricks side by side are two. The replay of the user's
+drop — editor to the plaza, settings a third over it — ends with the
+two side by side, 0.9 m apart, on the grid.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

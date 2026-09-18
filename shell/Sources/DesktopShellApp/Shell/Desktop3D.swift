@@ -1657,7 +1657,10 @@ extension _DesktopShellState {
                     self._brickTicker?.stop()
                     return
                 }
-                let moving = self._desktop3DBrickStep(dt, sc: sc)
+                var moving = self._desktop3DBrickStep(dt, sc: sc)
+                // Settled: onto the grid, and if that moved anything, once
+                // more round for its footing.
+                if !moving, self._desktop3DSnapBricks(sc: sc, w: w) { moving = true }
                 if !moving {
                     self._brickTicker?.stop()
                     self._desktop3DLog("bricks settled: " + self._desktop3DBricks.sorted { $0.key < $1.key }.map {
@@ -1671,6 +1674,35 @@ extension _DesktopShellState {
             _brickClock = 0
             _ = _brickTicker?.start()
         }
+    }
+
+    /// The grid: a quarter of a brick. A pile of bricks at odd offsets
+    /// reads as bricks sunk into each other — two flush faces a third of
+    /// a brick apart are one lump from the front — and Lego does not
+    /// allow it. So a brick that has come to rest is moved to the nearest
+    /// quarter-brick point, when that spot is free and on the same ground,
+    /// lowest bricks first. The building's courses are on this grid.
+    static let k3DBrickGrid = k3DSculptSize / 4
+
+    func _desktop3DSnapBricks(sc: (x: Double, z: Double, radius: Double, base: Double), w: World3D) -> Bool {
+        let s = Self.k3DSculptSize, g = Self.k3DBrickGrid
+        var changed = false
+        let order = _desktop3DBricks.filter { $0.value.mode == .rest }.sorted { $0.value.y < $1.value.y }.map { $0.key }
+        for app in order {
+            guard var b = _desktop3DBricks[app], b.mode == .rest else { continue }
+            let sx = sc.x + ((b.x - sc.x) / g).rounded() * g, sz = sc.z + ((b.z - sc.z) / g).rounded() * g
+            guard abs(sx - b.x) > 0.001 || abs(sz - b.z) > 0.001 else { continue }
+            guard _desktop3DBrickGround(sx, sz, sc: sc, w: w) == _desktop3DBrickGround(b.x, b.z, sc: sc, w: w) else { continue }
+            var free = true
+            for (other, o) in _desktop3DBricks where other != app && o.mode != .held {
+                if s - abs(o.x - sx) > 0.002, s - abs(o.y - b.y) > 0.002, s - abs(o.z - sz) > 0.002 { free = false; break }
+            }
+            guard free else { continue }
+            b.x = sx; b.z = sz
+            _desktop3DBricks[app] = b
+            changed = true
+        }
+        return changed
     }
 
     /// One step of the bricks' physics, over the whole city. A resting
@@ -1839,13 +1871,14 @@ extension _DesktopShellState {
         let paint = Paint()
         paint.color = bg
         canvas.drawRect(Rect.fromLTWH(0, 0, Double(s), Double(s)), paint)
-        if hovered {
-            paint.color = Color(0xFFFFFFFF)
-            paint.style = .stroke
-            paint.strokeWidth = 8
-            canvas.drawRect(Rect.fromLTWH(4, 4, Double(s) - 8, Double(s) - 8), paint)
-            paint.style = .fill
-        }
+        // A dark edge, so two bricks with flush faces read as two.
+        paint.color = hovered ? Color(0xFFFFFFFF)
+            : Color(alpha: 1, red: bg.r * 0.55, green: bg.g * 0.55, blue: bg.b * 0.55)
+        paint.style = .stroke
+        paint.strokeWidth = hovered ? 8 : 5
+        let inset = hovered ? 4.0 : 2.5
+        canvas.drawRect(Rect.fromLTWH(inset, inset, Double(s) - 2 * inset, Double(s) - 2 * inset), paint)
+        paint.style = .fill
         canvas.save()
         canvas.translate(24, 24)
         IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(80, 80))
