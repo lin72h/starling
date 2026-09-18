@@ -2718,6 +2718,15 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
             }
 
+            // The way out of the room by key: Escape while walking (nothing
+            // has the keyboard), or Alt+Escape at any time — a laptop's
+            // Home is a Fn chord, and the door block is not always in view.
+            if phys == 0x29, keyData.type == .down, self._desktop3DOn, self._desktop3DT >= 1,
+               self._altPressed || self._desktop3DWalking {
+                self._setDesktop3D(false)
+                return true
+            }
+
             // Walking the room. With the hall open and nothing focused,
             // the keyboard drives the camera: WASD or the arrows to move,
             // Q/E to turn, R/F to rise and sink, Home to go back to the

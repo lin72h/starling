@@ -1451,6 +1451,15 @@ status bar's power menu still is. (The signboard machinery — a
 fixed-yaw plank panel with block buttons under it — lived for one
 commit, 5e883a8, if a world ever needs to ask a question.)
 
+### Phase 23 — Escape (2026-09-18)
+
+The first person to be left standing in front of a window with the
+door behind them could not get out: "hold Alt and press Home" is a
+three-key chord on a laptop whose Home is Fn+Left, and their press
+never reached the shell as Home at all. So: **Escape** leaves the room
+while nothing has the keyboard, and **Alt+Escape** leaves it at any
+time. The door block stays for the mouse.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
