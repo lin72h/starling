@@ -703,9 +703,6 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DBricks: [String: BrickBody] = [:]
     var _brickTicker: Ticker? = nil
     var _brickClock: Double = 0
-    /// The world's power block was pressed: where the "Shut down the
-    /// computer?" signboard stands, facing the viewer, and which way.
-    var _desktop3DPowerDialog: (x: Double, y: Double, z: Double, yaw: Double)? = nil
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -5664,7 +5661,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// Hands the request to systemd and lets it decide. Deliberately no
     /// fallback to `shutdown`/`halt`: if logind refuses, the honest outcome is
     /// nothing happening rather than a second path with different semantics.
-    func _runPowerAction(_ action: PowerAction) {
+    private func _runPowerAction(_ action: PowerAction) {
         #if os(Linux)
         let (path, args) = action.command
         let process = Process()

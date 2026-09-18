@@ -43,9 +43,8 @@ touching anything.
   blocks in courses that tip and fall when what held them is pulled
   out, and can be re-piled by hand (Phases 17–19; the signboard tower,
   the floating spiral and the tall curling stack before it were each
-  rejected), a door block out of the world and a power block on the
-  pool's rim, whose confirm is a plank signboard with block buttons
-  (Phases 20–21), and windows
+  rejected), a door block on the pool's rim that is the way back to the
+  flat desktop (Phases 20–22), and windows
   wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
@@ -1441,6 +1440,16 @@ the square.
 (A word on a block's top already read from the front; a screenshot
 misread as upside-down cost two rebuilds "fixing" it. Crop and zoom
 before believing a small render.)
+
+### Phase 22 — just the door (2026-09-18)
+
+"Maybe shouldn't add power off in the 3D model. Just exit." The power
+block and its signboard are gone; one door block stands on the pool's
+front rim, right of the way in, and is the way back to the flat
+desktop. Shutting the machine down is the desk's business, where the
+status bar's power menu still is. (The signboard machinery — a
+fixed-yaw plank panel with block buttons under it — lived for one
+commit, 5e883a8, if a world ever needs to ask a question.)
 
 ### Still open
 
