@@ -1224,6 +1224,39 @@ every frame of the moving second (`~/tmp/filament/city-enter.py`,
 `enter2/`): 1023 ms measured from the frame differences, the staging
 as described. The GL room and the Filament room are unchanged (dolly 0).
 
+### Phase 13 — the window wears the world's chrome (2026-09-18)
+
+The pane's frame was the world's planks, but the title bar on it was
+still macOS glass with round traffic lights: two looks on one object.
+Now a window standing in a block world (from the moment it arrives, and
+one filling the screen there) gets `BlockyTitleBar`: the world's frame
+tile laid two screen pixels to a texel, the title in white over a hard
+one-texel shadow, and three block buttons — redstone, gold, emerald —
+with a two-texel outline, a bevel that flips when pressed, and a white
+glyph on hover. Square corners, no glass border, no frost. It is the
+WORLD that asks for this look (`DesktopWindow.decoration`), the way the
+world already supplies the frame — not a style, and not an `if style ==`
+anywhere. The decoded tile is kept (`_worldFrameTile`) once the shell has
+decoded it for the renderer.
+
+In 3D a fullscreen window's revealed title bar is the window's alone:
+the status bar is the desk's, and the viewer is not at their desk. (On
+the flat desktop the revealed bar now sits BELOW the status bar — it was
+drawn under it, lights and all, and there was no way out of fullscreen
+with the mouse. Found by playing.)
+
+**Also found by playing, and fixed:** a click on a window across the
+square walked nowhere (wired for the orrery only); the walk-up was a cut
+(now a 380 ms glide, Space too) and the click that asked for it went
+through to the app (selected a folder on arrival — swallowed now).
+
+**Trap, for the test harness:** every `shell-drive` invocation glides
+the pointer from the SCREEN CENTRE to its first target, and that sweep
+crosses the fullscreen reveal's hide zone — the revealed title bar was
+"dead to clicks" for an hour because the click was in a second
+invocation. Reveal and click in ONE invocation, or start each with a
+move to the top edge. A real mouse never does this.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

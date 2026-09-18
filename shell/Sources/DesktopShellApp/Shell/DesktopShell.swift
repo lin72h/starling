@@ -254,7 +254,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool, walkUp: Bool, revealInset: Double)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool, walkUp: Bool, revealInset: Double, blocky: Bool)] = [:]
+    /// The 3D world's frame tile, decoded once for the block chrome
+    /// (Desktop3D._desktop3DLoadFrameTile); nil outside a block world.
+    var _worldFrameTile: FlutterSwiftBridge.Image? = nil
     /// The wallpaper as a coarse colour grid — the 3D desktop's light
     /// source, since the room's back wall is the picture itself.
     var _wallpaperLight: (cells: [Color], cols: Int, rows: Int)? = nil
@@ -4662,9 +4665,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // a click, and that click is not the app's.
             let walkUp = inScene && _desktop3DVoxel && _desktop3DFarFromPane(win)
             // A fullscreen window's revealed title bar goes under the status
-            // bar, which the shell draws on top of everything; none there
-            // in a chromeless world.
-            let revealInset = _desktop3DChromeless ? 0 : DesktopTheme.kStatusBarHeight
+            // bar, which the shell draws on top of everything — on the flat
+            // desktop. In 3D the reveal shows the title bar alone.
+            let revealInset = _desktop3DActive ? 0 : DesktopTheme.kStatusBarHeight
+            // In the block world, a window wears the world's chrome once it
+            // has arrived (its content is the pane's from then on too), and
+            // so does one filling the screen there.
+            let blocky = _desktop3DVoxel && _desktop3DT >= 1 && (inScene || win.isFullscreen)
             let roomLight = tilted && !inScene
                 ? _desktop3DRoomLight(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
@@ -4683,7 +4690,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                cached.roomLight == roomLight,
                cached.sceneContent == inScene,
                cached.walkUp == walkUp,
-               cached.revealInset == revealInset {
+               cached.revealInset == revealInset,
+               cached.blocky == blocky {
                 window = cached.widget
             } else {
                 window = DesktopWindow(
@@ -4742,9 +4750,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     roomLight: roomLight,
                     sceneContent: inScene,
                     walkUpOnClick: walkUp,
-                    revealInset: revealInset
+                    revealInset: revealInset,
+                    decoration: blocky ? .blocky : .style,
+                    decorationTile: blocky ? _worldFrameTile : nil
                 )
-                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene, walkUp, revealInset)
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene, walkUp, revealInset, blocky)
             }
 
             // Open zoom plays only when the window is genuinely appearing
@@ -4817,8 +4827,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             )
         } else if isFullscreenMode {
             // The window covers the strip; the bar comes back over it while
-            // the top edge holds the pointer.
-            if _topBarRevealed, let bar = topBarWidget {
+            // the top edge holds the pointer — on the flat desktop. In 3D
+            // the reveal is the window's title bar alone: the status bar is
+            // the desk's, and the viewer is not at their desk.
+            if _topBarRevealed, !_desktop3DActive, let bar = topBarWidget {
                 children.append(bar)
             }
         } else if let bar = topBarWidget {

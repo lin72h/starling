@@ -1193,12 +1193,14 @@ extension _DesktopShellState {
             }
             codec.dispose()
             let image = f.image
-            defer { image.dispose() }
             // The renderer that asked, if it is still the one on the desktop.
             guard let shell = _shellState, let fr = shell._environment as? FilamentRoomRenderer,
                   fr.world.paneFrame?.texture == path,
                   let registry = drmTextureRegistry, let wl = waylandIntegration,
-                  let bytes = try? image.toByteData(format: .rawRgba) else { return }
+                  let bytes = try? image.toByteData(format: .rawRgba) else { image.dispose(); return }
+            // The block chrome paints the same tile; keep the picture.
+            shell._worldFrameTile?.dispose()
+            shell._worldFrameTile = image
             let id = registry.registerTexture(engine: wl.engine)
             bytes.withUnsafeBytes { raw in
                 registry.updatePixelData(engine: wl.engine, id: id, data: raw.baseAddress!,

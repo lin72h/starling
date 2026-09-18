@@ -211,6 +211,10 @@ class DesktopWindow: StatelessWidget {
     /// top ends up underneath it, buttons and all), zero when there is
     /// no status bar (a chromeless world).
     let revealInset: Double
+    /// The chrome's look, and the world's tile it is built from when it
+    /// is the world's.
+    let decoration: WindowDecoration
+    let decorationTile: FlutterSwiftBridge.Image?
 
     init(
         windowInfo: WindowInfo,
@@ -228,7 +232,9 @@ class DesktopWindow: StatelessWidget {
         roomLight: RoomLight? = nil,
         sceneContent: Bool = false,
         walkUpOnClick: Bool = false,
-        revealInset: Double = 0
+        revealInset: Double = 0,
+        decoration: WindowDecoration = .style,
+        decorationTile: FlutterSwiftBridge.Image? = nil
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -246,6 +252,8 @@ class DesktopWindow: StatelessWidget {
         self.sceneContent = sceneContent
         self.walkUpOnClick = walkUpOnClick
         self.revealInset = revealInset
+        self.decoration = decoration
+        self.decorationTile = decorationTile
     }
 
     /// The glass tint, leaned toward the light behind the window when the
@@ -263,24 +271,39 @@ class DesktopWindow: StatelessWidget {
 
     override func build(_ context: any BuildContext) -> Widget {
         let isFullscreen = windowInfo.isFullscreen
-        let cornerRadius = isFullscreen ? 0.0 : DesktopTheme.kWindowCornerRadius
+        let blocky = decoration == .blocky
+        // A block has no rounded corners.
+        let cornerRadius = (isFullscreen || blocky) ? 0.0 : DesktopTheme.kWindowCornerRadius
         let borderColor = isFullscreen ? Color(0x00000000)
             : (isFocused ? shellTheme.windowBorderFocused : shellTheme.windowBorderUnfocused)
 
         // Traffic lights on the left, or a caption trio on the right: which
-        // one is the active style's business, not this window's.
-        let titleBar = shellStyle.makeTitleBar(TitleBarParams(
-            title: windowInfo.title,
-            isFocused: isFocused,
-            isMaximized: windowInfo.isMaximized,
-            isFullscreen: isFullscreen,
-            onMove: onMove,
-            onMinimize: onMinimize,
-            onMaximize: onMaximize,
-            onClose: onClose,
-            onDoubleTap: onTitleBarDoubleTap,
-            onDepthScroll: onDepthScroll
-        ))
+        // one is the active style's business, not this window's — unless
+        // the window stands in a block world, whose chrome it wears.
+        let titleBar: Widget = blocky
+            ? BlockyTitleBar(
+                title: windowInfo.title,
+                isFocused: isFocused,
+                isFullscreen: isFullscreen,
+                tile: decorationTile,
+                onMove: onMove,
+                onMinimize: onMinimize,
+                onMaximize: onMaximize,
+                onClose: onClose,
+                onDoubleTap: onTitleBarDoubleTap,
+                onDepthScroll: onDepthScroll)
+            : shellStyle.makeTitleBar(TitleBarParams(
+                title: windowInfo.title,
+                isFocused: isFocused,
+                isMaximized: windowInfo.isMaximized,
+                isFullscreen: isFullscreen,
+                onMove: onMove,
+                onMinimize: onMinimize,
+                onMaximize: onMaximize,
+                onClose: onClose,
+                onDoubleTap: onTitleBarDoubleTap,
+                onDepthScroll: onDepthScroll
+            ))
 
         let windowBody: Widget
         if isFullscreen {
@@ -339,7 +362,7 @@ class DesktopWindow: StatelessWidget {
         // content is edge-to-edge and the blur would be pure cost. A SHAPED
         // X11 window gets none either: its cut-away parts must show what is
         // behind, not a frosted tint of it.
-        if !isFullscreen && !windowInfo.isShaped {
+        if !isFullscreen && !windowInfo.isShaped && !blocky {
             let frost = IgnorePointer(
                 child: ClipRect(
                     child: BackdropFilter(
@@ -361,8 +384,9 @@ class DesktopWindow: StatelessWidget {
         }
         stackChildren.append(windowBody)
 
-        // Border overlay (skip in fullscreen, and around a shaped window)
-        if !isFullscreen && !windowInfo.isShaped {
+        // Border overlay (skip in fullscreen, around a shaped window, and
+        // in a block world, where the frame the pane hangs in is the edge)
+        if !isFullscreen && !windowInfo.isShaped && !blocky {
             stackChildren.append(
                 Positioned(
                     fill: (),
@@ -498,6 +522,10 @@ class DesktopWindow: StatelessWidget {
         )
     }
 }
+
+/// Whose look a window's chrome takes: the active style's, or the block
+/// world's the window stands in (planks and block buttons).
+enum WindowDecoration: Equatable { case style, blocky }
 
 // MARK: - _WindowBorder
 
