@@ -703,6 +703,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _sceneTitleBars: [String: (key: String, tex: Int64)] = [:]
     /// Per window, the block of its title bar the pointer is over.
     var _sceneTitleHover: [String: Int] = [:]
+    /// A brick was double-clicked and its app is starting: its first
+    /// window pops up in front of the viewer instead of on the arc.
+    var _desktop3DPopUp: String? = nil
+    /// The last single click on a brick, for telling a double-click.
+    var _desktop3DBrickClick: (app: String, at: Double)? = nil
     /// (See BrickBody below the class.)
     /// The bricks of the building as bodies with weight, by app
     /// (Desktop3D): where each is in the wall's plane and what it is doing.
@@ -4627,7 +4632,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // with the room already open.
         if _desktop3DT > 0 {
             if _desktop3DOrrery { _desktop3DLayoutOrrery() }
-            else if _desktop3DVoxel { _desktop3DLayoutVoxel() }
+            else if _desktop3DVoxel { _desktop3DPlaceWindows(); _desktop3DLayoutVoxel() }
             else { _desktop3DPlaceWindows() }
             // When the room draws the windows itself, tell it where they
             // are before their widgets are built at the same places.

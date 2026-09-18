@@ -35,7 +35,8 @@ touching anything.
   — **a Minecraft-style city**, generated in ten seconds by
   `build/tools/voxel-world.py`, walked on foot at eye height, the open
   windows standing round the square facing in with nameplates over
-  them, no dock or status bar. A window clicked from across the square
+  them, no dock or status bar; a brick double-clicked pops its window
+  up in front of the viewer. A window clicked from across the square
   is walked up to (one at reading distance takes the click as a click;
   the first person to play clicked Terminal from 17 m and nothing
   happened, because that was wired for the orrery only). **The dock is
@@ -1573,6 +1574,29 @@ wheel) leave no pair overlapping. A first stress run "passed" while
 the desktop had quietly left 3D — a random press landed on the door —
 so the harness now checks 3D is on every drop and keeps clear of the
 door.
+
+### Phase 29 — double-click opens, and the window pops up (2026-09-18)
+
+"When double-clicking the box, a window shall pop up, similar to
+double-clicking the dock." A single click on a brick now does nothing
+(a press that moves is still a drag); the second click on the same
+brick within half a second opens its app, and the window POPS UP: in
+front of the viewer, at reading size, exactly where its flat rect is
+on the screen they are looking at (`_desktop3DPoseInFront`: the plane
+one pixel per pixel ahead of the camera, offset by the rect's place on
+the screen, facing them), with the keyboard. An app with a window
+already open has that window brought to the viewer the same way.
+
+For that, the city's layout stopped moving windows every build: a
+window gets its place when it ARRIVES (`_desktop3DPlaceWindows`, now
+with a city branch — the next slot on the arc flanking the pile, or in
+front of the viewer if its app was just double-clicked, remembered in
+`_desktop3DPopUp`) and keeps it; the per-build layout only reads poses
+for the nameplates. So a popped-up window stays where it popped up,
+and a dragged pane stays where it was dragged.
+
+Harness note: two `click`s in a row are too slow to be a double-click
+(each spawns a process); use `dblclick`.
 
 ### Still open
 

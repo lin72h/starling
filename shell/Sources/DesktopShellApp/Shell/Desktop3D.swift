@@ -277,6 +277,34 @@ extension _DesktopShellState {
             .sorted { $0.rect.center.dx < $1.rect.center.dx }
         guard !fresh.isEmpty else { return false }
         #if os(Linux)
+        if _desktop3DVoxel, let w = _desktop3DWorld {
+            // The city: a new window takes the next place on the arc round
+            // the square — unless its app was just double-clicked in the
+            // pile, in which case it pops up in front of the viewer, at
+            // reading size, with the keyboard, the way a window opens on
+            // the flat desktop.
+            var taken = windowManager.visibleWindows.filter { $0.pose3D.placed }.count
+            for win in fresh {
+                if _desktop3DPopUp == win.appId {
+                    _desktop3DPopUp = nil
+                    win.pose3D = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
+                    let id = win.id
+                    // After this build: focus is state, and this runs inside one.
+                    let work: () -> Void = { [weak self] in
+                        guard let self else { return }
+                        self.setState {
+                            self.windowManager.bringToFront(id)
+                            self.windowManager.focusedWindowId = id
+                        }
+                    }
+                    DispatchQueue.main.async(execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
+                } else {
+                    win.pose3D = _desktop3DArcPose(slot: taken, rect: win.rect, w: w)
+                    taken += 1
+                }
+            }
+            return true
+        }
         if _desktop3DScene {
             let taken = windowManager.visibleWindows.filter { $0.pose3D.placed }.count
             let off = Room3D.halfW - Self.k3DWallOffset
@@ -313,6 +341,69 @@ extension _DesktopShellState {
                 placed: true)
         }
         return true
+    }
+
+    /// A place on the arc round the square for the window in `slot`:
+    /// facing the hub, on the ground, flanking the middle — first to the
+    /// right, then the left, and on round — so nothing stands straight
+    /// behind the pile from the door.
+    func _desktop3DArcPose(slot: Int, rect: Rect, w: World3D) -> WindowPose3D {
+        let s = Self.k3DMetresPerPx
+        let k = Double(slot / 2), side = slot % 2 == 0 ? 1.0 : -1.0
+        let phi = -Double.pi / 2 + side * (Self.k3DTowerClearDeg + 30.0 * k) * Double.pi / 180
+        let x = w.hub.x + w.ringRadius * cos(phi), z = w.hub.z + w.ringRadius * sin(phi)
+        let h = rect.height * s
+        return WindowPose3D(x: x, y: w.ground(x, z) + h / 2 + 0.05, z: z,
+                            yaw: atan2(w.hub.x - x, w.hub.z - z), scale: 1, placed: true)
+    }
+
+    /// The pose that shows a window exactly where its flat rect is on the
+    /// viewer's screen, from where they stand and look now: the plane in
+    /// front of them at which one logical pixel is one screen pixel,
+    /// facing them — the "pop up". Kept off the ground.
+    func _desktop3DPoseInFront(rect: Rect, host: Rect, w: World3D) -> WindowPose3D {
+        let s = Self.k3DMetresPerPx
+        let c = _camera3D
+        let d1 = _desktop3DFocalPx(host) * s
+        let right = (x: cos(c.yaw), z: sin(c.yaw)), fwd = (x: sin(c.yaw), z: -cos(c.yaw))
+        let ox = (rect.center.dx - host.center.dx) * s, oy = -(rect.center.dy - host.center.dy) * s
+        let x = c.x + right.x * ox + fwd.x * d1, z = c.z + right.z * ox + fwd.z * d1
+        let y = max(c.y + oy, w.ground(x, z) + rect.height * s / 2 + 0.05)
+        return WindowPose3D(x: x, y: y, z: z, yaw: -c.yaw, scale: 1, placed: true)
+    }
+
+    /// A brick was clicked (a press that never became a drag): the second
+    /// click on the same brick within half a second opens its app.
+    static let k3DDoubleClick = 0.5
+
+    func _desktop3DBrickClicked(_ app: String) {
+        let now = Date.timeIntervalSinceReferenceDate
+        if let last = _desktop3DBrickClick, last.app == app, now - last.at < Self.k3DDoubleClick {
+            _desktop3DBrickClick = nil
+            _desktop3DOpenApp(app)
+        } else {
+            _desktop3DBrickClick = (app, now)
+        }
+    }
+
+    /// Open an app from its brick: a window it already has pops up in
+    /// front of the viewer and takes the keyboard; otherwise the app is
+    /// started and its first window will (see _desktop3DPlaceWindows).
+    func _desktop3DOpenApp(_ app: String) {
+        _desktop3DLog("open \(app)")
+        guard let w = _desktop3DWorld else { return }
+        let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        if let win = windowManager.visibleWindows.last(where: { $0.appId == app && !$0.isFullscreen }) {
+            setState {
+                win.pose3D = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
+                windowManager.bringToFront(win.id)
+                windowManager.focusedWindowId = win.id
+            }
+            _desktop3DPublishCamera()
+            return
+        }
+        _desktop3DPopUp = app
+        _launchOrFocusApp(app)
     }
 
     // MARK: The camera
@@ -1142,37 +1233,16 @@ extension _DesktopShellState {
               environmentTextureId >= 0 else { return }
         let w = env.world
         let s = Self.k3DMetresPerPx
-        let windows = windowManager.visibleWindows.filter { !$0.isFullscreen }
-        let apps = Array(Set(windows.map { $0.appId })).sorted()
-        let ordered = apps.flatMap { app in windows.filter { $0.appId == app }.sorted { $0.id < $1.id } }
-        let n = max(ordered.count, 1)
+        // Where the windows stand is decided when they arrive
+        // (_desktop3DPlaceWindows: the arc, or in front of the viewer for
+        // a pop-up) and kept; here their nameplates, the pile and the door
+        // are laid out round them.
+        let windows = windowManager.visibleWindows.filter { !$0.isFullscreen && $0.pose3D.placed }
         var labels: [SceneLabel] = []
         var groups: [String: [(x: Double, y: Double, z: Double, top: Double)]] = [:]
-        // Across the square from the door: the windows stand on an arc
-        // round the far side of the ring, facing in, so a viewer coming
-        // in from +z sees every one of them front-on over the fountain
-        // and walks up to whichever they want. One window stands dead
-        // ahead; more spread out to either side, up to a 200° arc.
-        let spread = min(200.0, 60.0 * Double(max(n - 1, 0))) * Double.pi / 180
-        for (i, win) in ordered.enumerated() {
-            let f = n == 1 ? 0.0 : Double(i) / Double(n - 1) - 0.5
-            var phi = -Double.pi / 2 + f * spread
-            if w.tower != nil || w.sculpture != nil {
-                // With something in the middle, nothing stands straight
-                // behind it from the door: the windows flank it, first to
-                // the right, then the left, and on round.
-                let k = Double(i / 2), side = i % 2 == 0 ? 1.0 : -1.0
-                phi = -Double.pi / 2 + side * (Self.k3DTowerClearDeg + 30.0 * k) * Double.pi / 180
-            }
-            let x = w.hub.x + w.ringRadius * cos(phi)
-            let z = w.hub.z + w.ringRadius * sin(phi)
-            let h = win.rect.height * s
-            let y = w.ground(x, z) + h / 2 + 0.05
-            // Facing the hub.
-            let yaw = atan2(w.hub.x - x, w.hub.z - z)
-            let pose = WindowPose3D(x: x, y: y, z: z, yaw: yaw, scale: 1, placed: true)
-            if win.pose3D != pose { win.pose3D = pose }
-            groups[win.appId, default: []].append((x, y, z, y + h / 2))
+        for win in windows {
+            let p = win.pose3D
+            groups[win.appId, default: []].append((p.x, p.y, p.z, p.y + win.rect.height * s * p.scale / 2))
         }
         for (app, ps) in groups {
             guard let tex = _desktop3DAppLabelTexture(app) else { continue }
@@ -2006,7 +2076,7 @@ extension _DesktopShellState {
         } else {
             setState { _desktop3DBrickDrag = nil }
             _desktop3DLog("sign \(d.app) clicked")
-            _launchOrFocusApp(d.app)
+            _desktop3DBrickClicked(d.app)
         }
     }
 
