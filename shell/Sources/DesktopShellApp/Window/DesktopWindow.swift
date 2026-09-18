@@ -205,6 +205,12 @@ class DesktopWindow: StatelessWidget {
     /// off in a world) — so the click is the shell's, and the client
     /// gets none of the pointer sequence.
     let walkUpOnClick: Bool
+    /// How far down the revealed title bar of a fullscreen window sits:
+    /// the status bar's height when the shell draws one over the top of
+    /// the screen (it is drawn above windows, and a title bar at the very
+    /// top ends up underneath it, buttons and all), zero when there is
+    /// no status bar (a chromeless world).
+    let revealInset: Double
 
     init(
         windowInfo: WindowInfo,
@@ -221,7 +227,8 @@ class DesktopWindow: StatelessWidget {
         onDepthScroll: ((Double) -> Void)? = nil,
         roomLight: RoomLight? = nil,
         sceneContent: Bool = false,
-        walkUpOnClick: Bool = false
+        walkUpOnClick: Bool = false,
+        revealInset: Double = 0
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -238,6 +245,7 @@ class DesktopWindow: StatelessWidget {
         self.roomLight = roomLight
         self.sceneContent = sceneContent
         self.walkUpOnClick = walkUpOnClick
+        self.revealInset = revealInset
     }
 
     /// The glass tint, leaned toward the light behind the window when the
@@ -305,7 +313,7 @@ class DesktopWindow: StatelessWidget {
             if isTopBarRevealed {
                 bodyChildren.append(
                     Positioned(
-                        left: 0, top: 0, right: 0,
+                        left: 0, top: revealInset, right: 0,
                         height: DesktopTheme.kTitleBarHeight,
                         child: titleBar
                     )

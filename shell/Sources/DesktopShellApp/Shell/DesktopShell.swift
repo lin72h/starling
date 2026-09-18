@@ -254,7 +254,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool, walkUp: Bool)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool, walkUp: Bool, revealInset: Double)] = [:]
     /// The wallpaper as a coarse colour grid — the 3D desktop's light
     /// source, since the room's back wall is the picture itself.
     var _wallpaperLight: (cells: [Color], cols: Int, rows: Int)? = nil
@@ -4661,6 +4661,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // In the city, a window across the square is walked up to on
             // a click, and that click is not the app's.
             let walkUp = inScene && _desktop3DVoxel && _desktop3DFarFromPane(win)
+            // A fullscreen window's revealed title bar goes under the status
+            // bar, which the shell draws on top of everything; none there
+            // in a chromeless world.
+            let revealInset = _desktop3DChromeless ? 0 : DesktopTheme.kStatusBarHeight
             let roomLight = tilted && !inScene
                 ? _desktop3DRoomLight(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
@@ -4678,7 +4682,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                cached.isTilted == tilted,
                cached.roomLight == roomLight,
                cached.sceneContent == inScene,
-               cached.walkUp == walkUp {
+               cached.walkUp == walkUp,
+               cached.revealInset == revealInset {
                 window = cached.widget
             } else {
                 window = DesktopWindow(
@@ -4736,9 +4741,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     },
                     roomLight: roomLight,
                     sceneContent: inScene,
-                    walkUpOnClick: walkUp
+                    walkUpOnClick: walkUp,
+                    revealInset: revealInset
                 )
-                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene, walkUp)
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene, walkUp, revealInset)
             }
 
             // Open zoom plays only when the window is genuinely appearing
