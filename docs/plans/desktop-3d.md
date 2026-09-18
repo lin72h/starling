@@ -927,12 +927,41 @@ every pane faced straight down the hall:**
   a window focused goes to the window (click the floor first); a click
   meant for the floor lands on a 1:1 pane that fills the screen.
 
-**Still to do:** push/pull along the wall instead of off it; dragging a
-pane along the wall; occlusion by furniture is free now but nothing
-stands in front of a wall; the 1:1 step-up distance is derived from the
-LOGICAL width (1.74 m), which the arc layout shares; the pane's rounded
-corners vs the slab's square ones; per-frame cost while a video plays
-in a pane (every client frame is a room frame, 4–13 ms).
+**Moving a pane (later the same day).** A title-bar drag slides the pane
+along its wall, and a scroll on the title bar slides it in steps. The
+drag is exact at any angle: where the pointer was and where it is are
+both put through the pane's plane (`_desktop3DPlaneHit`, a ray from the
+eye through the screen point, intersected with the plane), and the pane
+moves by the difference in the plane's own axes. Measured: 300 px of
+drag at the 1:1 spot became 0.58 m on the wall, sixteen events of
+−0.036 m, exactly what the geometry predicts. The clamp is the room box
+less half the pane, so it only bites along the axis the pane moves on.
+
+Testing this found one more thing: **the pointer lean moves the target
+as you reach for it.** Moving the pointer from the bottom of the screen
+to a title bar near the top leans the eye up and shifts the pane about
+45 px down, so a scripted press at the bar's old position lands on the
+wall above it. The test reads the bar's live position from the placement
+log; a person's hand corrects for it without noticing, which is the
+lean working as designed, but the note above about damping the lean
+over the focused window stands.
+
+**The look (same day):** the floor is Poly Haven's `wood_floor` and the
+walls and ceiling `white_plaster_02`, tiled by dividing the shell's
+metre-valued texture coordinates (`room-fetch.py` downloads them,
+`room-glb.py` assigns them). "White" plaster photographs mid-grey (sRGB
+142, linear 0.27) with an occlusion map that takes another third off, so
+the exporter brightens it 1.7× in linear light and halves the occlusion;
+it still reads as concrete more than paint. The sun's shadow map now
+covers 25 m in three cascades at 2048 instead of the camera's 4 km far
+plane at 1024, which is what turned every shadow edge into a staircase.
+
+**Still to do:** occlusion by furniture is free now but nothing stands
+in front of a wall; the 1:1 step-up distance is derived from the LOGICAL
+width (1.74 m), which the arc layout shares; the pane's rounded corners
+vs the slab's square ones; per-frame cost while a video plays in a pane
+(every client frame is a room frame, 4–13 ms); a lighter wall texture
+(`beige_wall_001` is the most-downloaded painted wall).
 
 ### Still open
 

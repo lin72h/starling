@@ -4664,6 +4664,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     onMove: { [self] (delta: Offset) in
                         // Tiled windows are glued to their tiles.
                         if windowManager.tilingEnabled { return }
+                        // A pane hanging in the room slides along its
+                        // wall; its 2D rect is where it goes back to.
+                        if inScene && _desktop3DT >= 1 {
+                            _desktop3DDragPane(winId, delta: delta)
+                            return
+                        }
+                        _desktop3DLog("move \(winId): 2D delta \(delta) inScene=\(inScene) t=\(_desktop3DT)")
                         setState {
                             windowManager.moveWindowByDelta(winId, delta: delta)
                         }

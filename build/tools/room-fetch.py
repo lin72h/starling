@@ -47,6 +47,16 @@ ASSETS = [
 ]
 
 
+# Surfaces for the room's own shell — floor, walls, ceiling — which the
+# glTF export (room-glb.py) textures; the baked mesh paints them
+# procedurally and does not use these. Also CC0.
+TEXTURES = [
+    "wood_floor",           # the floor: oak boards
+    "white_plaster_02",     # walls and ceiling
+]
+TEXTURE_MAPS = ["Diffuse", "arm", "nor_gl"]
+
+
 def fetch(url: str, path: str) -> int:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.exists(path):
@@ -68,6 +78,24 @@ def main() -> int:
     a = ap.parse_args()
 
     total = 0
+    for tid in TEXTURES:
+        try:
+            req = urllib.request.Request(f"{API}/files/{tid}", headers=UA)
+            with urllib.request.urlopen(req, timeout=60) as r:
+                files = json.load(r)
+        except Exception as e:
+            print(f"{tid}: {e}", file=sys.stderr)
+            return 1
+        for m in TEXTURE_MAPS:
+            node = files.get(m, {}).get(a.res, {}).get("jpg")
+            if not node:
+                print(f"{tid}: no {a.res} {m}", file=sys.stderr)
+                continue
+            url = node["url"]
+            path = os.path.join(a.out, "textures", tid, os.path.basename(url))
+            n = fetch(url, path)
+            total += n
+            print(f"  {tid:22s} {m:8s} {n/1e6:5.2f} MB")
     for aid in ASSETS:
         try:
             req = urllib.request.Request(f"{API}/files/{aid}", headers=UA)

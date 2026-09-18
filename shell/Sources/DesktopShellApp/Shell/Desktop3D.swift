@@ -1020,13 +1020,92 @@ extension _DesktopShellState {
 
     // MARK: Moving a window in the room
 
+    /// The world ray under a screen point (logical px), from the eye.
+    func _desktop3DRay(_ screen: Offset, camera: Camera3D, host: Rect)
+        -> (origin: Vector3, dir: Vector3) {
+        let focal = _desktop3DFocalPx(host)
+        // View space: x right, y up, looking down -z. Screen y runs down.
+        let v = Vector3((screen.dx - host.center.dx) / focal,
+                        -(screen.dy - host.center.dy) / focal, -1)
+        // The inverse of `_view`'s rotation: Ry(-yaw) · Rx(-pitch).
+        var inv = Matrix4.rotationY(-camera.yaw)
+        inv.multiply(Matrix4.rotationX(-camera.pitch))
+        return (Vector3(camera.x, camera.y, camera.z), inv.perspectiveTransform(v))
+    }
+
+    /// Where a screen point lands on a pane's plane, in the pane's own
+    /// axes: `u` along the pane (its screen-right), `v` up. nil when the
+    /// ray runs away from the plane.
+    func _desktop3DPlaneHit(_ screen: Offset, camera: Camera3D, host: Rect,
+                            pose: WindowPose3D) -> (u: Double, v: Double)? {
+        let (o, d) = _desktop3DRay(screen, camera: camera, host: host)
+        let n = Vector3(sin(pose.yaw), 0, cos(pose.yaw))
+        let p0 = Vector3(pose.x, pose.y, pose.z)
+        let denom = d.dot(n)
+        guard abs(denom) > 1e-4 else { return nil }
+        let t = (p0 - o).dot(n) / denom
+        guard t > 0 else { return nil }
+        let hit = Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t)
+        let right = Vector3(cos(pose.yaw), 0, -sin(pose.yaw))
+        return ((hit - p0).dot(right), hit.y - p0.y)
+    }
+
+    /// Slide a pane in its own plane by (du, dv) metres, and keep it on
+    /// the wall and in the room: a pane on a side wall runs along z, one
+    /// on the far wall along x, and none of them through the floor or
+    /// the ceiling. The clamp is the room box less half the pane, which
+    /// only bites along the axis the pane actually moves on.
+    func _desktop3DSlidePane(_ win: WindowInfo, du: Double, dv: Double) {
+        #if os(Linux)
+        var p = win.pose3D
+        let s = Self.k3DMetresPerPx
+        let hw = win.rect.width * s / 2, hh = win.rect.height * s / 2
+        p.x += cos(p.yaw) * du
+        p.z -= sin(p.yaw) * du
+        p.y += dv
+        let m = 0.08
+        p.x = min(Room3D.halfW - m, max(-Room3D.halfW + m, p.x))
+        p.z = min(Room3D.depth - hw - m, max(hw + m, p.z))
+        p.y = min(Room3D.height - hh - m, max(hh + m, p.y))
+        setState { win.pose3D = p }
+        #endif
+    }
+
+    /// A title-bar drag while the pane hangs in the scene: the pane
+    /// follows the pointer along its wall. The delta is screen pixels;
+    /// where the pointer was and is are both put through the pane's
+    /// plane, so the pane moves by what the pointer moved ON THE WALL —
+    /// exact at any angle, unlike a pixels-to-metres guess.
+    func _desktop3DDragPane(_ winId: String, delta: Offset) {
+        guard let win = windowManager.windows.first(where: { $0.id == winId }),
+              win.pose3D.placed else { return }
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        let cam = _desktop3DEffectiveCamera(_desktop3DT)
+        let a = _lastPointer
+        let b = Offset(a.dx + delta.dx, a.dy + delta.dy)
+        guard let h0 = _desktop3DPlaneHit(a, camera: cam, host: host, pose: win.pose3D),
+              let h1 = _desktop3DPlaneHit(b, camera: cam, host: host, pose: win.pose3D)
+        else {
+            _desktop3DLog("drag \(win.title): no plane hit at \(a) / \(b)")
+            return
+        }
+        _desktop3DLog("drag \(win.title): delta \(delta) -> du \(h1.u - h0.u) dv \(h1.v - h0.v)")
+        _desktop3DSlidePane(win, du: h1.u - h0.u, dv: h1.v - h0.v)
+    }
+
     /// A scroll on a title bar pushes the window away from the viewer or
     /// pulls it closer, along the line between them — the room's version
-    /// of dragging a window around.
+    /// of dragging a window around. With the pane on a wall, it slides
+    /// along the wall instead.
     func _desktop3DScroll(_ winId: String, delta: Double) {
         guard _desktop3DOn, delta != 0,
               let win = windowManager.windows.first(where: { $0.id == winId }),
               win.pose3D.placed else { return }
+        if _desktop3DScene {
+            _desktop3DSlidePane(win, du: delta > 0 ? 0.25 : -0.25, dv: 0)
+            return
+        }
         let c = _camera3D
         var p = win.pose3D
         let dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z

@@ -298,12 +298,20 @@ void sr_room_set_light(sr_room* r, const float sun_dir[3], const float sun_colou
     r->sun = utils::EntityManager::get().create();
     // Filament's direction is the way the light TRAVELS.
     float3 d = normalize(float3{ -sun_dir[0], -sun_dir[1], -sun_dir[2] });
+    // The shadow map covers the view out to shadowFar; left at the
+    // camera's far plane (4 km, for the sky) it spreads 1024 texels over
+    // kilometres and every edge in the room is a staircase.
+    LightManager::ShadowOptions shadows;
+    shadows.mapSize = 2048;
+    shadows.shadowCascades = 3;
+    shadows.shadowFar = 25.0f;
     LightManager::Builder(LightManager::Type::SUN)
             .color({ sun_colour[0], sun_colour[1], sun_colour[2] })
             .intensity(sun_lux)
             .direction(d)
             .sunAngularRadius(1.9f)
             .castShadows(true)
+            .shadowOptions(shadows)
             .build(*r->engine, r->sun);
     r->scene->addEntity(r->sun);
     r->haveSun = true;

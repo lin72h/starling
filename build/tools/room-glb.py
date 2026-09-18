@@ -157,9 +157,61 @@ SHELL_MATERIALS = {
     "ceiling": ((0.93, 0.93, 0.91), 0.95),
     "joinery": ((0.95, 0.95, 0.93), 0.35),
 }
+# The Poly Haven texture set for each, with its tile size in metres
+# (room-fetch.py downloads them). The shell's texture coordinates are in
+# metres, so the tile size is a division. Missing files: flat colour.
+# (texture id, tile size in metres, brightening). Poly Haven's "white"
+# plaster photographs mid-grey (sRGB 142, linear 0.27) and its occlusion
+# map takes another third off; a painted room wall is nearer 0.6.
+SHELL_TEXTURES = {
+    "floor":   ("wood_floor", 2.4, 1.15),
+    "wall":    ("white_plaster_02", 3.0, 1.7),
+    "ceiling": ("white_plaster_02", 3.0, 1.7),
+}
 
 
-def export_shell(glb, ri, aspect, fov):
+def brightened(path, factor, out_dir):
+    """The diffuse map scaled in linear light, re-encoded beside the export."""
+    if abs(factor - 1.0) < 1e-3:
+        return path
+    from PIL import Image
+    out = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(path))[0]}_x{factor:.2f}.jpg")
+    if not os.path.exists(out):
+        img = np.asarray(Image.open(path).convert("RGB")).astype(np.float32) / 255.0
+        lin = np.power(img, 2.2) * factor
+        srgb = np.power(np.clip(lin, 0, 1), 1 / 2.2) * 255.0
+        Image.fromarray(srgb.astype(np.uint8)).save(out, quality=92)
+    return out
+
+
+def shell_texture_material(glb, name, textures_dir):
+    """The textured version of a shell material, or None without files."""
+    if name not in SHELL_TEXTURES:
+        return None
+    tid, _, factor = SHELL_TEXTURES[name]
+    d = os.path.join(textures_dir, tid)
+    maps = {}
+    for key, suffix in (("diff", "_diff_"), ("arm", "_arm_"), ("nor", "_nor_gl_")):
+        found = glob.glob(os.path.join(d, f"{tid}{suffix}*.jpg"))
+        if found:
+            path = brightened(found[0], factor, textures_dir) if key == "diff" else found[0]
+            maps[key] = glb.texture(path)
+    if "diff" not in maps:
+        return None
+    m = {"name": name,
+         "pbrMetallicRoughness": {"baseColorTexture": {"index": maps["diff"]},
+                                  "metallicFactor": 0.0, "roughnessFactor": 1.0}}
+    if "arm" in maps:
+        m["pbrMetallicRoughness"]["metallicRoughnessTexture"] = {"index": maps["arm"]}
+        m["pbrMetallicRoughness"]["metallicFactor"] = 1.0
+        # A tiled map's occlusion is fine grain, not the room's; keep it light.
+        m["occlusionTexture"] = {"index": maps["arm"], "strength": 0.5}
+    if "nor" in maps:
+        m["normalTexture"] = {"index": maps["nor"]}
+    return glb.material(m)
+
+
+def export_shell(glb, ri, aspect, fov, textures_dir):
     mesh = ri.Mesh()
     ri.build_shell(mesh, aspect, np.tan(np.radians(fov) / 2))
     pos, nrm, uv, mat, idx = mesh.finish()
@@ -174,6 +226,9 @@ def export_shell(glb, ri, aspect, fov):
         remap = np.full(len(pos), -1, np.int64)
         remap[used] = np.arange(len(used))
         colour, rough = SHELL_MATERIALS[name]
+        m = shell_texture_material(glb, name, textures_dir)
+        # Texture coordinates are metres; tile them.
+        uv_scale = 1.0 / SHELL_TEXTURES[name][1] if m is not None else 1.0
         # The generated quads were never culled by the old renderer, so
         # their winding is arbitrary; Filament culls back faces. Turn any
         # triangle whose winding disagrees with its vertex normal.
@@ -183,13 +238,14 @@ def export_shell(glb, ri, aspect, fov):
         facing = (np.cross(e1, e2) * nrm[t[:, 0]]).sum(axis=1)
         flip = facing < 0
         t[flip, 1], t[flip, 2] = t[flip, 2], t[flip, 1]
-        m = glb.material({
-            "name": name,
-            "pbrMetallicRoughness": {
-                "baseColorFactor": [*colour, 1.0],
-                "metallicFactor": 0.0, "roughnessFactor": rough},
-        })
-        prims.append(glb.primitive(pos[used], nrm[used], uv[used],
+        if m is None:
+            m = glb.material({
+                "name": name,
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [*colour, 1.0],
+                    "metallicFactor": 0.0, "roughnessFactor": rough},
+            })
+        prims.append(glb.primitive(pos[used], nrm[used], uv[used] * uv_scale,
                                    remap[t].ravel(), m))
     glb.node(glb.mesh(prims, "shell"), "shell")
     return len(pos), len(tris)
@@ -327,7 +383,7 @@ def main() -> int:
     ri = load_importer()
 
     glb = Glb()
-    sv, st = export_shell(glb, ri, a.aspect, a.fov)
+    sv, st = export_shell(glb, ri, a.aspect, a.fov, os.path.join(a.assets, "textures"))
     fv, ft = export_furniture(glb, ri, a.assets)
     glb.write(os.path.join(a.out, "room.glb"))
     print(f"  shell {sv} vertices / {st} triangles, furniture {fv} / {ft}")
