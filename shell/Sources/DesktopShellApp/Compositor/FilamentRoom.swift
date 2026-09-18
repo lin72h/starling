@@ -52,6 +52,15 @@ struct SceneLabel: Equatable {
     var yaw: Double? = nil
 }
 
+/// A block in the scene: a cube wearing a shell-drawn texture on every
+/// face — an app's icon as a thing standing in the world.
+struct SceneBlock: Equatable {
+    var id: Int64
+    var texture: Int64
+    var x = 0.0, y = 0.0, z = 0.0, yaw = 0.0
+    var size = 0.9
+}
+
 /// What a world is, read from its world.json. The room is the default
 /// world (a glTF lit by a captured sky); the orrery has no geometry of
 /// its own and lays the desktop out round a sun.
@@ -98,6 +107,9 @@ struct World3D {
     /// launcher's signs hang (on its +z face) and what the windows keep
     /// clear of.
     var tower: (x: Double, z: Double, half: Double, base: Double, top: Double)? = nil
+    /// A walking world's sculpture at the hub: the launcher's app blocks
+    /// spiral round this axis at this radius, from `base` up.
+    var sculpture: (x: Double, z: Double, radius: Double, base: Double)? = nil
 
     static func load(_ dir: String) -> World3D {
         var w = World3D()
@@ -113,6 +125,11 @@ struct World3D {
             w.pointLight = (pos[0], pos[1], pos[2], col[0], col[1], col[2], cd)
         }
         if let h = j["hub"] as? [Double], h.count == 3 { w.hub = (h[0], h[1], h[2]) }
+        if let sc = j["sculpture"] as? [String: Any],
+           let x = sc["x"] as? Double, let z = sc["z"] as? Double,
+           let radius = sc["radius"] as? Double, let base = sc["base"] as? Double {
+            w.sculpture = (x, z, radius, base)
+        }
         if let t = j["tower"] as? [String: Any],
            let x = t["x"] as? Double, let z = t["z"] as? Double, let half = t["half"] as? Double,
            let base = t["base"] as? Double, let top = t["top"] as? Double {
@@ -167,14 +184,28 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     private typealias SetOrbFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, UnsafePointer<Float>?, Float) -> Int32
     private typealias RemoveIdFn = @convention(c) (OpaquePointer?, Int64) -> Void
     private typealias SetLabelFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, Float, UInt32, Int32, Int32) -> Int32
+    private typealias SetBlockFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, UInt32, Int32, Int32) -> Int32
 
     /// The world this renderer shows, from its directory's world.json.
     let world: World3D
 
     private var _orbs: [SceneOrb] = []
     private var _labels: [SceneLabel] = []
+    private var _blocks: [SceneBlock] = []
     private var knownOrbs = Set<Int64>()
     private var knownLabels = Set<Int64>()
+    private var knownBlocks = Set<Int64>()
+    private var fnSetBlock: SetBlockFn!
+    private var fnRemoveBlock: RemoveIdFn!
+
+    func setBlocks(_ blocks: [SceneBlock]) -> Bool {
+        paneLock.lock()
+        defer { paneLock.unlock() }
+        if blocks == _blocks { return false }
+        _blocks = blocks
+        dirty = true
+        return true
+    }
     private var fnSetPointLight: SetPointLightFn!
     private var fnSetOrb: SetOrbFn!
     private var fnRemoveOrb: RemoveIdFn!
@@ -285,8 +316,17 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
 
     private func syncOrbsAndLabels() {
         paneLock.lock()
-        let orbs = _orbs, labels = _labels
+        let orbs = _orbs, labels = _labels, blocks = _blocks
         paneLock.unlock()
+        var liveBlocks = Set<Int64>()
+        for b in blocks {
+            guard let tex = sceneTexture?(b.texture), tex.name != 0 else { continue }
+            var c: [Float] = [Float(b.x), Float(b.y), Float(b.z)]
+            if fnSetBlock(room, b.id, &c, Float(b.yaw), Float(b.size),
+                          tex.name, Int32(tex.width), Int32(tex.height)) == 0 { liveBlocks.insert(b.id) }
+        }
+        for id in knownBlocks.subtracting(liveBlocks) { fnRemoveBlock(room, id) }
+        knownBlocks = liveBlocks
         var live = Set<Int64>()
         for o in orbs {
             var c: [Float] = [Float(o.x), Float(o.y), Float(o.z)]
@@ -392,12 +432,15 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
               let setOrb = sym("sr_room_set_orb", SetOrbFn.self),
               let removeOrb = sym("sr_room_remove_orb", RemoveIdFn.self),
               let setLabel = sym("sr_room_set_label", SetLabelFn.self),
-              let removeLabel = sym("sr_room_remove_label", RemoveIdFn.self) else { return false }
+              let removeLabel = sym("sr_room_remove_label", RemoveIdFn.self),
+              let setBlock = sym("sr_room_set_block", SetBlockFn.self),
+              let removeBlock = sym("sr_room_remove_block", RemoveIdFn.self) else { return false }
         fnLoad = load; fnSetLight = setLight; fnSetExposure = setExposure
         fnSetOutput = setOutput; fnSetCamera = setCamera; fnRender = render
         fnSetPane = setPane; fnRemovePane = removePane; fnSetPaneStyle = setPaneStyle
         fnSetPointLight = setPointLight; fnSetOrb = setOrb; fnRemoveOrb = removeOrb
         fnSetLabel = setLabel; fnRemoveLabel = removeLabel
+        fnSetBlock = setBlock; fnRemoveBlock = removeBlock
 
         guard let r = create(display, context) else { return false }
         room = r

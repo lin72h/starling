@@ -1152,8 +1152,8 @@ extension _DesktopShellState {
         for (i, win) in ordered.enumerated() {
             let f = n == 1 ? 0.0 : Double(i) / Double(n - 1) - 0.5
             var phi = -Double.pi / 2 + f * spread
-            if w.tower != nil {
-                // With the tower in the middle, nothing stands straight
+            if w.tower != nil || w.sculpture != nil {
+                // With something in the middle, nothing stands straight
                 // behind it from the door: the windows flank it, first to
                 // the right, then the left, and on round.
                 let k = Double(i / 2), side = i % 2 == 0 ? 1.0 : -1.0
@@ -1185,7 +1185,20 @@ extension _DesktopShellState {
             labels.append(SceneLabel(id: Self.k3DSignIdBase + tex, texture: tex,
                                      x: s.x, y: s.y, z: s.z, width: s.w, height: s.h, yaw: s.yaw))
         }
+        // The sculpture: the dock's apps as blocks in a spiral round the
+        // post in the pool; the one under the pointer wears its name.
+        var blocks: [SceneBlock] = []
+        for b in _desktop3DSculpture() {
+            guard let tex = _desktop3DAppFaceTexture(b.app) else { continue }
+            blocks.append(SceneBlock(id: Self.k3DBlockIdBase + tex, texture: tex,
+                                     x: b.x, y: b.y, z: b.z, yaw: b.yaw, size: b.size))
+            if b.app == _desktop3DHoveredSign, let name = _desktop3DAppLabelTexture(b.app) {
+                labels.append(SceneLabel(id: Self.k3DSignIdBase + name, texture: name,
+                                         x: b.x, y: b.y + b.size / 2 + 0.6, z: b.z, width: 0.9, height: 1.05))
+            }
+        }
         var changed = env.setOrbs([])
+        if env.setBlocks(blocks) { changed = true }
         if env.setLabels(labels.sorted { $0.id < $1.id }) { changed = true }
         if changed { registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId) }
         #endif
@@ -1217,6 +1230,69 @@ extension _DesktopShellState {
     /// The first window's angle from dead ahead, so it clears the tower.
     static let k3DTowerClearDeg = 32.0
 
+    // MARK: The sculpture — the dock as a spiral of blocks
+
+    static let k3DBlockIdBase: Int64 = 2_000_000
+    static let k3DSculptSize = 0.9
+    static let k3DSculptRise = 0.45
+    static let k3DSculptStepDeg = 45.0
+    static let k3DSculptHoverScale = 1.15
+
+    /// The dock's apps as blocks: a rising spiral round the post in the
+    /// pool, the first app in front at the bottom, each next one a
+    /// forty-five-degree turn round and half a metre up, every block
+    /// turned to face outward. From the entrance it reads as one twisting
+    /// column of colour; walk round it and every block comes to the
+    /// front in turn. A click on one opens its app.
+    func _desktop3DSculpture() -> [(app: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] {
+        guard let w = _desktop3DWorld, w.kind == .voxel, let sc = w.sculpture else { return [] }
+        let apps = _dockDisplayApps.filter { $0 != "launcher" }
+        return apps.enumerated().map { i, app in
+            // From the front (+z, the entrance) round to the viewer's right.
+            let theta = Double.pi / 2 - Double(i) * Self.k3DSculptStepDeg * Double.pi / 180
+            let x = sc.x + sc.radius * cos(theta), z = sc.z + sc.radius * sin(theta)
+            let size = app == _desktop3DHoveredSign ? Self.k3DSculptSize * Self.k3DSculptHoverScale : Self.k3DSculptSize
+            let y = sc.base + Self.k3DSculptSize / 2 + 0.1 + Double(i) * Self.k3DSculptRise
+            // A face toward the outside: yaw 0 faces +z, so the outward
+            // direction (cos θ, sin θ) is yaw = π/2 − θ.
+            return (app, x, y, z, Double.pi / 2 - theta, size)
+        }
+    }
+
+    /// An app's block face: its colour to the edges, its glyph in white —
+    /// the tile with no rounded corners, since a block has none.
+    func _desktop3DAppFaceTexture(_ appId: String) -> Int64? {
+        #if os(Linux)
+        if let id = _appFaceTextures[appId] { return id }
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let rec = AppRegistry.shared.installedApps.first { $0.id == appId }
+        let bg = rec.map { Color(Int($0.color) | 0xFF00_0000) } ?? Color(0xFF3A3F4B)
+        let s = 128
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        let paint = Paint()
+        paint.color = bg
+        canvas.drawRect(Rect.fromLTWH(0, 0, Double(s), Double(s)), paint)
+        canvas.save()
+        canvas.translate(24, 24)
+        IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(80, 80))
+        canvas.restore()
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: s, height: s) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        let id = registry.registerTexture(engine: wl.engine)
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: id, data: raw.baseAddress!,
+                                     width: s, height: s)
+        }
+        _appFaceTextures[appId] = id
+        return id
+        #else
+        return nil
+        #endif
+    }
+
     /// Where the dock's apps stand in the city: a row along the near side
     /// of the pool, facing whoever comes in from the entrance, in the
     /// dock's order left to right. A sign is the app's tile and name
@@ -1226,7 +1302,7 @@ extension _DesktopShellState {
     /// (An arc round the pool was tried first: from the entrance its
     /// ends turn away and the outer signs stack up on screen.)
     func _desktop3DSigns() -> [(app: String, x: Double, y: Double, z: Double, w: Double, h: Double, yaw: Double?)] {
-        guard let w = _desktop3DWorld, w.kind == .voxel else { return [] }
+        guard let w = _desktop3DWorld, w.kind == .voxel, w.sculpture == nil else { return [] }
         let apps = _dockDisplayApps.filter { $0 != "launcher" }
         let n = apps.count
         guard n > 0 else { return [] }
@@ -1288,6 +1364,17 @@ extension _DesktopShellState {
                 guard abs(screen.dx - sx) <= hw, abs(screen.dy - sy) <= hh else { continue }
             }
             if best == nil || depth < best!.depth { best = (s.app, depth) }
+        }
+        for b in _desktop3DSculpture() {
+            // A block: its projected box, a little generous for the corners.
+            let v = view.perspectiveTransform(Vector3(b.x, b.y, b.z))
+            let depth = -v.z
+            guard depth > 0.1 else { continue }
+            let sx = host.center.dx + focal * v.x / depth
+            let sy = host.center.dy - focal * v.y / depth
+            let half = focal * b.size * 0.62 / depth
+            guard abs(screen.dx - sx) <= half, abs(screen.dy - sy) <= half else { continue }
+            if best == nil || depth < best!.depth { best = (b.app, depth) }
         }
         return best?.app
     }

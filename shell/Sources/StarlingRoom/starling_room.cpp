@@ -99,6 +99,9 @@ static const uint8_t GLOW_MAT[] = {
 static const uint8_t LABEL_MAT[] = {
 #include "label.inc"
 };
+static const uint8_t BLOCK_MAT[] = {
+#include "block.inc"
+};
 
 /// A sphere in the scene: a planet, or the sun.
 struct Orb {
@@ -118,6 +121,15 @@ struct Label {
     float width = 0, height = 0;
     bool fixedYaw = false;
     float yaw = 0;
+};
+
+/// A block: a textured cube (an app's icon standing in the world).
+struct Block {
+    utils::Entity entity;
+    MaterialInstance* mi = nullptr;
+    Texture* texture = nullptr;
+    uint32_t glName = 0;
+    int texW = 0, texH = 0;
 };
 
 /// One window in the room: the client's picture on a quad, in a slab.
@@ -193,6 +205,14 @@ struct sr_room {
     Material* labelMat = nullptr;
     std::unordered_map<int64_t, Orb> orbs;
     std::unordered_map<int64_t, Label> labels;
+    // Blocks: a unit cube with a picture on every face.
+    VertexBuffer* cubeVb = nullptr;
+    IndexBuffer* cubeIb = nullptr;
+    Material* blockMat = nullptr;
+    std::vector<float> cubeVerts;          // pos(3) uv(2) per vertex
+    std::vector<float4> cubeTangents;
+    std::vector<uint16_t> cubeIdx;
+    std::unordered_map<int64_t, Block> blocks;
     utils::Entity pointLight;
     bool havePointLight = false;
     mat4f cameraModel;   // inverse of the view: where the viewer is, and which way
@@ -547,6 +567,73 @@ bool ensurePaneGeometry(sr_room* r) {
     return true;
 }
 
+void destroyBlock(sr_room* r, Block& b) {
+    Engine& e = *r->engine;
+    r->scene->remove(b.entity);
+    e.destroy(b.entity);
+    utils::EntityManager::get().destroy(b.entity);
+    if (b.mi) e.destroy(b.mi);
+    if (b.texture) e.destroy(b.texture);
+    b = Block{};
+}
+
+/// A unit cube with a picture on every face: positions and UVs (each
+/// face's picture upright as seen from outside), and tangent frames for
+/// the lit material.
+bool ensureBlockGeometry(sr_room* r) {
+    if (r->cubeVb) return true;
+    if (!ensurePaneGeometry(r)) return false;
+    Engine& e = *r->engine;
+    r->blockMat = Material::Builder().package(BLOCK_MAT, sizeof(BLOCK_MAT)).build(e);
+    if (!r->blockMat) {
+        fprintf(stderr, "[room] block material failed to load\n");
+        return false;
+    }
+    const float3 faces[6][3] = {
+        { { 0, 0, 1 }, { 1, 0, 0 }, { 0, 1, 0 } },
+        { { 0, 0, -1 }, { -1, 0, 0 }, { 0, 1, 0 } },
+        { { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 } },
+        { { -1, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 } },
+        { { 0, 1, 0 }, { 1, 0, 0 }, { 0, 0, -1 } },
+        { { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } },
+    };
+    const float uvs[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+    std::vector<float3> normals;
+    for (int f = 0; f < 6; f++) {
+        const float3 n = faces[f][0], u = faces[f][1], v = faces[f][2];
+        const float3 c = n * 0.5f;
+        const float3 corners[4] = { c - u * 0.5f - v * 0.5f, c + u * 0.5f - v * 0.5f,
+                                    c + u * 0.5f + v * 0.5f, c - u * 0.5f + v * 0.5f };
+        const uint16_t b = uint16_t(f * 4);
+        for (int i = 0; i < 4; i++) {
+            r->cubeVerts.insert(r->cubeVerts.end(),
+                    { corners[i].x, corners[i].y, corners[i].z, uvs[i][0], uvs[i][1] });
+            normals.push_back(n);
+        }
+        r->cubeIdx.insert(r->cubeIdx.end(), { b, uint16_t(b + 1), uint16_t(b + 2), b, uint16_t(b + 2), uint16_t(b + 3) });
+    }
+    r->cubeTangents.resize(24);
+    auto* orientation = geometry::SurfaceOrientation::Builder()
+            .vertexCount(24).normals(normals.data()).build();
+    orientation->getQuats(reinterpret_cast<quatf*>(r->cubeTangents.data()), 24);
+    delete orientation;
+    r->cubeVb = VertexBuffer::Builder()
+            .vertexCount(24).bufferCount(2)
+            .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3, 0, 20)
+            .attribute(VertexAttribute::UV0, 0, VertexBuffer::AttributeType::FLOAT2, 12, 20)
+            .attribute(VertexAttribute::TANGENTS, 1, VertexBuffer::AttributeType::FLOAT4, 0, 16)
+            .build(e);
+    r->cubeVb->setBufferAt(e, 0, VertexBuffer::BufferDescriptor(
+            r->cubeVerts.data(), r->cubeVerts.size() * sizeof(float)));
+    r->cubeVb->setBufferAt(e, 1, VertexBuffer::BufferDescriptor(
+            r->cubeTangents.data(), r->cubeTangents.size() * sizeof(float4)));
+    r->cubeIb = IndexBuffer::Builder().indexCount(36)
+            .bufferType(IndexBuffer::IndexType::USHORT).build(e);
+    r->cubeIb->setBuffer(e, IndexBuffer::BufferDescriptor(
+            r->cubeIdx.data(), r->cubeIdx.size() * sizeof(uint16_t)));
+    return true;
+}
+
 void destroyPane(sr_room* r, Pane& p) {
     Engine& e = *r->engine;
     r->scene->remove(p.screen);
@@ -889,6 +976,53 @@ void sr_room_remove_label(sr_room* r, int64_t id) {
     r->labels.erase(it);
 }
 
+int sr_room_set_block(sr_room* r, int64_t id, const float centre[3], float yaw,
+                      float size, uint32_t gl_texture, int tex_w, int tex_h) {
+    if (!ensureBlockGeometry(r)) return -1;
+    Engine& e = *r->engine;
+    auto& tcm = e.getTransformManager();
+    Block& b = r->blocks[id];
+    if (b.entity.isNull()) {
+        b.entity = utils::EntityManager::get().create();
+        b.mi = r->blockMat->createInstance();
+        RenderableManager::Builder(1)
+                .boundingBox({ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } })
+                .material(0, b.mi)
+                .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, r->cubeVb, r->cubeIb, 0, 36)
+                .culling(true).castShadows(true).receiveShadows(true)
+                .build(e, b.entity);
+        tcm.create(b.entity);
+        r->scene->addEntity(b.entity);
+    }
+    if (gl_texture != b.glName || tex_w != b.texW || tex_h != b.texH) {
+        if (b.texture) e.destroy(b.texture);
+        b.texture = Texture::Builder()
+                .width(uint32_t(std::max(tex_w, 1))).height(uint32_t(std::max(tex_h, 1)))
+                .levels(1).sampler(Texture::Sampler::SAMPLER_2D)
+                .format(Texture::InternalFormat::RGBA8)
+                .usage(Texture::Usage::SAMPLEABLE)
+                .import(intptr_t(gl_texture))
+                .build(e);
+        b.glName = gl_texture; b.texW = tex_w; b.texH = tex_h;
+        TextureSampler sampler(TextureSampler::MinFilter::LINEAR, TextureSampler::MagFilter::LINEAR);
+        sampler.setWrapModeS(TextureSampler::WrapMode::CLAMP_TO_EDGE);
+        sampler.setWrapModeT(TextureSampler::WrapMode::CLAMP_TO_EDGE);
+        b.mi->setParameter("image", b.texture, sampler);
+    }
+    tcm.setTransform(tcm.getInstance(b.entity),
+            mat4f::translation(float3{ centre[0], centre[1], centre[2] })
+            * mat4f::rotation(yaw, float3{ 0, 1, 0 })
+            * mat4f::scaling(float3{ size, size, size }));
+    return 0;
+}
+
+void sr_room_remove_block(sr_room* r, int64_t id) {
+    auto it = r->blocks.find(id);
+    if (it == r->blocks.end()) return;
+    destroyBlock(r, it->second);
+    r->blocks.erase(it);
+}
+
 void sr_room_set_screen_intensity(sr_room* r, float intensity) {
     r->screenIntensity = intensity;
     for (auto& kv : r->panes) kv.second.screenMi->setParameter("intensity", intensity);
@@ -904,6 +1038,11 @@ void sr_room_destroy(sr_room* r) {
         r->orbs.clear();
         for (auto& kv : r->labels) destroyLabel(r, kv.second);
         r->labels.clear();
+        for (auto& kv : r->blocks) destroyBlock(r, kv.second);
+        r->blocks.clear();
+        if (r->cubeVb) r->engine->destroy(r->cubeVb);
+        if (r->cubeIb) r->engine->destroy(r->cubeIb);
+        if (r->blockMat) r->engine->destroy(r->blockMat);
         if (r->havePointLight) {
             r->scene->remove(r->pointLight);
             r->engine->getLightManager().destroy(r->pointLight);

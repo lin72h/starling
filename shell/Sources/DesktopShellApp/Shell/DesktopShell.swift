@@ -691,6 +691,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _appLabelTextures: [String: Int64] = [:]
     /// The app whose sign in the square the pointer is over (Desktop3D).
     var _desktop3DHoveredSign: String? = nil
+    /// Per app, the texture its block in the sculpture wears (Desktop3D).
+    var _appFaceTextures: [String: Int64] = [:]
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil

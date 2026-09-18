@@ -106,6 +106,13 @@ SR_EXPORT int sr_room_set_label(sr_room*, int64_t id, const float centre[3],
                                 uint32_t gl_texture, int tex_w, int tex_h);
 SR_EXPORT void sr_room_remove_label(sr_room*, int64_t id);
 
+/// A block: a cube `size` metres on a side, centred on `centre`, turned
+/// `yaw` (0: a face toward +z), wearing `gl_texture` on every face — an
+/// app's icon as a thing in the world, lit like the rest of it.
+SR_EXPORT int sr_room_set_block(sr_room*, int64_t id, const float centre[3], float yaw,
+                                float size, uint32_t gl_texture, int tex_w, int tex_h);
+SR_EXPORT void sr_room_remove_block(sr_room*, int64_t id);
+
 SR_EXPORT void sr_room_destroy(sr_room*);
 
 #ifdef __cplusplus

@@ -39,8 +39,9 @@ touching anything.
   is walked up to (one at reading distance takes the click as a click;
   the first person to play clicked Terminal from 17 m and nothing
   happened, because that was wired for the orrery only). **The dock is
-  a tower in the pool** with the apps as signs on its face (Phase 14),
-  and windows wear the world's block chrome (Phase 13). The city is
+  a sculpture in the pool**: the apps as lit blocks spiralling up a post
+  (Phase 15; the signboard tower of Phase 14 was rejected), and windows
+  wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
   shopfronts facing the square under awnings and signs, roof tanks and
@@ -1295,6 +1296,30 @@ entrance the ends turn away and stack up.
 The pointer reaches the world through a Listener round the
 environment's texture — the wallpaper slot — in the city only; a click
 that hits no sign still does what it did (drops the window's focus).
+
+### Phase 15 — the sculpture (2026-09-18)
+
+The tower "doesn't look good": signs on a wall are stickers, not a
+thing. "Stack the icons like a statue or a sculpture." So the apps are
+BLOCKS now — a new primitive, `sr_room_set_block`: a lit cube wearing a
+shell-drawn face (the app's colour to the edges, its glyph in white) on
+every side, shadowed and sky-lit like any block in the city — and they
+stand in a rising spiral round a slim post in the pool: the first app
+in front at the water, each next one a 45° turn round and 45 cm up,
+each turned to face outward. From the entrance it is one twisting
+column of colour; walk round it and every block comes to the front.
+Hover one and it grows a sixth and wears its nameplate; click and the
+app opens on the arc. The windows still flank the middle. The
+generator's tower became a one-block sandstone post with a lamp, and
+world.json carries `sculpture` (axis, radius, base) instead.
+
+The block material is lit (`block.mat`, TANGENTS + UV0 on a 24-vertex
+cube), not the label's unlit blend: an opaque cube in the transparent
+pass draws its back faces through its front. Radius 2 m and a 45 cm
+rise after 1.5 m / 55 cm put the top blocks out of the frame from the
+entrance. The two blocks behind the post are hidden from the door —
+that is what walking round is for. Signs (the row, the tower) remain
+for a world without a sculpture.
 
 ### Still open
 
