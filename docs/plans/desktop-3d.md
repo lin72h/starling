@@ -1501,6 +1501,23 @@ With that, nothing of a window in the scene is drawn by the widget
 layer any more; the picture, the frame and the bar all sort against
 the bricks and each other in the renderer.
 
+### Phase 26 — a carried brick keeps its distance (2026-09-18)
+
+"The depth of the mouse seems incorrect"; "when using the mouse to
+move the box, it puts the box far away from my position." Two carry
+models had put the brick where a ray through the pointer met
+something — first a plane at the brick's own height, then the ground
+or a brick top under the pointer. Both fling a brick to the horizon:
+a brick in the building sits at eye level, so the ray through it is
+nearly level, and whatever it meets is forty metres off (the world's
+edge, clamped). Now a carried brick keeps the view depth it was picked
+up at and follows the pointer across the view at that depth; the wheel
+pushes it away or pulls it in (40 cm a notch, 1.2–30 m); pushed below
+the ground it slides along the ground. Let go, it falls onto whatever
+is under it. Verified with the pointer marked in the frame: a sideways
+drag lands the brick beside the door at the same size; a downward drag
+brings it down onto the water and no nearer.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

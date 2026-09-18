@@ -1465,30 +1465,40 @@ extension _DesktopShellState {
         return w.ground(x, z)
     }
 
-    /// Where a carried brick goes for a pointer: over the ground the
-    /// pointer's ray reaches (a brick's height above it, plus a little),
-    /// kept inside the world. nil when the ray never comes down.
+    /// Where a carried brick goes for a pointer: under the pointer, at
+    /// the DISTANCE it was picked up at — it moves across the view with
+    /// the mouse and keeps its depth, and the wheel changes the depth.
+    /// Never below the ground under it: pushed down, it slides along the
+    /// ground. (Standing the brick on whatever ground the pointer pointed
+    /// at was tried first and flung it to the horizon: a brick sits at
+    /// eye level, so the ray through it is nearly level, and the ground
+    /// it meets is forty metres off.)
     func _desktop3DBrickCarryPoint(_ screen: Offset, camera: Camera3D, host: Rect,
                                    sc: (x: Double, z: Double, radius: Double, base: Double), w: World3D)
         -> (x: Double, y: Double, z: Double)? {
+        guard let d = _desktop3DBrickDrag else { return nil }
         let s = Self.k3DSculptSize
-        let (o, d) = _desktop3DRay(screen, camera: camera, host: host)
-        guard d.y < -0.02 else { return nil }
-        // Meet the plaza's level first; over the pool, the water's.
-        var level = w.ground(o.x, o.z)
-        var t = (level + s / 2 + Self.k3DBrickCarry - o.y) / d.y
-        var x = o.x + d.x * t, z = o.z + d.z * t
-        let poolLevel = _desktop3DBrickGround(x, z, sc: sc, w: w)
-        if poolLevel != level {
-            level = poolLevel
-            t = (level + s / 2 + Self.k3DBrickCarry - o.y) / d.y
-            x = o.x + d.x * t; z = o.z + d.z * t
-        }
-        guard t > 0 else { return nil }
+        let (o, dir) = _desktop3DRay(screen, camera: camera, host: host)
+        // `dir` has view-space z = −1, so `depth` along it is view depth.
+        var x = o.x + dir.x * d.depth, y = o.y + dir.y * d.depth, z = o.z + dir.z * d.depth
         let lim = Double(min(w.heightSize.x, w.heightSize.z)) / 2 - 1.5
         x = min(max(x, w.hub.x - lim), w.hub.x + lim)
         z = min(max(z, w.hub.z - lim), w.hub.z + lim)
-        return (x, _desktop3DBrickGround(x, z, sc: sc, w: w) + s / 2 + Self.k3DBrickCarry, z)
+        y = max(y, _desktop3DBrickGround(x, z, sc: sc, w: w) + s / 2 + 0.02)
+        return (x, y, z)
+    }
+
+    /// The wheel while a brick is carried: away for a scroll up, nearer
+    /// for a scroll down, within arm's reach and the square.
+    static let k3DBrickDepthMin = 1.2
+    static let k3DBrickDepthMax = 30.0
+    static let k3DBrickDepthStep = 0.4
+
+    func _desktop3DBrickWheel(_ dy: Double) {
+        guard var d = _desktop3DBrickDrag, d.dragging, dy != 0 else { return }
+        d.depth = min(Self.k3DBrickDepthMax, max(Self.k3DBrickDepthMin,
+                      d.depth + (dy < 0 ? Self.k3DBrickDepthStep : -Self.k3DBrickDepthStep)))
+        setState { _desktop3DBrickDrag = d }
     }
 
     /// Give every app a brick: the whole building the first time, laid
@@ -1827,7 +1837,7 @@ extension _DesktopShellState {
         if app.hasPrefix("@") {
             _desktop3DControlActivate(app)
         } else if _desktop3DSculpture().contains(where: { $0.app == app }) {
-            _desktop3DBrickDrag = (app, screen, screen, false)
+            _desktop3DBrickDrag = (app, screen, screen, false, 0)
         } else {
             _desktop3DLog("sign \(app) clicked")
             _launchOrFocusApp(app)
@@ -1846,6 +1856,12 @@ extension _DesktopShellState {
         }
         let target = d.dragging ? _desktop3DSignAt(screen, excluding: d.app) : nil
         let pickedUp = d.dragging && _desktop3DBricks[d.app]?.mode != .held
+        if pickedUp, let b = _desktop3DBricks[d.app] {
+            // Picked up at the distance it stood at.
+            let cam = _desktop3DEffectiveCamera(_desktop3DT)
+            let v = Self._view(cam).perspectiveTransform(Vector3(b.x, b.y, b.z))
+            d.depth = max(Self.k3DBrickDepthMin, -v.z)
+        }
         setState {
             _desktop3DBrickDrag = d
             if d.dragging { _desktop3DHoveredSign = target }

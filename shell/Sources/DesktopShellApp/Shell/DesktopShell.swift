@@ -696,7 +696,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// A brick of the building under the pointer's button: the app, where
     /// the button went down, where the pointer is, and whether it has
     /// moved far enough to be a drag rather than a click (Desktop3D).
-    var _desktop3DBrickDrag: (app: String, start: Offset, at: Offset, dragging: Bool)? = nil
+    var _desktop3DBrickDrag: (app: String, start: Offset, at: Offset, dragging: Bool, depth: Double)? = nil
     /// Per window, the title bar drawn for the scene: the texture, and
     /// what it shows (title, focus, width, hovered block), so it is drawn
     /// again only when that changes (Desktop3D).
@@ -5206,7 +5206,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             outputId: displayLayout?.host.id ?? 0)
                         _noteUserActivity()
                     },
-                    onPointerSignal: { [self] _ in _noteUserActivity() },
+                    onPointerSignal: { [self] e in
+                        _noteUserActivity()
+                        // The wheel pushes a carried brick away or pulls it in.
+                        if let scroll = e as? PointerScrollEvent { _desktop3DBrickWheel(scroll.scrollDelta.dy) }
+                    },
                     behavior: .translucent,
                     child: SizedBox(expand: ())
                 )
