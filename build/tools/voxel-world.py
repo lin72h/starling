@@ -299,7 +299,6 @@ SOLID = np.array([i for i, (name, faces) in enumerate(BLOCKS) if faces and name 
 
 CELL = 12        # a city block: 4 of street, then the lot
 G = 4            # ground level: the surface block's y
-POST_H = 7       # the post in the pool the app blocks spiral round, above the pool
 
 # Building styles: the wall block, its window, its lit window, how the
 # windows are laid out, and the roof parapet.
@@ -476,11 +475,10 @@ def build_city(size, seed, plaza_r=13):
                     and rng.random() < 0.15 and blocks[tx, G + 1, tz] == AIR:
                 blocks[tx, G, tz] = B["grass"]
                 plant_tree(blocks, rng, tx, G + 1, tz)
-    # The square: a pool in the middle with a slim post rising out of it,
-    # round which the desktop's apps stand as blocks in a rising spiral
-    # (the shell's sculpture — the launcher); lamp posts; trees in beds
-    # of flowers at the corners. The windows stand round the sculpture,
-    # never straight behind it from the door.
+    # The square: a pool in the middle, where the desktop's apps stand
+    # stacked as blocks (the shell's sculpture — the launcher); lamp
+    # posts; trees in beds of flowers at the corners. The windows stand
+    # round the sculpture, never straight behind it from the door.
     for dx in range(-3, 4):
         for dz in range(-3, 4):
             r = max(abs(dx), abs(dz))
@@ -488,8 +486,6 @@ def build_city(size, seed, plaza_r=13):
                 blocks[c + dx, G + 1, c + dz] = B["concrete"]
             elif r <= 2:
                 blocks[c + dx, G + 1, c + dz] = B["water"]
-    blocks[c, G + 1:G + 1 + POST_H, c] = B["sandstone"]
-    blocks[c, G + 1 + POST_H, c] = B["lamp"]
     for sx, sz in ((-9, -9), (9, -9), (-9, 9), (9, 9)):
         props.append(("lamp", c + sx, G + 1, c + sz, 3))
     for sx, sz in ((-12, -12), (12, -12), (-12, 12), (12, 12)):
@@ -732,9 +728,9 @@ def main() -> int:
         # The windows' frames are blocks of this world: a plank tile,
         # one per `block` metres, a `margin` wide and `depth` deep.
         "pane_frame": {"texture": "frame.png", "block": 0.25, "margin": 0.25, "depth": 0.25},
-        # The sculpture: the launcher's app blocks spiral round this axis at
-        # this radius, from the water's top up.
-        "sculpture": {"x": 0.0, "z": 0.0, "radius": 2.0, "base": float(G + 2)},
+        # The sculpture: the launcher's app blocks stand stacked here, from
+        # just under the water's top up, each set `radius` off the one below.
+        "sculpture": {"x": 0.0, "z": 0.0, "radius": 0.22, "base": float(G + 2) - 0.28},
     }
     with open(os.path.join(a.out, "world.json"), "w") as f:
         json.dump(world, f)

@@ -39,8 +39,9 @@ touching anything.
   is walked up to (one at reading distance takes the click as a click;
   the first person to play clicked Terminal from 17 m and nothing
   happened, because that was wired for the orrery only). **The dock is
-  a sculpture in the pool**: the apps as lit blocks spiralling up a post
-  (Phase 15; the signboard tower of Phase 14 was rejected), and windows
+  a stack of bricks in the pool**: the apps as lit blocks stacked brick
+  on brick, curling as they rise (Phase 16; the signboard tower and the
+  floating spiral before it were rejected), and windows
   wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
@@ -1320,6 +1321,20 @@ rise after 1.5 m / 55 cm put the top blocks out of the frame from the
 entrance. The two blocks behind the post are hidden from the door —
 that is what walking round is for. Signs (the row, the tower) remain
 for a world without a sculpture.
+
+### Phase 16 — the stack (2026-09-18)
+
+The spiral of floating blocks was not it either: "stack the icons
+together vertically, like Lego, but not straight vertical." So the
+blocks are a STACK now — each rests on the one below, set 22 cm off it
+in a direction that turns forty degrees a level and twisted fifteen —
+a column of bricks put down by hand, curling as it rises, standing in
+the pool with no post. 68 cm bricks, the bottom one a hand's depth in
+the water, so eight of them fit the frame from the entrance (the eye's
+view reaches 11.2 m at the home spot; the top brick tops out at 11.2).
+The hovered brick grows an eighth and its nameplate hangs in FRONT of
+it, toward the viewer — above it would be inside the next brick. The
+world's `sculpture.radius` is the per-level offset now.
 
 ### Still open
 
