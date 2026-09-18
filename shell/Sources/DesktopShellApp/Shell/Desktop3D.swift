@@ -1193,13 +1193,13 @@ extension _DesktopShellState {
         for b in bricks {
             guard let tex = _desktop3DAppFaceTexture(b.app) else { continue }
             blocks.append(SceneBlock(id: Self.k3DBlockIdBase + tex, texture: tex,
-                                     x: b.x, y: b.y, z: b.z, yaw: b.yaw, size: b.size))
+                                     x: b.x, y: b.y, z: b.z, yaw: b.yaw, roll: b.roll, size: b.size))
             if b.app == _desktop3DHoveredSign, let name = _desktop3DAppLabelTexture(b.app) {
                 // The nameplate stands over the roof, above the brick's
                 // column: over the brick itself would be inside the next
                 // course, and in front of it would hide its face.
                 labels.append(SceneLabel(id: Self.k3DSignIdBase + name, texture: name,
-                                         x: b.x, y: roof + 0.65, z: b.z, width: 0.8, height: 0.94))
+                                         x: b.x, y: max(roof, b.y + b.size / 2) + 0.65, z: b.z, width: 0.8, height: 0.94))
             }
         }
         var changed = env.setOrbs([])
@@ -1241,46 +1241,181 @@ extension _DesktopShellState {
     static let k3DSculptSize = 0.9
     /// How far the brick under the pointer comes out of the wall.
     static let k3DSculptHoverOut = 0.14
+    /// How far in front of the wall a dragged brick rides.
+    static let k3DSculptDragOut = 0.4
+    /// Bricks with weight: gravity, how fast a tipping brick turns, how
+    /// far a brick's centre may sit past the edge of what holds it before
+    /// it tips, and how far from the pool's middle a brick may go.
+    static let k3DBrickGravity = 9.8
+    static let k3DBrickTipRate = 4.5
+    static let k3DBrickTipMargin = 0.02
+    static let k3DBrickReach = 2.2
 
-    /// The dock's apps as bricks, laid in courses like a small building:
-    /// a course of k, then one of k − 1 resting in its gaps, then k
-    /// again — running bond — one brick deep, facing the entrance, the
-    /// first app the bottom-left brick and the rest along and up. k is
-    /// the smallest that keeps it about as wide as it is tall. A click
-    /// on a brick opens its app; the one under the pointer comes out of
-    /// the wall a little.
-    func _desktop3DSculpture() -> [(app: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] {
+    /// The dock's apps as bricks with weight, standing in the pool. They
+    /// start as a small building — courses of k, each course a quarter
+    /// brick over from the one below, so every brick rests three
+    /// quarters on the one beneath and the end bricks overhang a
+    /// quarter, which stands — and from then on they are bodies: pull
+    /// one out and what it held up tips off and falls; drop one and it
+    /// lands on whatever is under it. A new app drops in from above.
+    /// The one under the pointer comes out of the wall a little; a
+    /// click on it opens its app.
+    func _desktop3DSculpture() -> [(app: String, x: Double, y: Double, z: Double, yaw: Double, roll: Double, size: Double)] {
         guard let w = _desktop3DWorld, w.kind == .voxel, let sc = w.sculpture else { return [] }
         let apps = _dockDisplayApps.filter { $0 != "launcher" }
-        let n = apps.count
-        guard n > 0 else { return [] }
-        let k = max(2, Int(Double(n).squareRoot().rounded(.up)))
-        // Course c holds k bricks when c is even, k − 1 when odd.
-        var out: [(app: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] = []
-        var i = 0, course = 0
+        guard !apps.isEmpty else { return [] }
         let s = Self.k3DSculptSize
-        while i < n {
-            let m = min(course % 2 == 0 ? k : k - 1, n - i)
-            for j in 0..<m {
-                let app = apps[i + j]
-                let x = sc.x + (Double(j) - Double(m - 1) / 2) * s
-                let y = sc.base + s / 2 + Double(course) * s
-                let z = sc.z + (app == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0)
-                out.append((app, x, y, z, 0, s))
+        _desktop3DSettleBricks(apps, sc: sc)
+        let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        return apps.compactMap { app in
+            guard let b = _desktop3DBricks[app] else { return nil }
+            if b.mode == .held, let d = _desktop3DBrickDrag, d.app == app {
+                // The brick being dragged rides the pointer, out in front
+                // of the wall, where the pointer's ray meets that plane.
+                let cam = _desktop3DEffectiveCamera(_desktop3DT)
+                let plane = WindowPose3D(x: sc.x, y: sc.base, z: sc.z + Self.k3DSculptDragOut, yaw: 0, scale: 1, placed: true)
+                if let (u, v) = _desktop3DPlaneHit(d.at, camera: cam, host: host, pose: plane) {
+                    return (app, sc.x + u, sc.base + v, sc.z + Self.k3DSculptDragOut, 0, 0, s)
+                }
             }
-            i += m; course += 1
+            let z = sc.z + (app == _desktop3DHoveredSign && b.mode == .rest ? Self.k3DSculptHoverOut : 0)
+            return (app, b.x, b.y, z, 0, b.roll, s)
         }
-        // The brick being dragged rides the pointer, out in front of the
-        // wall, where the pointer's ray meets that plane.
-        if let d = _desktop3DBrickDrag, d.dragging, let idx = out.firstIndex(where: { $0.app == d.app }) {
-            let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
-            let cam = _desktop3DEffectiveCamera(_desktop3DT)
-            let plane = WindowPose3D(x: sc.x, y: sc.base, z: sc.z + 0.4, yaw: 0, scale: 1, placed: true)
-            if let (u, v) = _desktop3DPlaneHit(d.at, camera: cam, host: host, pose: plane) {
-                out[idx].x = sc.x + u; out[idx].y = sc.base + v; out[idx].z = sc.z + 0.4
+    }
+
+    /// Give every app a brick: the whole building the first time, laid
+    /// as courses; later arrivals fall in from above. Bricks of apps
+    /// that have gone go too.
+    func _desktop3DSettleBricks(_ apps: [String], sc: (x: Double, z: Double, radius: Double, base: Double)) {
+        let s = Self.k3DSculptSize
+        for app in _desktop3DBricks.keys where !apps.contains(app) { _desktop3DBricks[app] = nil }
+        if _desktop3DBricks.isEmpty {
+            let n = apps.count
+            let k = max(2, Int(Double(n).squareRoot().rounded(.up)))
+            var i = 0, course = 0
+            while i < n {
+                let m = min(k, n - i)
+                for j in 0..<m {
+                    let x = sc.x + (Double(j) - Double(m - 1) / 2) * s + (course % 2 == 1 ? s / 4 : 0)
+                    _desktop3DBricks[apps[i + j]] = BrickBody(x: x, y: sc.base + s / 2 + Double(course) * s)
+                }
+                i += m; course += 1
+            }
+            return
+        }
+        var spawned = false
+        for app in apps where _desktop3DBricks[app] == nil {
+            // Somewhere over the pile, by the name, so it is the same
+            // spot each time.
+            let h = app.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xffff }
+            let x = sc.x + (Double(h % 200) / 100 - 1) * s
+            let top = _desktop3DBricks.values.map { $0.y + s / 2 }.max() ?? sc.base
+            _desktop3DBricks[app] = BrickBody(x: x, y: top + 2.5 * s, mode: .fall)
+            spawned = true
+        }
+        if spawned { _desktop3DStartBricks() }
+    }
+
+    /// Run the bricks until every one is at rest.
+    func _desktop3DStartBricks() {
+        if _brickTicker == nil {
+            _brickTicker = createTicker { [weak self] elapsed in
+                guard let self else { return }
+                let now = Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) * 1e-18
+                let dt = max(0, min(0.05, now - self._brickClock))
+                self._brickClock = now
+                guard self._desktop3DActive, let w = self._desktop3DWorld, let sc = w.sculpture else {
+                    self._brickTicker?.stop()
+                    return
+                }
+                let moving = self._desktop3DBrickStep(dt, sc: sc)
+                if !moving { self._brickTicker?.stop() }
+                self.setState {}
             }
         }
-        return out
+        if !(_brickTicker?.isActive ?? false) {
+            _brickClock = 0
+            _ = _brickTicker?.start()
+        }
+    }
+
+    /// One step of the bricks' physics, in the wall's plane. A resting
+    /// brick stands on the water or on bricks under it; if nothing is
+    /// under it, it falls; if its centre is past the edge of what holds
+    /// it, it tips about that edge — a quarter turn, then it is a square
+    /// again and falls from there. A falling brick lands on the first
+    /// resting brick under it, or the water. Returns whether anything is
+    /// still moving.
+    func _desktop3DBrickStep(_ dt: Double, sc: (x: Double, z: Double, radius: Double, base: Double)) -> Bool {
+        let s = Self.k3DSculptSize, base = sc.base
+        let before = _desktop3DBricks
+        var moving = false
+        for (app, b0) in before {
+            var b = b0
+            switch b.mode {
+            case .held:
+                continue
+            case .rest:
+                let bottom = b.y - s / 2
+                var lo = Double.infinity, hi = -Double.infinity
+                if bottom <= base + 0.03 {
+                    lo = b.x - s / 2; hi = b.x + s / 2
+                }
+                for (other, o) in before where other != app && o.mode == .rest {
+                    guard abs(o.x - b.x) < s - 0.01, abs((o.y + s / 2) - bottom) < 0.03 else { continue }
+                    lo = min(lo, max(o.x - s / 2, b.x - s / 2))
+                    hi = max(hi, min(o.x + s / 2, b.x + s / 2))
+                }
+                if lo > hi {
+                    b.mode = .fall; b.vy = 0
+                } else if b.x < lo + Self.k3DBrickTipMargin {
+                    b.mode = .tumble; b.dir = 1; b.angle = 0
+                    b.pivot = (lo, bottom); b.rel = (b.x - lo, s / 2)
+                } else if b.x > hi - Self.k3DBrickTipMargin {
+                    b.mode = .tumble; b.dir = -1; b.angle = 0
+                    b.pivot = (hi, bottom); b.rel = (b.x - hi, s / 2)
+                }
+            case .fall:
+                b.vy += Self.k3DBrickGravity * dt
+                let bottom = b.y - s / 2
+                var land = base
+                for (other, o) in before where other != app && o.mode == .rest {
+                    let top = o.y + s / 2
+                    guard abs(o.x - b.x) < s - 0.02 else { continue }
+                    if top <= bottom + 0.001 {
+                        land = max(land, top)
+                    } else if o.y - s / 2 < bottom - b.vy * dt + s {
+                        // Beside a resting brick, in its way: mostly over
+                        // it, it is what we land on; else slide off it.
+                        if abs(o.x - b.x) < s / 2 {
+                            land = max(land, top)
+                        } else {
+                            b.x += (b.x < o.x ? -1 : 1) * (s - abs(o.x - b.x) + 0.01)
+                        }
+                    }
+                }
+                if bottom - b.vy * dt <= land {
+                    b.y = land + s / 2; b.vy = 0; b.mode = .rest
+                } else {
+                    b.y -= b.vy * dt
+                }
+            case .tumble:
+                b.angle = min(Double.pi / 2, b.angle + Self.k3DBrickTipRate * dt)
+                let t = b.dir * b.angle
+                b.x = b.pivot.x + b.rel.x * cos(t) - b.rel.y * sin(t)
+                b.y = b.pivot.y + b.rel.x * sin(t) + b.rel.y * cos(t)
+                b.roll = t
+                if b.angle >= Double.pi / 2 {
+                    // A quarter turn on: a square again, falling.
+                    b.roll = 0; b.mode = .fall; b.vy = Self.k3DBrickTipRate * s / 2
+                }
+            }
+            b.x = min(max(b.x, sc.x - Self.k3DBrickReach), sc.x + Self.k3DBrickReach)
+            if b.mode != .rest { moving = true }
+            _desktop3DBricks[app] = b
+        }
+        return moving
     }
 
     /// An app's block face: its colour to the edges, its glyph in white —
@@ -1446,35 +1581,45 @@ extension _DesktopShellState {
             if dx * dx + dy * dy > Self.k3DBrickDragSlop * Self.k3DBrickDragSlop { d.dragging = true }
         }
         let target = d.dragging ? _desktop3DSignAt(screen, excluding: d.app) : nil
+        let pickedUp = d.dragging && _desktop3DBricks[d.app]?.mode != .held
         setState {
             _desktop3DBrickDrag = d
             if d.dragging { _desktop3DHoveredSign = target }
+            if pickedUp { _desktop3DBricks[d.app]?.mode = .held }
         }
+        // Whatever it held up is on its own now.
+        if pickedUp { _desktop3DStartBricks() }
     }
 
-    /// The button comes up: a drag dropped on another brick swaps the two
-    /// apps' places in the dock's order — the building is laid out from
-    /// it, so the flat dock follows — and a press that never became a
-    /// drag is a click.
+    /// The button comes up: a dragged brick is let go where the pointer
+    /// is — lifted clear of any brick it would be inside — and falls from
+    /// there onto whatever is under it; a press that never became a drag
+    /// is a click.
     func _desktop3DSignUp(_ screen: Offset) {
         guard let d = _desktop3DBrickDrag else { return }
         if d.dragging {
-            let target = _desktop3DSignAt(screen, excluding: d.app)
-            _desktop3DLog("brick \(d.app) dropped on \(target ?? "nothing")")
+            _desktop3DLog("brick \(d.app) let go")
             setState {
                 _desktop3DBrickDrag = nil
-                _desktop3DHoveredSign = target
-                guard let target, target != d.app else { return }
-                // A running app that is not pinned takes a place in the
-                // order by being moved, the way "Keep in Dock" gives it one.
-                for app in [d.app, target] where !dockAppOrder.contains(app) {
-                    dockAppOrder.append(app)
-                    _dockRemovedByUser.remove(app)
+                _desktop3DHoveredSign = nil
+                guard let w = _desktop3DWorld, let sc = w.sculpture, var b = _desktop3DBricks[d.app] else { return }
+                let s = Self.k3DSculptSize
+                let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+                let cam = _desktop3DEffectiveCamera(_desktop3DT)
+                let plane = WindowPose3D(x: sc.x, y: sc.base, z: sc.z + Self.k3DSculptDragOut, yaw: 0, scale: 1, placed: true)
+                if let (u, v) = _desktop3DPlaneHit(screen, camera: cam, host: host, pose: plane) {
+                    b.x = min(max(sc.x + u, sc.x - Self.k3DBrickReach), sc.x + Self.k3DBrickReach)
+                    b.y = max(sc.base + s / 2, sc.base + v)
                 }
-                guard let from = dockAppOrder.firstIndex(of: d.app),
-                      let to = dockAppOrder.firstIndex(of: target) else { return }
-                dockAppOrder.swapAt(from, to)
+                for (other, o) in _desktop3DBricks where other != d.app && o.mode == .rest {
+                    if abs(o.x - b.x) < s - 0.01, o.y + s / 2 > b.y - s / 2, o.y - s / 2 < b.y + s / 2 {
+                        b.y = max(b.y, o.y + s)
+                    }
+                }
+                b.mode = .fall; b.vy = 0; b.roll = 0
+                _desktop3DBricks[d.app] = b
             }
+            _desktop3DStartBricks()
         } else {
             setState { _desktop3DBrickDrag = nil }
             _desktop3DLog("sign \(d.app) clicked")

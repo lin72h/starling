@@ -977,7 +977,7 @@ void sr_room_remove_label(sr_room* r, int64_t id) {
 }
 
 int sr_room_set_block(sr_room* r, int64_t id, const float centre[3], float yaw,
-                      float size, uint32_t gl_texture, int tex_w, int tex_h) {
+                      float roll, float size, uint32_t gl_texture, int tex_w, int tex_h) {
     if (!ensureBlockGeometry(r)) return -1;
     Engine& e = *r->engine;
     auto& tcm = e.getTransformManager();
@@ -1012,6 +1012,7 @@ int sr_room_set_block(sr_room* r, int64_t id, const float centre[3], float yaw,
     tcm.setTransform(tcm.getInstance(b.entity),
             mat4f::translation(float3{ centre[0], centre[1], centre[2] })
             * mat4f::rotation(yaw, float3{ 0, 1, 0 })
+            * mat4f::rotation(roll, float3{ 0, 0, 1 })
             * mat4f::scaling(float3{ size, size, size }));
     return 0;
 }

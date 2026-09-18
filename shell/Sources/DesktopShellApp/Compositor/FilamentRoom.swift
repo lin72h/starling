@@ -58,6 +58,8 @@ struct SceneBlock: Equatable {
     var id: Int64
     var texture: Int64
     var x = 0.0, y = 0.0, z = 0.0, yaw = 0.0
+    /// Turned about its own z — a brick tipping over.
+    var roll = 0.0
     var size = 0.9
 }
 
@@ -184,7 +186,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     private typealias SetOrbFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, UnsafePointer<Float>?, Float) -> Int32
     private typealias RemoveIdFn = @convention(c) (OpaquePointer?, Int64) -> Void
     private typealias SetLabelFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, Float, UInt32, Int32, Int32) -> Int32
-    private typealias SetBlockFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, UInt32, Int32, Int32) -> Int32
+    private typealias SetBlockFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, Float, UInt32, Int32, Int32) -> Int32
 
     /// The world this renderer shows, from its directory's world.json.
     let world: World3D
@@ -322,7 +324,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
         for b in blocks {
             guard let tex = sceneTexture?(b.texture), tex.name != 0 else { continue }
             var c: [Float] = [Float(b.x), Float(b.y), Float(b.z)]
-            if fnSetBlock(room, b.id, &c, Float(b.yaw), Float(b.size),
+            if fnSetBlock(room, b.id, &c, Float(b.yaw), Float(b.roll), Float(b.size),
                           tex.name, Int32(tex.width), Int32(tex.height)) == 0 { liveBlocks.insert(b.id) }
         }
         for id in knownBlocks.subtracting(liveBlocks) { fnRemoveBlock(room, id) }

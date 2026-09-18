@@ -39,9 +39,11 @@ touching anything.
   is walked up to (one at reading distance takes the click as a click;
   the first person to play clicked Terminal from 17 m and nothing
   happened, because that was wired for the orrery only). **The dock is
-  a small building of bricks in the pool**: the apps as lit blocks laid
-  in courses, 3/2/3 (Phase 17; the signboard tower, the floating spiral
-  and the tall curling stack before it were each rejected), and windows
+  a small building of bricks in the pool**, with weight: the apps as lit
+  blocks in courses that tip and fall when what held them is pulled
+  out, and can be re-piled by hand (Phases 17–19; the signboard tower,
+  the floating spiral and the tall curling stack before it were each
+  rejected), and windows
   wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
@@ -1366,6 +1368,38 @@ invocation is a CLICK — the process exits, the virtual mouse goes with
 it, and the kernel releases the button. A drag is `down`, the `move`s
 and `up` in ONE invocation. The first run "didn't drag" and opened the
 app instead, and the log said exactly that.
+
+### Phase 19 — the bricks have weight (2026-09-18)
+
+"If icons are moved at the bottom, the whole stack may collapse — need
+to simulate that." So the bricks are bodies now, and the drag no
+longer swaps: pull a brick out and it is gone from under whatever it
+held; drop it and it falls from where you let go onto whatever is
+under it. The physics is a small, honest one in the wall's plane
+(`_desktop3DBrickStep`, on a ticker like the lean's): a resting brick
+stands on the water or on the resting bricks directly under it; with
+nothing under it, it falls; with its centre past the edge of what
+holds it (the hull of its supports, 2 cm margin), it TIPS — a quarter
+turn about that edge at 4.5 rad/s, drawn as a roll (`sr_room_set_block`
+gained `roll`), after which it is a square again and falls from there.
+A falling brick lands on the first resting top under it, slides off a
+brick it is beside unless it is mostly over it, and stops at the
+water; bricks stay within 2.2 m of the pool's middle. Everything
+cascades: pull the bottom-left brick and the one on it tips off,
+the one on that topples, and a brick balanced on the far side goes
+too. A new app drops in from above the pile.
+
+The initial building had to change for this: running bond's end
+bricks sit exactly half on their support, which is neutral
+equilibrium and tips at once under any honest rule. Courses of k now,
+each course a quarter brick over from the one below, so every brick
+rests three quarters on the one beneath and the end bricks overhang a
+quarter — and pulling any bottom brick leaves the one above with a
+quarter, which tips.
+
+**Harness trap (the third):** a drag is `down`, `move`s and `up` in
+ONE shell-drive invocation; and record the collapse as video — stills
+half a second apart miss the whole tumble.
 
 ### Still open
 

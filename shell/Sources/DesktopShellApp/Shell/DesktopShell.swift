@@ -697,6 +697,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// the button went down, where the pointer is, and whether it has
     /// moved far enough to be a drag rather than a click (Desktop3D).
     var _desktop3DBrickDrag: (app: String, start: Offset, at: Offset, dragging: Bool)? = nil
+    /// (See BrickBody below the class.)
+    /// The bricks of the building as bodies with weight, by app
+    /// (Desktop3D): where each is in the wall's plane and what it is doing.
+    var _desktop3DBricks: [String: BrickBody] = [:]
+    var _brickTicker: Ticker? = nil
+    var _brickClock: Double = 0
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -9032,4 +9038,22 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         )
     }
 
+}
+
+
+/// A brick of the 3D desktop's building as a body: where it is in the
+/// wall's plane, how it is turned there, and what it is doing — at
+/// rest, falling, tipping about a corner, or in the user's hand.
+struct BrickBody {
+    enum Mode { case rest, fall, tumble, held }
+    var x: Double, y: Double
+    var roll = 0.0
+    var vy = 0.0
+    var mode: Mode = .rest
+    // Tipping: the point it turns about, which way (+1 left), how far it
+    // has turned, and where its centre started relative to the pivot.
+    var pivot: (x: Double, y: Double) = (0, 0)
+    var dir = 1.0
+    var angle = 0.0
+    var rel: (x: Double, y: Double) = (0, 0)
 }
