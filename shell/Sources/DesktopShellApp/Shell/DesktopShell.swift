@@ -709,6 +709,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The last click on a brick, so the second click of a double-click
     /// does not open the app twice.
     var _desktop3DBrickClick: (app: String, at: Double)? = nil
+    /// The clock tower's face: the minute it shows and which of its two
+    /// textures holds it (Desktop3D._desktop3DClockTexture).
+    var _clockFace: (minute: Int, which: Int)? = nil
+    var _clockFaceTextures: [Int64] = []
+    /// A wake for the next minute is booked (Desktop3D._desktop3DScheduleClock).
+    var _clockWakePending = false
     /// (See BrickBody below the class.)
     /// The bricks of the building as bodies with weight, by app
     /// (Desktop3D): where each is in the wall's plane and what it is doing.

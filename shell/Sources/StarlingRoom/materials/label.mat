@@ -1,6 +1,10 @@
 // A label in the scene: an icon or a name drawn by the shell into a
 // texture with alpha, on a quad that always faces the viewer. Unlit and
 // blended, so the shape is the alpha and the rest is the sky behind.
+// One-sided, like the panes' screens (the same quad): a billboard is
+// always turned to the viewer, and a sign fixed on a wall has a back —
+// seen from behind at a grazing angle, a two-sided one showed as a
+// mirrored sliver beside the wall.
 material {
     name : label,
     shadingModel : unlit,
@@ -10,7 +14,7 @@ material {
         { type : float, name : intensity }
     ],
     requires : [ uv0 ],
-    culling : none
+    culling : back
 }
 
 fragment {

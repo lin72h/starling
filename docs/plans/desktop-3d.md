@@ -58,6 +58,13 @@ they said.
   pairwise resolver every step, the pool's rim a box too), they settle
   onto a quarter-brick grid, and a pile that will not settle in twenty
   seconds stops and says so. Positions live in memory only.
+- **A clock tower stands on the far side of the square**, in the gap
+  the windows keep clear: three blocks square, twelve high, sandstone
+  on a stone footing, a door toward the square, a cornice, a roof and
+  a mast (`voxel-world.py`; regenerate the world to get it). The shell
+  draws its face — a dial with blocky marks and two hands — on all four
+  sides, and redraws it on the minute while the city is up (one wake a
+  minute, none once 3D is off).
 - **Driving it**: `~/tmp/filament/play.sh` (the session scratchpad
   copy) starts the dev shell with the city and turns 3D on;
   `shell-drive` for input — one invocation per gesture (`down`, moves,
@@ -1663,6 +1670,47 @@ the slab's depth plus five centimetres each, nearest first, the
 higher of two at one depth first), so the newest window is the one in
 front, exactly 1:1, and the others read as a pile behind it — the
 flat desktop's stacking, given depth.
+
+### Phase 33 — a clock in the city (2026-09-18)
+
+"Add a clock in the city." A clock tower, where a square would have
+one: on the far side from the door, straight behind the pool, in the
+gap the windows' arc already kept clear (`k3DTowerClearDeg`). The
+generator builds it — three blocks square, twelve high, sandstone on a
+stone footing, a door toward the square, slit windows, a cornice, a
+roof block and a mast — and writes `clock` into world.json: the
+band's centre, how far its sides are, and how big a face to hang.
+The shell hangs a face on each side, a hair off the stone, as
+fixed-yaw labels sharing one texture: a dial drawn on a canvas (dark
+rim, cream face, squared ticks, an hour and a minute hand; no second
+hand — the desktop's own clock wakes once a minute and so does this,
+`_desktop3DScheduleClock`, and not at all once 3D is off).
+
+Three tries to make the hands move, each a lesson:
+
+- **Redrawing into the same texture showed nothing new.** The labels
+  were equal to the frame before, so the room drew no frame; and the
+  upload happens in the raster thread's context while Filament samples
+  from its own — a change to a shared texture is promised to the other
+  context only after a flush here and a bind there.
+- **A fresh texture every minute, the last one freed, vanished on the
+  second minute.** The driver hands a freed name straight back to the
+  next `glGenTextures`, so the new texture had the name the renderer
+  already held for the old one, and it drew nothing.
+- **What works:** two textures turn and turn about, never freed, so
+  the label's texture id changes every minute (the room draws a frame,
+  and binds the other name), plus a `glFlush` in
+  `LinuxTextureRegistry.sceneTexture` after any upload it did — the
+  panes never needed one because their pictures arrive as EGLImages.
+
+Also found: fixed signs were two-sided (`label.mat` `culling : none`),
+and a face on the tower's far side, seen from behind at a grazing
+angle, showed as a mirrored sliver beside the wall. Labels are
+one-sided now, like the panes' screens (the same quad); a billboard
+always faces the viewer, so it loses nothing. And do not reach for
+`RenderableManager::Builder::culling(true)` for this: that is FRUSTUM
+culling, on by default for everything else — back faces are the
+material's.
 
 ### Still open
 

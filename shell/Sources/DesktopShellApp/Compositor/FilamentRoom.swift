@@ -112,6 +112,9 @@ struct World3D {
     /// A walking world's sculpture at the hub: the launcher's app blocks
     /// spiral round this axis at this radius, from `base` up.
     var sculpture: (x: Double, z: Double, radius: Double, base: Double)? = nil
+    /// A clock tower, if the world has one: the centre of its band, how
+    /// far its sides are from that, and how big a face to hang on each.
+    var clock: (x: Double, y: Double, z: Double, half: Double, size: Double)? = nil
 
     static func load(_ dir: String) -> World3D {
         var w = World3D()
@@ -131,6 +134,11 @@ struct World3D {
            let x = sc["x"] as? Double, let z = sc["z"] as? Double,
            let radius = sc["radius"] as? Double, let base = sc["base"] as? Double {
             w.sculpture = (x, z, radius, base)
+        }
+        if let ck = j["clock"] as? [String: Any],
+           let x = ck["x"] as? Double, let y = ck["y"] as? Double, let z = ck["z"] as? Double,
+           let half = ck["half"] as? Double, let size = ck["size"] as? Double {
+            w.clock = (x, y, z, half, size)
         }
         if let t = j["tower"] as? [String: Any],
            let x = t["x"] as? Double, let z = t["z"] as? Double, let half = t["half"] as? Double,

@@ -298,6 +298,7 @@ for i, (name, faces) in enumerate(BLOCKS):
 SOLID = np.array([i for i, (name, faces) in enumerate(BLOCKS) if faces and name != "water"])
 
 CELL = 12        # a city block: 4 of street, then the lot
+CLOCK_Z = 10     # the clock tower's centre column, this far from the square's middle, away from the door
 G = 4            # ground level: the surface block's y
 
 # Building styles: the wall block, its window, its lit window, how the
@@ -493,6 +494,27 @@ def build_city(size, seed, plaza_r=13):
             for dz in range(-1, 2):
                 blocks[c + sx + dx, G, c + sz + dz] = B["flowers"] if (dx or dz) else B["grass"]
         plant_tree(blocks, rng, c + sx, G + 1, c + sz)
+    # The clock tower: on the far side of the square from the door, in
+    # the gap the windows keep clear, three blocks square and twelve
+    # high — a stone footing with a door toward the square, sandstone
+    # with a slit window or two, the clock's band near the top, a
+    # cornice, a roof and a mast. The shell draws the faces (world.json
+    # `clock`), one on each side of the band, a hair off the stone.
+    tx0, tz0 = c - 1, c - CLOCK_Z - 1          # footprint x0..x0+2, z0..z0+2
+    y0 = G + 1
+    blocks[tx0:tx0 + 3, y0, tz0:tz0 + 3] = B["stone"]
+    blocks[tx0:tx0 + 3, y0 + 1:y0 + 11, tz0:tz0 + 3] = B["sandstone"]
+    blocks[c, y0, tz0 + 2] = B["door_bottom"]
+    blocks[c, y0 + 1, tz0 + 2] = B["door_top"]
+    for y in (y0 + 3, y0 + 5):
+        blocks[c, y, tz0 + 2] = B["sandstone_window"]
+        blocks[c, y, tz0] = B["sandstone_window"]
+        blocks[tx0, y, tz0 + 1] = B["sandstone_window"]
+        blocks[tx0 + 2, y, tz0 + 1] = B["sandstone_window"]
+    blocks[tx0:tx0 + 3, y0 + 11, tz0:tz0 + 3] = B["cornice"]
+    blocks[tx0:tx0 + 3, y0 + 12, tz0:tz0 + 3] = B["roof"]
+    blocks[c, y0 + 13, tz0 + 1] = B["dark"]
+    props.append(("mast", c, y0 + 14, tz0 + 1, 3))
     return blocks, props
 
 
@@ -731,6 +753,10 @@ def main() -> int:
         # The sculpture: the launcher's app bricks stand here, in courses
         # like a small building, from the water's top up.
         "sculpture": {"x": 0.0, "z": 0.0, "radius": 0.0, "base": float(G + 2)},
+        # The clock tower's band: the shell hangs a face on each side,
+        # `half` from the centre, `size` metres square.
+        "clock": {"x": 0.5, "y": float(G + 1 + 8.5), "z": float(-CLOCK_Z + 0.5),
+                  "half": 1.5, "size": 2.6},
     }
     with open(os.path.join(a.out, "world.json"), "w") as f:
         json.dump(world, f)

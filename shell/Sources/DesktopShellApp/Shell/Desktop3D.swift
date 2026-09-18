@@ -1321,6 +1321,17 @@ extension _DesktopShellState {
             labels.append(SceneLabel(id: Self.k3DSignIdBase + tex, texture: tex,
                                      x: s.x, y: s.y, z: s.z, width: s.w, height: s.h, yaw: s.yaw))
         }
+        // The clock tower: the time on each of its four sides, a hair off
+        // the stone, redrawn on the minute.
+        if let ck = w.clock, let tex = _desktop3DClockTexture() {
+            let off = ck.half + 0.01
+            for (i, yaw) in [0.0, Double.pi / 2, Double.pi, -Double.pi / 2].enumerated() {
+                labels.append(SceneLabel(id: Self.k3DClockIdBase + Int64(i), texture: tex,
+                                         x: ck.x + sin(yaw) * off, y: ck.y, z: ck.z + cos(yaw) * off,
+                                         width: ck.size, height: ck.size, yaw: yaw))
+            }
+            _desktop3DScheduleClock()
+        }
         // The sculpture: the dock's apps as blocks in a spiral round the
         // post in the pool; the one under the pointer wears its name.
         var blocks: [SceneBlock] = []
@@ -1353,6 +1364,100 @@ extension _DesktopShellState {
         if env.setLabels(labels.sorted { $0.id < $1.id }) { changed = true }
         if changed { registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId) }
         #endif
+    }
+
+    // MARK: The clock tower
+
+    static let k3DClockIdBase: Int64 = 5_000_000
+
+    /// The clock's face for this minute — a round dial with blocky hour
+    /// marks and two hands — in one texture the four faces share. Drawn
+    /// into two textures turn and turn about, never freed: a changed
+    /// texture id is what makes the labels differ from the frame before,
+    /// so the room draws a new frame with the new name bound. Drawing
+    /// into ONE texture every minute showed nothing new (equal labels, no
+    /// frame — and a picture uploaded into a texture the renderer's own
+    /// context had already sampled needs the flush in sceneTexture too);
+    /// a FRESH texture every minute, the last freed, vanished on the
+    /// second minute (the driver hands a freed name straight back).
+    func _desktop3DClockTexture() -> Int64? {
+        #if os(Linux)
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let now = Date()
+        let minute = Int(now.timeIntervalSince1970 / 60)
+        if let f = _clockFace, f.minute == minute { return _clockFaceTextures[f.which] }
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+        let h = Double(comps.hour ?? 0), m = Double(comps.minute ?? 0)
+        let n = 256, c = 128.0
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        let ink = Paint(); ink.color = Color(0xFF26262B)
+        let face = Paint(); face.color = Color(0xFFF3E9D0)
+        canvas.drawCircle(Offset(c, c), 124, ink)
+        canvas.drawCircle(Offset(c, c), 112, face)
+        // Hour marks: squared-off ticks, the quarters longer.
+        for i in 0..<12 {
+            canvas.save()
+            canvas.translate(c, c)
+            canvas.rotate(Double(i) * Double.pi / 6)
+            let long = i % 3 == 0
+            canvas.drawRect(Rect.fromLTWH(long ? -5 : -3.5, -108, long ? 10 : 7, long ? 26 : 16), ink)
+            canvas.restore()
+        }
+        // The hands: 12 o'clock is straight up, and a canvas rotation is
+        // clockwise on screen, so the hour hand turns by its share of the
+        // dial and the minute hand by its own.
+        for (angle, length, width) in [((h.truncatingRemainder(dividingBy: 12) + m / 60) / 12, 60.0, 14.0),
+                                       (m / 60, 90.0, 10.0)] {
+            canvas.save()
+            canvas.translate(c, c)
+            canvas.rotate(angle * 2 * Double.pi)
+            canvas.drawRect(Rect.fromLTWH(-width / 2, -length, width, length + 16), ink)
+            canvas.restore()
+        }
+        canvas.drawCircle(Offset(c, c), 9, ink)
+        canvas.drawCircle(Offset(c, c), 3.5, face)
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: n, height: n) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        if _clockFaceTextures.isEmpty {
+            _clockFaceTextures = [registry.registerTexture(engine: wl.engine),
+                                  registry.registerTexture(engine: wl.engine)]
+        }
+        let which = _clockFace.map { ($0.which + 1) % 2 } ?? 0
+        let id = _clockFaceTextures[which]
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: id, data: raw.baseAddress!, width: n, height: n)
+        }
+        _clockFace = (minute, which)
+        _desktop3DLog(String(format: "clock %02d:%02d", Int(h), Int(m)))
+        return id
+        #else
+        return nil
+        #endif
+    }
+
+    /// One wake just after the next minute boundary, while the city is
+    /// up: the build it asks for redraws the face and books the wake
+    /// after. The desktop's own clock keeps time the same way (ShellClock):
+    /// a wake a minute is the whole idle cost, and none once 3D is off.
+    func _desktop3DScheduleClock() {
+        guard !_clockWakePending else { return }
+        _clockWakePending = true
+        let t = Date().timeIntervalSince1970
+        let delay = 60 - t.truncatingRemainder(dividingBy: 60) + 0.05
+        let fire: () -> Void = { [weak self] in
+            guard let self else { return }
+            self._clockWakePending = false
+            guard self._desktop3DActive, self._desktop3DWorld?.clock != nil else {
+                self._desktop3DLog("clock: minute wake with the city down, no more")
+                return
+            }
+            self.setState {}
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay,
+                                      execute: unsafeBitCast(fire, to: (@Sendable () -> Void).self))
     }
 
     // MARK: The signs — the dock, standing in the square

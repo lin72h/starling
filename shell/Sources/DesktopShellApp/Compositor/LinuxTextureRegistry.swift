@@ -28,6 +28,7 @@ private let GL_UNPACK_ALIGNMENT: UInt32 = 0x0CF5
 
 private typealias GLGenTexturesFunc     = @convention(c) (Int32, UnsafeMutablePointer<UInt32>?) -> Void
 private typealias GLBindTextureFunc     = @convention(c) (UInt32, UInt32) -> Void
+private typealias GLFlushFunc           = @convention(c) () -> Void
 private typealias GLTexImage2DFunc      = @convention(c) (UInt32, Int32, Int32, Int32, Int32, Int32, UInt32, UInt32, UnsafeRawPointer?) -> Void
 // glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels)
 private typealias GLTexSubImage2DFunc   = @convention(c) (UInt32, Int32, Int32, Int32, Int32, Int32, UInt32, UInt32, UnsafeRawPointer?) -> Void
@@ -196,6 +197,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
     private var _glLoaded = false
     private var _glGenTextures: GLGenTexturesFunc!
     private var _glBindTexture: GLBindTextureFunc!
+    private var _glFlush: GLFlushFunc!
     private var _glTexImage2D: GLTexImage2DFunc!
     private var _glTexSubImage2D: GLTexSubImage2DFunc!
     private var _glTexParameteri: GLTexParameteriFunc!
@@ -228,6 +230,7 @@ class LinuxTextureRegistry: @unchecked Sendable {
 
         _glGenTextures   = loadGL("glGenTextures")
         _glBindTexture   = loadGL("glBindTexture")
+        _glFlush         = loadGL("glFlush")
         _glTexImage2D    = loadGL("glTexImage2D")
         _glTexSubImage2D = loadGL("glTexSubImage2D")
         _glTexParameteri = loadGL("glTexParameteri")
@@ -358,9 +361,19 @@ class LinuxTextureRegistry: @unchecked Sendable {
     /// panes) instead of the engine compositing it. Raster thread only,
     /// GL context current, and never with the registry lock held.
     func sceneTexture(id: Int64) -> (name: UInt32, width: Int, height: Int)? {
+        lock.lock()
+        let uploading = entries[id]?.dirty ?? false
+        lock.unlock()
         var out = FlutterOpenGLTexture()
         guard populateTexture(id: id, width: 0, height: 0, textureOut: &out),
               out.name != 0 else { return nil }
+        // The scene renderer samples from its OWN context (Filament's
+        // driver thread), and a change made to a shared texture here is
+        // only promised to it once this context has flushed. Without the
+        // flush a picture drawn again into a texture it had already shown
+        // — the clock tower's face — stayed as it was, while a brand-new
+        // texture came through, which made it look like a caching bug.
+        if uploading { _glFlush() }
         return (out.name, Int(out.width), Int(out.height))
     }
 
