@@ -1188,19 +1188,18 @@ extension _DesktopShellState {
         // The sculpture: the dock's apps as blocks in a spiral round the
         // post in the pool; the one under the pointer wears its name.
         var blocks: [SceneBlock] = []
-        for b in _desktop3DSculpture() {
+        let bricks = _desktop3DSculpture()
+        let roof = (bricks.map { $0.y + $0.size / 2 }.max() ?? 0)
+        for b in bricks {
             guard let tex = _desktop3DAppFaceTexture(b.app) else { continue }
             blocks.append(SceneBlock(id: Self.k3DBlockIdBase + tex, texture: tex,
                                      x: b.x, y: b.y, z: b.z, yaw: b.yaw, size: b.size))
             if b.app == _desktop3DHoveredSign, let name = _desktop3DAppLabelTexture(b.app) {
-                // The nameplate hangs in front of the block, toward the
-                // viewer: above it would be inside the next brick.
-                let c = _camera3D
-                let dx = c.x - b.x, dz = c.z - b.z
-                let len = max((dx * dx + dz * dz).squareRoot(), 0.01)
+                // The nameplate stands over the roof, above the brick's
+                // column: over the brick itself would be inside the next
+                // course, and in front of it would hide its face.
                 labels.append(SceneLabel(id: Self.k3DSignIdBase + name, texture: name,
-                                         x: b.x + dx / len * 0.9, y: b.y + 0.2, z: b.z + dz / len * 0.9,
-                                         width: 0.8, height: 0.94))
+                                         x: b.x, y: roof + 0.65, z: b.z, width: 0.8, height: 0.94))
             }
         }
         var changed = env.setOrbs([])
@@ -1239,33 +1238,39 @@ extension _DesktopShellState {
     // MARK: The sculpture — the dock as a spiral of blocks
 
     static let k3DBlockIdBase: Int64 = 2_000_000
-    static let k3DSculptSize = 0.68
-    /// Each block's offset from the one below turns this much further
-    /// round, so the stack curls rather than leans one way; and each is
-    /// twisted this much more than the one below.
-    static let k3DSculptStepDeg = 40.0
-    static let k3DSculptTwistDeg = 15.0
-    static let k3DSculptHoverScale = 1.08
+    static let k3DSculptSize = 0.9
+    /// How far the brick under the pointer comes out of the wall.
+    static let k3DSculptHoverOut = 0.14
 
-    /// The dock's apps as blocks, stacked: each rests on the one below,
-    /// set a little off it (the world's `radius`) in a direction that
-    /// turns forty degrees a level and twisted fifteen — a column of
-    /// bricks put down by hand, curling as it rises, standing in the
-    /// pool. The first app is the bottom brick. A click on one opens
-    /// its app.
+    /// The dock's apps as bricks, laid in courses like a small building:
+    /// a course of k, then one of k − 1 resting in its gaps, then k
+    /// again — running bond — one brick deep, facing the entrance, the
+    /// first app the bottom-left brick and the rest along and up. k is
+    /// the smallest that keeps it about as wide as it is tall. A click
+    /// on a brick opens its app; the one under the pointer comes out of
+    /// the wall a little.
     func _desktop3DSculpture() -> [(app: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] {
         guard let w = _desktop3DWorld, w.kind == .voxel, let sc = w.sculpture else { return [] }
         let apps = _dockDisplayApps.filter { $0 != "launcher" }
-        var ox = 0.0, oz = 0.0
-        return apps.enumerated().map { i, app in
-            if i > 0 {
-                let a = Double(i) * Self.k3DSculptStepDeg * Double.pi / 180
-                ox += sc.radius * cos(a); oz += sc.radius * sin(a)
+        let n = apps.count
+        guard n > 0 else { return [] }
+        let k = max(2, Int(Double(n).squareRoot().rounded(.up)))
+        // Course c holds k bricks when c is even, k − 1 when odd.
+        var out: [(app: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] = []
+        var i = 0, course = 0
+        let s = Self.k3DSculptSize
+        while i < n {
+            let m = min(course % 2 == 0 ? k : k - 1, n - i)
+            for j in 0..<m {
+                let app = apps[i + j]
+                let x = sc.x + (Double(j) - Double(m - 1) / 2) * s
+                let y = sc.base + s / 2 + Double(course) * s
+                let z = sc.z + (app == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0)
+                out.append((app, x, y, z, 0, s))
             }
-            let size = app == _desktop3DHoveredSign ? Self.k3DSculptSize * Self.k3DSculptHoverScale : Self.k3DSculptSize
-            let y = sc.base + Self.k3DSculptSize / 2 + Double(i) * Self.k3DSculptSize
-            return (app, sc.x + ox, y, sc.z + oz, Double(i) * Self.k3DSculptTwistDeg * Double.pi / 180, size)
+            i += m; course += 1
         }
+        return out
     }
 
     /// An app's block face: its colour to the edges, its glyph in white —

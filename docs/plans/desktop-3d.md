@@ -39,9 +39,9 @@ touching anything.
   is walked up to (one at reading distance takes the click as a click;
   the first person to play clicked Terminal from 17 m and nothing
   happened, because that was wired for the orrery only). **The dock is
-  a stack of bricks in the pool**: the apps as lit blocks stacked brick
-  on brick, curling as they rise (Phase 16; the signboard tower and the
-  floating spiral before it were rejected), and windows
+  a small building of bricks in the pool**: the apps as lit blocks laid
+  in courses, 3/2/3 (Phase 17; the signboard tower, the floating spiral
+  and the tall curling stack before it were each rejected), and windows
   wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
@@ -1335,6 +1335,20 @@ view reaches 11.2 m at the home spot; the top brick tops out at 11.2).
 The hovered brick grows an eighth and its nameplate hangs in FRONT of
 it, toward the viewer — above it would be inside the next brick. The
 world's `sculpture.radius` is the per-level offset now.
+
+### Phase 17 — the building (2026-09-18)
+
+"Too high. Stack them as a building." So the bricks are laid in
+COURSES now, running bond, one brick deep, facing the entrance: a
+course of k, one of k − 1 resting in its gaps, k again — with eight
+apps, 3/2/3 — k the smallest that keeps it about as wide as tall.
+90 cm bricks on the water, so it stands 2.7 m: a small block building
+in the pool, the dock's first apps along the bottom. The brick under
+the pointer comes 14 cm out of the wall, and its nameplate stands over
+the roof above its column — over the brick would be inside the next
+course, in front of it would hide its face. The offset walk and the
+twist of the stack are gone; the running bond is what makes it not a
+straight pile.
 
 ### Still open
 

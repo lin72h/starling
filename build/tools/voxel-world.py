@@ -728,9 +728,9 @@ def main() -> int:
         # The windows' frames are blocks of this world: a plank tile,
         # one per `block` metres, a `margin` wide and `depth` deep.
         "pane_frame": {"texture": "frame.png", "block": 0.25, "margin": 0.25, "depth": 0.25},
-        # The sculpture: the launcher's app blocks stand stacked here, from
-        # just under the water's top up, each set `radius` off the one below.
-        "sculpture": {"x": 0.0, "z": 0.0, "radius": 0.22, "base": float(G + 2) - 0.28},
+        # The sculpture: the launcher's app bricks stand here, in courses
+        # like a small building, from the water's top up.
+        "sculpture": {"x": 0.0, "z": 0.0, "radius": 0.0, "base": float(G + 2)},
     }
     with open(os.path.join(a.out, "world.json"), "w") as f:
         json.dump(world, f)
