@@ -1518,6 +1518,31 @@ is under it. Verified with the pointer marked in the frame: a sideways
 drag lands the brick beside the door at the same size; a downward drag
 brings it down onto the water and no nearer.
 
+### Phase 27 — no two bricks in one place (2026-09-18)
+
+"Two boxes are merged into one. We should have physics for the box."
+Two causes. Bricks at rest never pushed each other apart: a brick
+that landed part-way into a neighbour (the "slide off" on landing
+missed a second neighbour, or the fall ended on the ground in the same
+step) stayed there. And the hover cue moved the brick 14 cm toward the
+viewer — into whatever stood beside it.
+
+Now the step ends with a resolver: every pair of overlapping boxes
+(held and mid-tumble ones excepted) is pushed apart along the axis
+they overlap least on — the upper one up, onto the lower, when that is
+up (and it rests there, and tips if that is not enough to hold it);
+half each sideways otherwise — four passes, so a push that makes a new
+overlap is undone too, and nothing below its ground. A resting brick
+pushed off its support finds out next step. The "mostly over" landing
+rule is gone: a falling brick lands on any brick under it, and the
+support test decides whether it stays. The hover is a HIGHLIGHT now — a
+lighter face with a white rim, a second texture per app — and moves
+nothing; the door block likewise.
+
+Checked by dropping a brick half into another (pushed clear, climbed
+onto the pile), hovering (lit, still), and dropping one onto the pile
+from the side (settled beside, nothing merged).
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

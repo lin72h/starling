@@ -1215,7 +1215,7 @@ extension _DesktopShellState {
         var blocks: [SceneBlock] = []
         let bricks = _desktop3DSculpture()
         for b in bricks {
-            guard let tex = _desktop3DAppFaceTexture(b.app) else { continue }
+            guard let tex = _desktop3DAppFaceTexture(b.app, hovered: b.app == _desktop3DHoveredSign) else { continue }
             blocks.append(SceneBlock(id: Self.k3DBlockIdBase + tex, texture: tex,
                                      x: b.x, y: b.y, z: b.z, yaw: b.yaw, roll: b.roll, size: b.size))
             if b.app == _desktop3DHoveredSign, let name = _desktop3DAppLabelTexture(b.app) {
@@ -1229,7 +1229,7 @@ extension _DesktopShellState {
             }
         }
         for (i, c) in _desktop3DControls().enumerated() {
-            guard let tex = _desktop3DControlTexture(c.id) else { continue }
+            guard let tex = _desktop3DControlTexture(c.id, hovered: c.id == _desktop3DHoveredSign) else { continue }
             blocks.append(SceneBlock(id: Self.k3DControlIdBase + Int64(i), texture: tex,
                                      x: c.x, y: c.y, z: c.z, yaw: c.yaw, roll: 0, size: c.size))
             if c.id == _desktop3DHoveredSign, let name = _desktop3DNameTexture(c.id, "Back to the desktop") {
@@ -1321,21 +1321,21 @@ extension _DesktopShellState {
     func _desktop3DControls() -> [(id: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] {
         guard let w = _desktop3DWorld, w.kind == .voxel, let sc = w.sculpture else { return [] }
         let s = Self.k3DControlSize
-        let out = Self.k3DControlExit == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0.0
-        return [(Self.k3DControlExit, sc.x + 2.4, sc.base + s / 2, sc.z + 3.5 + out, 0, s)]
+        return [(Self.k3DControlExit, sc.x + 2.4, sc.base + s / 2, sc.z + 3.5, 0, s)]
     }
 
     /// The door block's face: a dark block, a door frame in white and an
     /// arrow leaving through it.
-    func _desktop3DControlTexture(_ id: String) -> Int64? {
+    func _desktop3DControlTexture(_ id: String, hovered: Bool = false) -> Int64? {
         #if os(Linux)
-        if let t = _appFaceTextures[id] { return t }
+        let key = hovered ? id + "#hover" : id
+        if let t = _appFaceTextures[key] { return t }
         guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
         let s = 128
         let recorder = NativePictureRecorder()
         let canvas = NativeCanvas(recorder: recorder)
         let paint = Paint()
-        paint.color = Color(0xFF2B2F36)
+        paint.color = hovered ? Color(0xFF4A505A) : Color(0xFF2B2F36)
         canvas.drawRect(Rect.fromLTWH(0, 0, Double(s), Double(s)), paint)
         paint.style = .stroke
         paint.strokeWidth = 9
@@ -1356,7 +1356,7 @@ extension _DesktopShellState {
         bytes.withUnsafeBytes { raw in
             registry.updatePixelData(engine: wl.engine, id: tex, data: raw.baseAddress!, width: s, height: s)
         }
-        _appFaceTextures[id] = tex
+        _appFaceTextures[key] = tex
         return tex
         #else
         return nil
@@ -1446,15 +1446,9 @@ extension _DesktopShellState {
                 }
                 return (app, b.x, b.y, b.z, 0, 0, s)
             }
-            // The one under the pointer comes toward the viewer a little.
-            var (x, z) = (b.x, b.z)
-            if app == _desktop3DHoveredSign, b.mode == .rest {
-                let cam = _desktop3DEffectiveCamera(_desktop3DT)
-                let dx = cam.x - b.x, dz = cam.z - b.z
-                let len = max((dx * dx + dz * dz).squareRoot(), 0.01)
-                x += dx / len * Self.k3DSculptHoverOut; z += dz / len * Self.k3DSculptHoverOut
-            }
-            return (app, x, b.y, z, b.yaw, b.roll, s)
+            // (The one under the pointer is lit, not moved: a brick that
+            // came toward the viewer went into the brick beside it.)
+            return (app, b.x, b.y, b.z, b.yaw, b.roll, s)
         }
     }
 
@@ -1611,22 +1605,10 @@ extension _DesktopShellState {
                 var land = _desktop3DBrickGround(b.x, b.z, sc: sc, w: w)
                 for (other, o) in before where other != app && o.mode == .rest {
                     let top = o.y + s / 2
-                    guard overlapXZ(o, b, 0.02) else { continue }
-                    if top <= bottom + 0.001 {
-                        land = max(land, top)
-                    } else if o.y - s / 2 < bottom - b.vy * dt + s {
-                        // Beside a resting brick, in its way: mostly over
-                        // it, it is what we land on; else slide off it,
-                        // along whichever axis is the shorter way out.
-                        let dx = b.x - o.x, dz = b.z - o.z
-                        if abs(dx) < s / 2 && abs(dz) < s / 2 {
-                            land = max(land, top)
-                        } else if abs(dx) >= abs(dz) {
-                            b.x += (dx < 0 ? -1 : 1) * (s - abs(dx) + 0.01)
-                        } else {
-                            b.z += (dz < 0 ? -1 : 1) * (s - abs(dz) + 0.01)
-                        }
-                    }
+                    // Any brick under it, however little of it: it lands
+                    // there, and tips off if that is not enough to hold it.
+                    guard overlapXZ(o, b, 0.02), top <= bottom + 0.001 else { continue }
+                    land = max(land, top)
                 }
                 if bottom - b.vy * dt <= land {
                     b.y = land + s / 2; b.vy = 0; b.mode = .rest
@@ -1652,23 +1634,74 @@ extension _DesktopShellState {
             if b.mode != .rest { moving = true }
             _desktop3DBricks[app] = b
         }
+        // No two bricks in the same place: every pair of boxes that
+        // overlap are pushed apart along the axis they overlap least on
+        // — up (the upper one, which then rests on the lower) when that
+        // is up, else half each sideways — a few passes, so a push that
+        // makes a new overlap is undone too. A brick in the hand and a
+        // brick mid-tumble are left alone; they settle when they are
+        // squares on the ground again. A resting brick pushed off its
+        // support finds out next step, and tips.
+        let apps = Array(_desktop3DBricks.keys).sorted()
+        for _ in 0..<4 {
+            var pushed = false
+            for i in 0..<apps.count {
+                for j in (i + 1)..<apps.count {
+                    guard var a = _desktop3DBricks[apps[i]], var b = _desktop3DBricks[apps[j]],
+                          a.mode != .held, b.mode != .held, a.mode != .tumble, b.mode != .tumble else { continue }
+                    let px = s - abs(a.x - b.x), py = s - abs(a.y - b.y), pz = s - abs(a.z - b.z)
+                    guard px > 0.002, py > 0.002, pz > 0.002 else { continue }
+                    pushed = true
+                    if py <= px && py <= pz {
+                        // The upper one up, onto the lower.
+                        let upperIsA = a.y >= b.y
+                        if upperIsA { a.y = b.y + s + 0.001; a.vy = 0; if a.mode == .fall { a.mode = .rest } }
+                        else { b.y = a.y + s + 0.001; b.vy = 0; if b.mode == .fall { b.mode = .rest } }
+                    } else if px <= pz {
+                        let d = (a.x < b.x ? -1.0 : 1.0) * (px / 2 + 0.001)
+                        a.x += d; b.x -= d
+                    } else {
+                        let d = (a.z < b.z ? -1.0 : 1.0) * (pz / 2 + 0.001)
+                        a.z += d; b.z -= d
+                    }
+                    _desktop3DBricks[apps[i]] = a; _desktop3DBricks[apps[j]] = b
+                }
+            }
+            if !pushed { break }
+            moving = true
+        }
+        for (app, var b) in _desktop3DBricks where b.mode != .held {
+            let floor = _desktop3DBrickGround(b.x, b.z, sc: sc, w: w) + s / 2
+            if b.y < floor { b.y = floor; b.vy = 0; if b.mode == .fall { b.mode = .rest }; _desktop3DBricks[app] = b }
+        }
         return moving
     }
 
     /// An app's block face: its colour to the edges, its glyph in white —
-    /// the tile with no rounded corners, since a block has none.
-    func _desktop3DAppFaceTexture(_ appId: String) -> Int64? {
+    /// the tile with no rounded corners, since a block has none. Hovered:
+    /// lighter, with a white rim, so the pointer's brick shows without
+    /// moving.
+    func _desktop3DAppFaceTexture(_ appId: String, hovered: Bool = false) -> Int64? {
         #if os(Linux)
-        if let id = _appFaceTextures[appId] { return id }
+        let key = hovered ? appId + "#hover" : appId
+        if let id = _appFaceTextures[key] { return id }
         guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
         let rec = AppRegistry.shared.installedApps.first { $0.id == appId }
-        let bg = rec.map { Color(Int($0.color) | 0xFF00_0000) } ?? Color(0xFF3A3F4B)
+        var bg = rec.map { Color(Int($0.color) | 0xFF00_0000) } ?? Color(0xFF3A3F4B)
+        if hovered { bg = Color(alpha: 1, red: min(1, bg.r * 1.2 + 0.08), green: min(1, bg.g * 1.2 + 0.08), blue: min(1, bg.b * 1.2 + 0.08)) }
         let s = 128
         let recorder = NativePictureRecorder()
         let canvas = NativeCanvas(recorder: recorder)
         let paint = Paint()
         paint.color = bg
         canvas.drawRect(Rect.fromLTWH(0, 0, Double(s), Double(s)), paint)
+        if hovered {
+            paint.color = Color(0xFFFFFFFF)
+            paint.style = .stroke
+            paint.strokeWidth = 8
+            canvas.drawRect(Rect.fromLTWH(4, 4, Double(s) - 8, Double(s) - 8), paint)
+            paint.style = .fill
+        }
         canvas.save()
         canvas.translate(24, 24)
         IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(80, 80))
@@ -1682,7 +1715,7 @@ extension _DesktopShellState {
             registry.updatePixelData(engine: wl.engine, id: id, data: raw.baseAddress!,
                                      width: s, height: s)
         }
-        _appFaceTextures[appId] = id
+        _appFaceTextures[key] = id
         return id
         #else
         return nil
