@@ -1480,6 +1480,27 @@ Buildings are not solid to bricks: one dropped over a shop lands on
 the plaza level inside it. The heightmap is level and nothing in it is
 a wall — the same thing that lets the viewer walk through walls.
 
+### Phase 25 — the title bar goes into the scene (2026-09-18)
+
+"On the media player icon I can see a brick strip; sometimes brick and
+icon box are mixed." The strip was the Files window's plank title bar:
+the window's picture is drawn by the renderer, where a brick in front
+covers it, but the bar was still the WIDGET's, composited over the
+whole scene with no depth — so a window behind the pile showed its bar
+through the bricks. Now the bar is in the scene too: the shell paints
+`BlockyTitleBar` into a texture (planks, title, the three blocks, the
+hovered block's glyph — `_BlockyTitleBarState.paint`, the same painters
+the widget uses) and hangs it on the pane as a fixed-yaw label 5 mm in
+front of the picture, drawn again only when title, focus, width or
+hovered block changes; the widget's bar paints nothing and is the
+pointer's alone (`inScene`), reporting which block it is over
+(`onHoverBlock`) so the scene's copy shows the hover. The lint's
+window-chrome check learned that the report is not a control.
+
+With that, nothing of a window in the scene is drawn by the widget
+layer any more; the picture, the frame and the bar all sort against
+the bricks and each other in the renderer.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

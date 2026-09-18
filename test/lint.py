@@ -546,7 +546,10 @@ CHROME_EXEMPT = {
 }
 
 # Anything in DesktopWindow's init named on* that is NOT window chrome.
-CHROME_NOT_A_CALLBACK: set[str] = set()
+# onHoverTitleBlock is a report, not a control: the 3D desktop's copy of
+# the block title bar (drawn in the scene) shows the hovered block; a
+# tree without one has no scene and loses nothing.
+CHROME_NOT_A_CALLBACK: set[str] = {"onHoverTitleBlock"}
 
 # Not an on* callback, but the identical trap: it defaults to false, and a
 # tree that omits it can never reveal a fullscreen window's title bar — which

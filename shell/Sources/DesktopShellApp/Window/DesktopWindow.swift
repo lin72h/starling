@@ -215,6 +215,8 @@ class DesktopWindow: StatelessWidget {
     /// is the world's.
     let decoration: WindowDecoration
     let decorationTile: FlutterSwiftBridge.Image?
+    /// The block title bar's hover report (BlockyTitleBar.onHoverBlock).
+    let onHoverTitleBlock: ((Int?) -> Void)?
 
     init(
         windowInfo: WindowInfo,
@@ -234,7 +236,8 @@ class DesktopWindow: StatelessWidget {
         walkUpOnClick: Bool = false,
         revealInset: Double = 0,
         decoration: WindowDecoration = .style,
-        decorationTile: FlutterSwiftBridge.Image? = nil
+        decorationTile: FlutterSwiftBridge.Image? = nil,
+        onHoverTitleBlock: ((Int?) -> Void)? = nil
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -254,6 +257,7 @@ class DesktopWindow: StatelessWidget {
         self.revealInset = revealInset
         self.decoration = decoration
         self.decorationTile = decorationTile
+        self.onHoverTitleBlock = onHoverTitleBlock
     }
 
     /// The glass tint, leaned toward the light behind the window when the
@@ -286,6 +290,11 @@ class DesktopWindow: StatelessWidget {
                 isFocused: isFocused,
                 isFullscreen: isFullscreen,
                 tile: decorationTile,
+                // With the picture in the scene, so is the bar: the widget
+                // is the pointer's alone, or a brick in front of the window
+                // would show the bar through itself.
+                inScene: sceneContent,
+                onHoverBlock: onHoverTitleBlock,
                 onMove: onMove,
                 onMinimize: onMinimize,
                 onMaximize: onMaximize,

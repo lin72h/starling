@@ -697,6 +697,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// the button went down, where the pointer is, and whether it has
     /// moved far enough to be a drag rather than a click (Desktop3D).
     var _desktop3DBrickDrag: (app: String, start: Offset, at: Offset, dragging: Bool)? = nil
+    /// Per window, the title bar drawn for the scene: the texture, and
+    /// what it shows (title, focus, width, hovered block), so it is drawn
+    /// again only when that changes (Desktop3D).
+    var _sceneTitleBars: [String: (key: String, tex: Int64)] = [:]
+    /// Per window, the block of its title bar the pointer is over.
+    var _sceneTitleHover: [String: Int] = [:]
     /// (See BrickBody below the class.)
     /// The bricks of the building as bodies with weight, by app
     /// (Desktop3D): where each is in the wall's plane and what it is doing.
@@ -4783,7 +4789,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                     walkUpOnClick: walkUp,
                     revealInset: revealInset,
                     decoration: blocky ? .blocky : .style,
-                    decorationTile: blocky ? _worldFrameTile : nil
+                    decorationTile: blocky ? _worldFrameTile : nil,
+                    onHoverTitleBlock: { [self] block in
+                        if _sceneTitleHover[winId] != block {
+                            setState { _sceneTitleHover[winId] = block }
+                        }
+                    }
                 )
                 _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene, walkUp, revealInset, blocky)
             }

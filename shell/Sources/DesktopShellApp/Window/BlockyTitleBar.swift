@@ -21,6 +21,13 @@ class BlockyTitleBar: StatefulWidget {
     let isFullscreen: Bool
     /// The world's frame tile (pixel art, 16 texels), or nil for plain planks.
     let tile: FlutterSwiftBridge.Image?
+    /// Paint nothing: the bar is drawn in the scene by the room renderer,
+    /// where a brick in front of the window covers it; the widget stays
+    /// for the pointer alone.
+    let inScene: Bool
+    /// Which block (0 close, 1 minimize, 2 maximize) the pointer is over,
+    /// or nil — so the scene's copy can show the hover.
+    let onHoverBlock: ((Int?) -> Void)?
     let onMove: ((Offset) -> Void)?
     let onMinimize: (() -> Void)?
     let onMaximize: (() -> Void)?
@@ -33,6 +40,8 @@ class BlockyTitleBar: StatefulWidget {
         isFocused: Bool,
         isFullscreen: Bool = false,
         tile: FlutterSwiftBridge.Image? = nil,
+        inScene: Bool = false,
+        onHoverBlock: ((Int?) -> Void)? = nil,
         onMove: ((Offset) -> Void)? = nil,
         onMinimize: (() -> Void)? = nil,
         onMaximize: (() -> Void)? = nil,
@@ -44,6 +53,8 @@ class BlockyTitleBar: StatefulWidget {
         self.isFocused = isFocused
         self.isFullscreen = isFullscreen
         self.tile = tile
+        self.inScene = inScene
+        self.onHoverBlock = onHoverBlock
         self.onMove = onMove
         self.onMinimize = onMinimize
         self.onMaximize = onMaximize
@@ -73,22 +84,22 @@ class _BlockyTitleBarState: State<StatefulWidget> {
     static let kLead = 12.0
 
     // The blocks: redstone, gold, emerald — and stone when unfocused.
-    private static let closeFace = Color(0xFFD9473A)
-    private static let minimizeFace = Color(0xFFE6B422)
-    private static let maximizeFace = Color(0xFF3FB950)
-    private static let stoneFace = Color(0xFF8C8C8C)
+    static let closeFace = Color(0xFFD9473A)
+    static let minimizeFace = Color(0xFFE6B422)
+    static let maximizeFace = Color(0xFF3FB950)
+    static let stoneFace = Color(0xFF8C8C8C)
 
     override func build(_ context: any BuildContext) -> Widget {
         let focused = w.isFocused
         let row = Row(
             children: [
                 SizedBox(width: Self.kLead),
-                _block(face: focused ? Self.closeFace : Self.stoneFace, glyph: .close, onTap: w.onClose),
+                _block(0, face: focused ? Self.closeFace : Self.stoneFace, glyph: .close, onTap: w.onClose),
                 SizedBox(width: Self.kGap),
-                _block(face: focused ? Self.minimizeFace : Self.stoneFace, glyph: .minimize, onTap: w.onMinimize),
+                _block(1, face: focused ? Self.minimizeFace : Self.stoneFace, glyph: .minimize, onTap: w.onMinimize),
                 SizedBox(width: Self.kGap),
-                _block(face: focused ? Self.maximizeFace : Self.stoneFace, glyph: .maximize, onTap: w.onMaximize),
-                Expanded(child: Center(child: _shadowedTitle(focused: focused))),
+                _block(2, face: focused ? Self.maximizeFace : Self.stoneFace, glyph: .maximize, onTap: w.onMaximize),
+                Expanded(child: w.inScene ? SizedBox(expand: ()) : Center(child: _shadowedTitle(focused: focused))),
                 // Balance the buttons so the title is truly centred.
                 SizedBox(width: Self.kLead + Self.kButton * 3 + Self.kGap * 2),
             ]
@@ -124,12 +135,43 @@ class _BlockyTitleBarState: State<StatefulWidget> {
             behavior: .opaque,
             child: SizedBox(
                 height: DesktopTheme.kTitleBarHeight,
-                child: CustomPaint(
+                child: w.inScene ? row : CustomPaint(
                     painter: _PlankPainter(tile: w.tile, focused: focused),
                     child: row
                 )
             )
         )
+    }
+
+    /// The bar as a picture, for the scene: what `build` paints, drawn
+    /// once into a canvas at `scale` pixels per logical pixel. `hovered`
+    /// is the block the pointer is over, whose glyph shows.
+    static func paint(_ canvas: any Canvas, width: Double, tile: FlutterSwiftBridge.Image?,
+                      title: String, focused: Bool, hovered: Int?, scale: Double) {
+        canvas.save()
+        canvas.scale(scale, scale)
+        let h = DesktopTheme.kTitleBarHeight
+        _PlankPainter(tile: tile, focused: focused).paint(canvas, Size(width, h))
+        let faces = [closeFace, minimizeFace, maximizeFace]
+        let glyphs: [_BlockGlyph] = [.close, .minimize, .maximize]
+        for i in 0..<3 {
+            let x = kLead + Double(i) * (kButton + kGap)
+            canvas.save()
+            canvas.translate(x, (h - kButton) / 2)
+            _BlockPainter(face: focused ? faces[i] : stoneFace, glyph: glyphs[i],
+                          hovered: hovered == i, pressed: false).paint(canvas, Size(kButton, kButton))
+            canvas.restore()
+        }
+        let ink = focused ? Color(0xFFFFFFFF) : Color(0xFFBDBDBD)
+        for (dx, dy, c) in [(2.0, 2.0, Color(0xB0000000)), (0.0, 0.0, ink)] {
+            let pb = NativeParagraphBuilder(ParagraphStyle(textAlign: .center, fontSize: 13, fontWeight: .w700))
+            pb.pushStyle(TextStyle(color: c, fontWeight: .w700, fontSize: 13, letterSpacing: 0.5))
+            pb.addText(title)
+            let para = pb.build()
+            para.layout(ParagraphConstraints(width: width))
+            canvas.drawParagraph(para, Offset(dx, (h - 17) / 2 + dy))
+        }
+        canvas.restore()
     }
 
     /// The title, white over a hard one-texel-offset shadow: the game's
@@ -148,19 +190,22 @@ class _BlockyTitleBarState: State<StatefulWidget> {
         )
     }
 
-    private func _block(face: Color, glyph: _BlockGlyph, onTap: (() -> Void)?) -> Widget {
+    private func _block(_ index: Int, face: Color, glyph: _BlockGlyph, onTap: (() -> Void)?) -> Widget {
+        let inScene = w.inScene, onHover = w.onHoverBlock
         return SizedBox(
             width: Self.kButton,
             height: Self.kButton,
             child: HoverButton(
                 builder: { _, states in
-                    CustomPaint(
+                    inScene ? SizedBox(expand: ()) : CustomPaint(
                         painter: _BlockPainter(face: face, glyph: glyph,
                                                hovered: states.isHovered, pressed: states.isPressed),
                         child: SizedBox(expand: ())
                     )
                 },
-                onPressed: onTap
+                onPressed: onTap,
+                onPointerEnter: { _ in onHover?(index) },
+                onPointerExit: { _ in onHover?(nil) }
             )
         )
     }
@@ -172,7 +217,7 @@ enum _BlockGlyph { case close, minimize, maximize }
 /// shaded bottom-right one, a few darker texels for grain, and, when the
 /// pointer is over it, its glyph in white. Pressed, the bevel flips and
 /// the face darkens: pushed in.
-private class _BlockPainter: CustomPainter {
+class _BlockPainter: CustomPainter {
     let face: Color
     let glyph: _BlockGlyph
     let hovered: Bool
@@ -237,7 +282,7 @@ private class _BlockPainter: CustomPainter {
 /// The bar itself: the world's tile laid two screen pixels to a texel,
 /// crisp, with a dark two-texel edge along the bottom; dimmed when the
 /// window is not the one with the keyboard.
-private class _PlankPainter: CustomPainter {
+class _PlankPainter: CustomPainter {
     let tile: FlutterSwiftBridge.Image?
     let focused: Bool
 

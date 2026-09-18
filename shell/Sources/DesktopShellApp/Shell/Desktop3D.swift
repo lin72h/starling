@@ -1182,6 +1182,26 @@ extension _DesktopShellState {
             // Read from across the square: a metre wide.
             labels.append(SceneLabel(id: tex, texture: tex, x: cx, y: top + 0.7, z: cz, width: 1.0, height: 1.17))
         }
+        // Each window's title bar, in the scene on its pane — where a brick
+        // in front of the window covers it, as it covers the picture.
+        let titleH = shellMetrics.titleBarHeight
+        var liveBars = Set<String>()
+        for win in windows where win.pose3D.placed && win.textureId != nil {
+            guard let tex = _desktop3DTitleBarTexture(win) else { continue }
+            liveBars.insert(win.id)
+            let p = win.pose3D
+            let k = s * p.scale
+            let up = (win.rect.height / 2 - titleH / 2) * k
+            // A hair in front of the pane's picture (which is 3 mm off the slab).
+            let n = (x: sin(p.yaw), z: cos(p.yaw))
+            labels.append(SceneLabel(id: Self.k3DTitleIdBase + tex, texture: tex,
+                                     x: p.x + n.x * 0.005, y: p.y + up, z: p.z + n.z * 0.005,
+                                     width: win.rect.width * k, height: titleH * k, yaw: p.yaw))
+        }
+        for id in _sceneTitleBars.keys where !liveBars.contains(id) {
+            if let old = _sceneTitleBars[id] { registry.unregisterTexture(engine: wl.engine, id: old.tex) }
+            _sceneTitleBars[id] = nil
+        }
         // The signs: the dock's apps, standing round the near side of the
         // pool. Their key is offset from the nameplates', which share the
         // same textures.
@@ -1249,6 +1269,43 @@ extension _DesktopShellState {
     static let k3DTowerSignOut = 0.04
     /// The first window's angle from dead ahead, so it clears the tower.
     static let k3DTowerClearDeg = 32.0
+
+    // MARK: The title bars, in the scene
+
+    static let k3DTitleIdBase: Int64 = 4_000_000
+
+    /// A window's block title bar as a texture for the scene: drawn again
+    /// only when its title, focus, width or hovered block changes.
+    func _desktop3DTitleBarTexture(_ win: WindowInfo) -> Int64? {
+        #if os(Linux)
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let focused = win.id == windowManager.focusedWindowId
+        let hovered = _sceneTitleHover[win.id]
+        let width = win.rect.width
+        let key = "\(win.title)|\(focused)|\(Int(width))|\(hovered.map(String.init) ?? "-")"
+        if let cur = _sceneTitleBars[win.id], cur.key == key { return cur.tex }
+        let scale = 2.0
+        let w = Int(width * scale), h = Int(shellMetrics.titleBarHeight * scale)
+        guard w > 0, h > 0 else { return nil }
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        _BlockyTitleBarState.paint(canvas, width: width, tile: _worldFrameTile, title: win.title,
+                             focused: focused, hovered: hovered, scale: scale)
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: w, height: h) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        let tex = registry.registerTexture(engine: wl.engine)
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: tex, data: raw.baseAddress!, width: w, height: h)
+        }
+        if let old = _sceneTitleBars[win.id] { registry.unregisterTexture(engine: wl.engine, id: old.tex) }
+        _sceneTitleBars[win.id] = (key, tex)
+        return tex
+        #else
+        return nil
+        #endif
+    }
 
     // MARK: The way out
 
