@@ -704,6 +704,19 @@ extension _DesktopShellState {
         return true
     }
 
+    /// Whether a window is further off than reading distance — past 1.3x
+    /// the 1:1 spot — so that a click on it means "take me there" rather
+    /// than a click on its content.
+    func _desktop3DFarFromPane(_ win: WindowInfo) -> Bool {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        guard win.pose3D.placed else { return false }
+        let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
+        let c = _camera3D, p = win.pose3D
+        let dx = p.x - c.x, dz = p.z - c.z
+        return (dx * dx + dz * dz).squareRoot() > d1 * 1.3
+    }
+
     /// Stand square in front of one window at its 1:1 distance, and give
     /// it the focus. In the orrery this is also what a click on a moon
     /// does: the moon grows to a window and the viewer steps up to it.

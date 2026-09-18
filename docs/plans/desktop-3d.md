@@ -35,7 +35,11 @@ touching anything.
   — **a Minecraft-style city**, generated in ten seconds by
   `build/tools/voxel-world.py`, walked on foot at eye height, the open
   windows standing round the square facing in with nameplates over
-  them, no dock or status bar. The city is the direction. Since Phase
+  them, no dock or status bar. A window clicked from across the square
+  is walked up to (one at reading distance takes the click as a click;
+  the first person to play clicked Terminal from 17 m and nothing
+  happened, because that was wired for the orrery only). The city is
+  the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
   shopfronts facing the square under awnings and signs, roof tanks and
   aerials, crosswalks and lamp posts — and **the window frames are

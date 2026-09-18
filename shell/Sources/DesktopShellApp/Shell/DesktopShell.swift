@@ -4687,9 +4687,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             _layerKeyboardSurface = nil
                         }
                         // A moon that is clicked grows into its window and
-                        // the viewer steps up to it.
-                        if _desktop3DOrrery && _desktop3DT >= 1,
-                           let win = windowManager.windows.first(where: { $0.id == winId }) {
+                        // the viewer steps up to it; in the city, a window
+                        // clicked from across the square is walked up to
+                        // (one already at reading distance takes the click
+                        // as a click).
+                        if _desktop3DT >= 1,
+                           let win = windowManager.windows.first(where: { $0.id == winId }),
+                           _desktop3DOrrery || (_desktop3DVoxel && _desktop3DFarFromPane(win)) {
                             _desktop3DStepUp(to: win)
                         }
                     },
