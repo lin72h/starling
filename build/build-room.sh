@@ -24,7 +24,7 @@ mkdir -p "$OUT"
 # into byte arrays the shim includes.
 MATC="$FIL/bin/matc"
 mkdir -p "$OUT/room-mat"
-for m in screen frame; do
+for m in screen frame glow label; do
     "$MATC" -a opengl -p mobile -f header -o "$OUT/room-mat/$m.inc" "$SRC/materials/$m.mat"
 done
 

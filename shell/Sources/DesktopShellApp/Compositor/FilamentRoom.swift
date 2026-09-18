@@ -33,6 +33,99 @@ struct ScenePane: Equatable {
     var focused = false
 }
 
+/// A sphere in the scene: a planet in an app's colour, or the sun (glow > 0).
+struct SceneOrb: Equatable {
+    var id: Int64
+    var x = 0.0, y = 0.0, z = 0.0
+    var radius = 0.2
+    var r = 1.0, g = 1.0, b = 1.0
+    var glow = 0.0
+}
+
+/// A label in the scene: a shell-drawn texture on a quad that faces the viewer.
+struct SceneLabel: Equatable {
+    var id: Int64          // the engine texture id, which is also the key
+    var x = 0.0, y = 0.0, z = 0.0
+    var width = 0.3, height = 0.3
+}
+
+/// What a world is, read from its world.json. The room is the default
+/// world (a glTF lit by a captured sky); the orrery has no geometry of
+/// its own and lays the desktop out round a sun.
+struct World3D {
+    enum Kind: String { case room, orrery, voxel }
+    var kind: Kind = .room
+    /// A directional sun given by the world itself (else the room's bake).
+    var sun: (dir: [Double], colour: [Double], lux: Double)? = nil
+    /// Walking worlds: the eye above the ground, and the ring the windows
+    /// stand on round the hub.
+    var eyeHeight = 1.62
+    var ringRadius = 7.5
+    /// The ground: the y of the surface a walker stands on, per column.
+    var heightOrigin = (x: 0, z: 0)
+    var heightSize = (x: 0, z: 0)
+    var heights: [Int] = []
+
+    /// The ground height at a world position, or the hub's level.
+    func ground(_ x: Double, _ z: Double) -> Double {
+        guard heightSize.x > 0, heightSize.z > 0 else { return hub.y }
+        let ix = min(heightSize.x - 1, max(0, Int(floor(x)) - heightOrigin.x))
+        let iz = min(heightSize.z - 1, max(0, Int(floor(z)) - heightOrigin.z))
+        return Double(heights[ix * heightSize.z + iz])
+    }
+    var exposure: [Double] = [16, 1.0 / 125, 100]
+    var iblIntensity = 30000.0
+    var pointLight: (x: Double, y: Double, z: Double, r: Double, g: Double, b: Double, candela: Double)? = nil
+    var hub = (x: 0.0, y: 0.6, z: 0.0)
+    var sunRadius = 0.32
+    var planetOrbit = 2.2
+    var planetRadius = 0.22
+    var moonOrbit = 0.62
+    var moonScale = 0.12
+    var cameraRadius = 5.2
+    var cameraHeight = 1.0
+
+    static func load(_ dir: String) -> World3D {
+        var w = World3D()
+        guard let d = try? Data(contentsOf: URL(fileURLWithPath: dir + "/world.json")),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return w }
+        if let k = j["kind"] as? String, let kind = Kind(rawValue: k) { w.kind = kind }
+        if let e = j["exposure"] as? [Double], e.count == 3 { w.exposure = e }
+        if let i = j["ibl_intensity"] as? Double { w.iblIntensity = i }
+        if let p = j["point_light"] as? [String: Any],
+           let pos = p["position"] as? [Double], pos.count == 3,
+           let col = p["colour"] as? [Double], col.count == 3,
+           let cd = p["candela"] as? Double {
+            w.pointLight = (pos[0], pos[1], pos[2], col[0], col[1], col[2], cd)
+        }
+        if let h = j["hub"] as? [Double], h.count == 3 { w.hub = (h[0], h[1], h[2]) }
+        if let v = j["sun_radius"] as? Double { w.sunRadius = v }
+        if let v = j["planet_orbit"] as? Double { w.planetOrbit = v }
+        if let v = j["planet_radius"] as? Double { w.planetRadius = v }
+        if let v = j["moon_orbit"] as? Double { w.moonOrbit = v }
+        if let v = j["moon_scale"] as? Double { w.moonScale = v }
+        if let c = j["camera_home"] as? [String: Any] {
+            if let v = c["radius"] as? Double { w.cameraRadius = v }
+            if let v = c["height"] as? Double { w.cameraHeight = v }
+        }
+        if let sun = j["sun"] as? [String: Any],
+           let d = sun["dir"] as? [Double], d.count == 3,
+           let c = sun["colour"] as? [Double], c.count == 3,
+           let lux = sun["lux"] as? Double {
+            w.sun = (d, c, lux)
+        }
+        if let v = j["eye_height"] as? Double { w.eyeHeight = v }
+        if let v = j["ring_radius"] as? Double { w.ringRadius = v }
+        if let hm = j["heightmap"] as? [String: Any],
+           let o = hm["origin"] as? [Int], o.count == 2,
+           let sz = hm["size"] as? [Int], sz.count == 2,
+           let hs = hm["heights"] as? [Int], hs.count == sz[0] * sz[1] {
+            w.heightOrigin = (o[0], o[1]); w.heightSize = (sz[0], sz[1]); w.heights = hs
+        }
+        return w
+    }
+}
+
 final class FilamentRoomRenderer: EnvironmentRenderer {
 
     private typealias CreateFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> OpaquePointer?
@@ -45,6 +138,41 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     private typealias EGLGetCurrentFn = @convention(c) () -> UnsafeMutableRawPointer?
     private typealias SetPaneFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, Float, Float, Float, Float, UInt32, Int32, Int32, Int32, Int32) -> Int32
     private typealias RemovePaneFn = @convention(c) (OpaquePointer?, Int64) -> Void
+    private typealias SetPointLightFn = @convention(c) (OpaquePointer?, UnsafePointer<Float>?, UnsafePointer<Float>?, Float) -> Void
+    private typealias SetOrbFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, UnsafePointer<Float>?, Float) -> Int32
+    private typealias RemoveIdFn = @convention(c) (OpaquePointer?, Int64) -> Void
+    private typealias SetLabelFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, UInt32, Int32, Int32) -> Int32
+
+    /// The world this renderer shows, from its directory's world.json.
+    let world: World3D
+
+    private var _orbs: [SceneOrb] = []
+    private var _labels: [SceneLabel] = []
+    private var knownOrbs = Set<Int64>()
+    private var knownLabels = Set<Int64>()
+    private var fnSetPointLight: SetPointLightFn!
+    private var fnSetOrb: SetOrbFn!
+    private var fnRemoveOrb: RemoveIdFn!
+    private var fnSetLabel: SetLabelFn!
+    private var fnRemoveLabel: RemoveIdFn!
+
+    func setOrbs(_ orbs: [SceneOrb]) -> Bool {
+        paneLock.lock()
+        defer { paneLock.unlock() }
+        if orbs == _orbs { return false }
+        _orbs = orbs
+        dirty = true
+        return true
+    }
+
+    func setLabels(_ labels: [SceneLabel]) -> Bool {
+        paneLock.lock()
+        defer { paneLock.unlock() }
+        if labels == _labels { return false }
+        _labels = labels
+        dirty = true
+        return true
+    }
 
     /// The client texture behind an engine texture id, on the raster
     /// thread (LinuxTextureRegistry.sceneTexture).
@@ -82,6 +210,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
 
     init(width: Int, height: Int, roomDir: String) {
         self.roomDir = roomDir
+        self.world = World3D.load(roomDir)
         super.init(width: width, height: height)
     }
 
@@ -109,7 +238,31 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
         var view = Self.view(cam)
         fnSetCamera(room, &view, &proj, 0.08, 4000)
         syncPanes()
+        syncOrbsAndLabels()
         _ = fnRender(room)
+    }
+
+    private func syncOrbsAndLabels() {
+        paneLock.lock()
+        let orbs = _orbs, labels = _labels
+        paneLock.unlock()
+        var live = Set<Int64>()
+        for o in orbs {
+            var c: [Float] = [Float(o.x), Float(o.y), Float(o.z)]
+            var col: [Float] = [Float(o.r), Float(o.g), Float(o.b)]
+            if fnSetOrb(room, o.id, &c, Float(o.radius), &col, Float(o.glow)) == 0 { live.insert(o.id) }
+        }
+        for id in knownOrbs.subtracting(live) { fnRemoveOrb(room, id) }
+        knownOrbs = live
+        var liveLabels = Set<Int64>()
+        for l in labels {
+            guard let tex = sceneTexture?(l.id), tex.name != 0 else { continue }
+            var c: [Float] = [Float(l.x), Float(l.y), Float(l.z)]
+            if fnSetLabel(room, l.id, &c, Float(l.width), Float(l.height),
+                          tex.name, Int32(tex.width), Int32(tex.height)) == 0 { liveLabels.insert(l.id) }
+        }
+        for id in knownLabels.subtracting(liveLabels) { fnRemoveLabel(room, id) }
+        knownLabels = liveLabels
     }
 
     /// Hand every published pane to the scene with its client texture as
@@ -179,15 +332,24 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
               let setCamera = sym("sr_room_set_camera", SetCameraFn.self),
               let render = sym("sr_room_render", RenderFn.self),
               let setPane = sym("sr_room_set_pane", SetPaneFn.self),
-              let removePane = sym("sr_room_remove_pane", RemovePaneFn.self) else { return false }
+              let removePane = sym("sr_room_remove_pane", RemovePaneFn.self),
+              let setPointLight = sym("sr_room_set_point_light", SetPointLightFn.self),
+              let setOrb = sym("sr_room_set_orb", SetOrbFn.self),
+              let removeOrb = sym("sr_room_remove_orb", RemoveIdFn.self),
+              let setLabel = sym("sr_room_set_label", SetLabelFn.self),
+              let removeLabel = sym("sr_room_remove_label", RemoveIdFn.self) else { return false }
         fnLoad = load; fnSetLight = setLight; fnSetExposure = setExposure
         fnSetOutput = setOutput; fnSetCamera = setCamera; fnRender = render
         fnSetPane = setPane; fnRemovePane = removePane
+        fnSetPointLight = setPointLight; fnSetOrb = setOrb; fnRemoveOrb = removeOrb
+        fnSetLabel = setLabel; fnRemoveLabel = removeLabel
 
         guard let r = create(display, context) else { return false }
         room = r
-        let rc = fnLoad(r, roomDir + "/room.glb", roomDir + "/room_ibl.ktx",
-                        roomDir + "/room_skybox.ktx")
+        // A world with geometry loads its glTF; one without (the orrery)
+        // loads only its sky.
+        let glb = FileManager.default.fileExists(atPath: roomDir + "/room.glb") ? roomDir + "/room.glb" : ""
+        let rc = fnLoad(r, glb, roomDir + "/room_ibl.ktx", roomDir + "/room_skybox.ktx")
         guard rc == 0 else {
             FileHandle.standardError.write(Data("[room] load failed (\(rc)) from \(roomDir)\n".utf8))
             return false
@@ -206,13 +368,25 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
                 sunCol = c.map { Float($0 / m) }
             }
         }
-        let sunLux = Float(env["STARLING_ROOM_SUN_LUX"] ?? "") ?? 100000
-        let iblLux = Float(env["STARLING_ROOM_IBL_LUX"] ?? "") ?? 30000
+        var sunLux = Float(env["STARLING_ROOM_SUN_LUX"] ?? "") ?? (world.kind == .room ? 100000 : 0)
+        if let ws = world.sun {
+            sunDir = ws.dir.map { Float($0) }
+            sunCol = ws.colour.map { Float($0) }
+            if env["STARLING_ROOM_SUN_LUX"] == nil { sunLux = Float(ws.lux) }
+        }
+        let iblLux = Float(env["STARLING_ROOM_IBL_LUX"] ?? "") ?? Float(world.iblIntensity)
         fnSetLight(r, sunDir, sunCol, sunLux, iblLux)
+        if let pl = world.pointLight {
+            var pos: [Float] = [Float(pl.x), Float(pl.y), Float(pl.z)]
+            var col: [Float] = [Float(pl.r), Float(pl.g), Float(pl.b)]
+            fnSetPointLight(r, &pos, &col, Float(pl.candela))
+        }
+        var exposure = world.exposure.map { Float($0) }
         if let e = env["STARLING_ROOM_EXPOSURE"] {
             let p = e.split(separator: ",").compactMap { Float($0) }
-            if p.count == 3 { fnSetExposure(r, p[0], p[1], p[2]) }
+            if p.count == 3 { exposure = p }
         }
+        if exposure.count == 3 { fnSetExposure(r, exposure[0], exposure[1], exposure[2]) }
         return true
     }
 }

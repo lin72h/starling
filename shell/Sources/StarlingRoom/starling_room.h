@@ -77,6 +77,24 @@ SR_EXPORT void sr_room_remove_pane(sr_room*, int64_t id);
 /// How bright a white pixel of a pane is, in the room's light units.
 SR_EXPORT void sr_room_set_screen_intensity(sr_room*, float intensity);
 
+/// A light at a point in the room — the orrery's sun. Candela; colour
+/// linear RGB. Calling again moves it; candela <= 0 removes it.
+SR_EXPORT void sr_room_set_point_light(sr_room*, const float pos[3], const float colour[3],
+                                       float candela);
+
+/// A sphere: a planet (lit, in the app's colour) or, with `glow` > 0,
+/// something that shines by itself at that intensity (the sun).
+SR_EXPORT int sr_room_set_orb(sr_room*, int64_t id, const float centre[3], float radius,
+                              const float colour[3], float glow);
+SR_EXPORT void sr_room_remove_orb(sr_room*, int64_t id);
+
+/// A label: a texture with alpha on a quad `width` x `height` metres that
+/// always faces the viewer, centred on `centre`.
+SR_EXPORT int sr_room_set_label(sr_room*, int64_t id, const float centre[3],
+                                float width, float height,
+                                uint32_t gl_texture, int tex_w, int tex_h);
+SR_EXPORT void sr_room_remove_label(sr_room*, int64_t id);
+
 SR_EXPORT void sr_room_destroy(sr_room*);
 
 #ifdef __cplusplus

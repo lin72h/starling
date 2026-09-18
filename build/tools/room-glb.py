@@ -286,10 +286,23 @@ def furniture_material(glb, g, mat_index, cache):
     return cache[key]
 
 
+# The room as Filament shows it differs from the bake in one placement:
+# the big plant stands in front of the right wall's first pane slot, so a
+# window hung there is partly behind it — the occlusion a real scene
+# gives for nothing, on show. The bake keeps its arrangement (it does not
+# hang windows) until it is retired.
+PLACEMENT_OVERRIDES = {
+    # (x, z, scale): a floor plant taller than eye level, or from the door
+    # its top projects below the pane's bottom edge and nothing overlaps.
+    ("potted_plant_04", 3.25, 8.35): (3.3, 2.5, 5.5),
+}
+
+
 def export_furniture(glb, ri, assets_dir):
     meshes, gltfs, mats = {}, {}, {}
     verts = tris = 0
     for name, x, z, deg, y, sc in ri.PLACEMENT:
+        x, z, sc = PLACEMENT_OVERRIDES.get((name, x, z), (x, z, sc))
         if name not in meshes:
             found = glob.glob(os.path.join(assets_dir, name, "*.gltf"))
             if not found:

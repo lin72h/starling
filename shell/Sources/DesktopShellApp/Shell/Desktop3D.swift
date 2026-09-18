@@ -4,6 +4,7 @@
 import Flutter
 import FlutterSwiftBridge
 import Foundation
+import StarlingRegistry
 
 // MARK: - The 3D desktop (docs/plans/desktop-3d.md)
 //
@@ -45,6 +46,9 @@ struct WindowPose3D: Equatable {
     var z = 0.0
     /// Radians about the world's y axis. 0 faces +z, down the hall.
     var yaw = 0.0
+    /// How big the pane is against its 1:1 size: 1 on a wall, a fraction
+    /// as a moon in the orrery, and back to 1 when it is picked up.
+    var scale = 1.0
     /// False until the window has been given a place in the room; the
     /// first entry into 3D lays every window out and sets it.
     var placed = false
@@ -143,6 +147,39 @@ extension _DesktopShellState {
         #endif
     }
 
+    /// The world the renderer is showing (nil before it exists, or for
+    /// the GL room, which is always the room).
+    var _desktop3DWorld: World3D? {
+        #if os(Linux)
+        return (_environment as? FilamentRoomRenderer)?.world
+        #else
+        return nil
+        #endif
+    }
+    var _desktop3DOrrery: Bool { _desktop3DWorld?.kind == .orrery }
+    /// A world walked on the ground with the windows standing round a
+    /// square (the voxel city).
+    var _desktop3DVoxel: Bool { _desktop3DWorld?.kind == .voxel }
+    /// Out in a world there is no desktop chrome: no dock, no status bar.
+    var _desktop3DChromeless: Bool { _desktop3DT > 0 && (_desktop3DOrrery || _desktop3DVoxel) }
+
+    /// The orrery's tilt: the ring of planets is a disc tipped toward the
+    /// viewer, as an orrery on a stand is, so from eye level it reads as
+    /// an ellipse and not a line of beads.
+    static let k3DOrreryTilt = 20.0 * Double.pi / 180
+
+    /// A point on a tilted ring round the hub: `phi` runs round the ring,
+    /// with phi = pi/2 nearest the home viewer (+z).
+    func _desktop3DRingPoint(_ w: World3D, radius: Double, phi: Double,
+                             about centre: (x: Double, y: Double, z: Double)? = nil)
+        -> (x: Double, y: Double, z: Double) {
+        let c = centre ?? w.hub
+        let a = Self.k3DOrreryTilt
+        return (c.x + radius * cos(phi),
+                c.y - radius * sin(phi) * sin(a),
+                c.z + radius * sin(phi) * cos(a))
+    }
+
     /// Where windows hang when the room draws them: on the side walls,
     /// alternately left and right, from the far end (in view from the
     /// door) toward the viewer. Centre height, first slot's z and the
@@ -168,7 +205,24 @@ extension _DesktopShellState {
     /// Where the viewer stands when the room opens: back in the room with
     /// the windows ahead, at eye height.
     func _desktop3DHomeCamera(_ host: Rect) -> Camera3D {
-        Camera3D(x: 0, y: Self.k3DEyeHeight, z: Self.k3DHomeZ, yaw: 0, pitch: 0)
+        if let w = _desktop3DWorld, w.kind == .orrery {
+            return Camera3D(x: w.hub.x, y: w.hub.y + w.cameraHeight,
+                            z: w.hub.z + w.cameraRadius, yaw: 0, pitch: 0)
+        }
+        if let w = _desktop3DWorld, w.kind == .voxel {
+            let z = w.hub.z + w.cameraRadius
+            return Camera3D(x: w.hub.x, y: w.ground(w.hub.x, z) + w.eyeHeight,
+                            z: z, yaw: 0, pitch: 0)
+        }
+        return Camera3D(x: 0, y: Self.k3DEyeHeight, z: Self.k3DHomeZ, yaw: 0, pitch: 0)
+    }
+
+    /// The camera the orbit state describes: on a circle round the hub at
+    /// `theta`, looking at the hub.
+    func _desktop3DOrbitCamera(_ o: (theta: Double, radius: Double, height: Double)) -> Camera3D {
+        let w = _desktop3DWorld ?? World3D()
+        return Camera3D(x: w.hub.x + o.radius * sin(o.theta), y: w.hub.y + o.height,
+                        z: w.hub.z + o.radius * cos(o.theta), yaw: -o.theta, pitch: 0)
     }
 
     /// Where a window hangs when it is simply showing its 2D rect: the
@@ -466,7 +520,7 @@ extension _DesktopShellState {
         m.multiply(Self._view(camera))
         m.multiply(Matrix4.translationValues(p.x, p.y, p.z))
         m.multiply(Matrix4.rotationY(p.yaw))
-        m.multiply(Matrix4.diagonal3Values(s, -s, s))
+        m.multiply(Matrix4.diagonal3Values(s * p.scale, -s * p.scale, s * p.scale))
         m.multiply(Matrix4.translationValues(-wcx, -wcy, 0))
 
         // Near plane, on the four corners. Either the whole pane is in
@@ -491,6 +545,7 @@ extension _DesktopShellState {
             y: flat.y + (target.y - flat.y) * t,
             z: flat.z + (target.z - flat.z) * t,
             yaw: flat.yaw + (target.yaw - flat.yaw) * t,
+            scale: 1 + (target.scale - 1) * t,
             placed: true)
     }
 
@@ -527,6 +582,28 @@ extension _DesktopShellState {
         var c = _camera3D
         let step = Self.k3DStep * (fast ? 2.5 : 1)
         let turn = Self.k3DTurn * (fast ? 2.5 : 1)
+        if _desktop3DOrrery, let w = _desktop3DWorld {
+            // Round the hub, not through it: the keys move the viewer on
+            // a circle about the sun, always facing it.
+            var o = _orbit3D ?? (theta: 0.0, radius: w.cameraRadius, height: w.cameraHeight)
+            switch usage {
+            case 0x50, 0x14, 0x04: o.theta -= turn                        // Left, Q, A
+            case 0x4F, 0x08, 0x07: o.theta += turn                        // Right, E, D
+            case 0x1A, 0x52:       o.radius -= step                       // W, Up: closer
+            case 0x16, 0x51:       o.radius += step                       // S, Down: away
+            case 0x15:             o.height += step                       // R
+            case 0x09:             o.height -= step                       // F
+            case 0x4A:             o = (0, w.cameraRadius, w.cameraHeight) // Home
+            case 0x2C:             return _desktop3DStepUp()              // Space
+            default:               return false
+            }
+            o.radius = min(14, max(1.0, o.radius))
+            o.height = min(4, max(-2, o.height))
+            _orbit3D = o
+            setState { _camera3D = _desktop3DOrbitCamera(o) }
+            _desktop3DPublishCamera()
+            return true
+        }
         // Forward is where the camera is looking, flattened: walking, not
         // flying, unless the rise/sink keys are used.
         let fx = sin(c.yaw), fz = -cos(c.yaw)
@@ -546,12 +623,22 @@ extension _DesktopShellState {
         default:         return false
         }
         _desktop3DLog("key \(usage) -> \(c.x),\(c.z) yaw \(c.yaw)")
-        // Stay inside the room, and out of the walls.
-        let m = 0.45
-        c.x = min(Room3D.halfW - m, max(-Room3D.halfW + m, c.x))
-        c.y = min(Room3D.height - 0.3, max(0.5, c.y))
-        c.z = min(Room3D.depth - m, max(m, c.z))
-        c.pitch = min(1.2, max(-1.2, c.pitch))
+        if let w = _desktop3DWorld, w.kind == .voxel {
+            // On foot: the eye rides the ground, and the world has edges.
+            let x0 = Double(w.heightOrigin.x) + 1, x1 = Double(w.heightOrigin.x + w.heightSize.x) - 1
+            let z0 = Double(w.heightOrigin.z) + 1, z1 = Double(w.heightOrigin.z + w.heightSize.z) - 1
+            c.x = min(x1, max(x0, c.x))
+            c.z = min(z1, max(z0, c.z))
+            c.y = w.ground(c.x, c.z) + w.eyeHeight
+            c.pitch = min(1.2, max(-1.2, c.pitch))
+        } else {
+            // Stay inside the room, and out of the walls.
+            let m = 0.45
+            c.x = min(Room3D.halfW - m, max(-Room3D.halfW + m, c.x))
+            c.y = min(Room3D.height - 0.3, max(0.5, c.y))
+            c.z = min(Room3D.depth - m, max(m, c.z))
+            c.pitch = min(1.2, max(-1.2, c.pitch))
+        }
         setState { _camera3D = c }
         _desktop3DPublishCamera()
         return true
@@ -583,6 +670,16 @@ extension _DesktopShellState {
                       + "\(windowManager.visibleWindows.filter { $0.pose3D.placed }.count) placed, "
                       + "best \(best?.0.title ?? "none")")
         guard let winner = best?.0 else { return false }
+        _desktop3DStepUp(to: winner)
+        return true
+    }
+
+    /// Stand square in front of one window at its 1:1 distance, and give
+    /// it the focus. In the orrery this is also what a click on a moon
+    /// does: the moon grows to a window and the viewer steps up to it.
+    func _desktop3DStepUp(to winner: WindowInfo) {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         let p = winner.pose3D
         let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
         setState {
@@ -599,7 +696,6 @@ extension _DesktopShellState {
             windowManager.bringToFront(winner.id)
         }
         _desktop3DPublishCamera()
-        return true
     }
 
     // MARK: The light
@@ -759,12 +855,20 @@ extension _DesktopShellState {
     /// Enter or leave, animated (600 ms) unless told otherwise. The choice
     /// persists like tiling and appearance.
     func _setDesktop3D(_ on: Bool, animated: Bool = true) {
+        _desktop3DLog("set on=\(on) animated=\(animated) was on=\(_desktop3DOn) t=\(_desktop3DT) chromeless=\(_desktop3DChromeless)")
         if on == _desktop3DOn, animated { return }
         _desktop3DOn = on
         _desktop3DPersist()
         if on {
             // Start from the one spot where the room looks like the flat
-            // desktop, and give every window a place in the hall.
+            // desktop, and give every window a place in the hall. The room
+            // renderer has to exist FIRST: which layout the windows get
+            // (the arc, or the walls of the Filament room) is decided by
+            // which renderer is there, and on the first entry of a session
+            // there was none yet — every window went to the arc, placed
+            // for good, and the walls stayed bare.
+            _ = _ensureEnvironment()
+            _orbit3D = nil
             _camera3D = _desktop3DHomeCamera(displayLayout?.host.logicalRect
                 ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
             _desktop3DPlaceWindows()
@@ -797,6 +901,12 @@ extension _DesktopShellState {
                     deadline: .now() + .milliseconds(120),
                     execute: unsafeBitCast(work, to: (@Sendable () -> Void).self))
             }
+            // A session that comes up with 3D already on (the preference)
+            // reaches here at t = 1 with a fresh controller sitting at 0,
+            // and a reverse from 0 is a no-op: the scene never came down,
+            // and with the orrery's chrome hidden the dock never came
+            // back. Start the controller where the tween actually is.
+            c.value = _desktop3DT
             _desktop3DController = c
             _desktop3DCurve = curve
         }
@@ -862,12 +972,13 @@ extension _DesktopShellState {
         for win in windowManager.visibleWindows where !win.isFullscreen {
             guard let texId = win.textureId, win.rect.height > titleH else { continue }
             let p = _desktop3DLerpPose(rect: win.rect, host: host, t: t, pose: win.pose3D)
+            let k = s * p.scale
             specs.append(ScenePane(
                 id: Int64(texId), x: p.x, y: p.y, z: p.z, yaw: p.yaw,
-                width: win.rect.width * s, height: win.rect.height * s,
-                contentDy: -titleH / 2 * s,
-                contentWidth: win.rect.width * s,
-                contentHeight: (win.rect.height - titleH) * s,
+                width: win.rect.width * k, height: win.rect.height * k,
+                contentDy: -titleH / 2 * k,
+                contentWidth: win.rect.width * k,
+                contentHeight: (win.rect.height - titleH) * k,
                 // Filament's materials take texture row 0 as the TOP (its
                 // default flipUV), the opposite of the engine's external
                 // textures — so a buffer the widget flips, the pane does not.
@@ -878,6 +989,156 @@ extension _DesktopShellState {
             registry.setSceneMirror(ids: Set(specs.map { $0.id }), target: environmentTextureId)
             registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId)
         }
+        #endif
+    }
+
+    // MARK: The orrery
+
+    /// Lay the desktop out round the sun: one planet per open app on a
+    /// tilted ring, its windows as moons round it, each moon a small pane
+    /// that grows to full size when it has the focus. Recomputed every
+    /// build — nothing here is arranged by hand, so the layout is a pure
+    /// function of what is open — and handed to the renderer with the
+    /// orbs and the labels.
+    func _desktop3DLayoutOrrery() {
+        #if os(Linux)
+        guard let env = _environment as? FilamentRoomRenderer, env.world.kind == .orrery,
+              let registry = drmTextureRegistry, let wl = waylandIntegration,
+              environmentTextureId >= 0 else { return }
+        let w = env.world
+        let windows = windowManager.visibleWindows.filter { !$0.isFullscreen }
+        let apps = Array(Set(windows.map { $0.appId })).sorted()
+        var orbs: [SceneOrb] = [
+            SceneOrb(id: 1, x: w.hub.x, y: w.hub.y, z: w.hub.z, radius: w.sunRadius,
+                     r: 1.0, g: 0.80, b: 0.45, glow: 3.0),
+        ]
+        var labels: [SceneLabel] = []
+        for (i, appId) in apps.enumerated() {
+            let phi = Double.pi / 2 - 2 * Double.pi * Double(i) / Double(max(apps.count, 1))
+            let planet = _desktop3DRingPoint(w, radius: w.planetOrbit, phi: phi)
+            let rec = AppRegistry.shared.installedApps.first { $0.id == appId }
+            let colour = rec.map { Color(Int($0.color) | 0xFF00_0000) } ?? Color(0xFF6B7280)
+            orbs.append(SceneOrb(id: 100 + Int64(i), x: planet.x, y: planet.y, z: planet.z,
+                                 radius: w.planetRadius,
+                                 r: colour.r, g: colour.g, b: colour.b, glow: 0))
+            if let tex = _desktop3DAppLabelTexture(appId) {
+                labels.append(SceneLabel(id: tex, x: planet.x, y: planet.y + w.planetRadius + 0.26,
+                                         z: planet.z, width: 0.40, height: 0.47))
+            }
+            let moons = windows.filter { $0.appId == appId }.sorted { $0.id < $1.id }
+            for (j, win) in moons.enumerated() {
+                let psi = phi + 2 * Double.pi * Double(j) / Double(max(moons.count, 1))
+                let m = _desktop3DRingPoint(w, radius: w.moonOrbit, phi: psi, about: planet)
+                let focused = win.id == windowManager.focusedWindowId
+                // A moon faces out from its planet; the one being used
+                // turns to the viewer, who has stepped up to it.
+                let cam = _camera3D
+                let yaw = focused ? atan2(cam.x - m.x, cam.z - m.z)
+                                  : atan2(m.x - planet.x, m.z - planet.z)
+                let pose = WindowPose3D(x: m.x, y: m.y, z: m.z, yaw: yaw,
+                                        scale: focused ? 1.0 : w.moonScale, placed: true)
+                if win.pose3D != pose { win.pose3D = pose }
+            }
+        }
+        var changed = env.setOrbs(orbs)
+        if env.setLabels(labels) { changed = true }
+        if changed { registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId) }
+        #endif
+    }
+
+    /// The square: every open window stands in a ring round the hub at
+    /// ground level, facing outward, grouped by app, with the app's
+    /// nameplate floating over its group. Recomputed every build, like
+    /// the orrery.
+    func _desktop3DLayoutVoxel() {
+        #if os(Linux)
+        guard let env = _environment as? FilamentRoomRenderer, env.world.kind == .voxel,
+              let registry = drmTextureRegistry, let wl = waylandIntegration,
+              environmentTextureId >= 0 else { return }
+        let w = env.world
+        let s = Self.k3DMetresPerPx
+        let windows = windowManager.visibleWindows.filter { !$0.isFullscreen }
+        let apps = Array(Set(windows.map { $0.appId })).sorted()
+        let ordered = apps.flatMap { app in windows.filter { $0.appId == app }.sorted { $0.id < $1.id } }
+        let n = max(ordered.count, 1)
+        var labels: [SceneLabel] = []
+        var groups: [String: [(x: Double, y: Double, z: Double, top: Double)]] = [:]
+        // Across the square from the door: the windows stand on an arc
+        // round the far side of the ring, facing in, so a viewer coming
+        // in from +z sees every one of them front-on over the fountain
+        // and walks up to whichever they want. One window stands dead
+        // ahead; more spread out to either side, up to a 200° arc.
+        let spread = min(200.0, 60.0 * Double(max(n - 1, 0))) * Double.pi / 180
+        for (i, win) in ordered.enumerated() {
+            let f = n == 1 ? 0.0 : Double(i) / Double(n - 1) - 0.5
+            let phi = -Double.pi / 2 + f * spread
+            let x = w.hub.x + w.ringRadius * cos(phi)
+            let z = w.hub.z + w.ringRadius * sin(phi)
+            let h = win.rect.height * s
+            let y = w.ground(x, z) + h / 2 + 0.05
+            // Facing the hub.
+            let yaw = atan2(w.hub.x - x, w.hub.z - z)
+            let pose = WindowPose3D(x: x, y: y, z: z, yaw: yaw, scale: 1, placed: true)
+            if win.pose3D != pose { win.pose3D = pose }
+            groups[win.appId, default: []].append((x, y, z, y + h / 2))
+        }
+        for (app, ps) in groups {
+            guard let tex = _desktop3DAppLabelTexture(app) else { continue }
+            let cx = ps.map { $0.x }.reduce(0, +) / Double(ps.count)
+            let cz = ps.map { $0.z }.reduce(0, +) / Double(ps.count)
+            let top = ps.map { $0.top }.max() ?? 0
+            // Read from across the square: a metre wide.
+            labels.append(SceneLabel(id: tex, x: cx, y: top + 0.7, z: cz, width: 1.0, height: 1.17))
+        }
+        var changed = env.setOrbs([])
+        if env.setLabels(labels.sorted { $0.id < $1.id }) { changed = true }
+        if changed { registry.markGLTextureDirty(engine: wl.engine, id: environmentTextureId) }
+        #endif
+    }
+
+    /// An app's label for the scene — its tile (colour and glyph) with its
+    /// name under it — drawn once into a texture the renderer can hang on
+    /// a billboard. Cached per app for the life of the shell.
+    func _desktop3DAppLabelTexture(_ appId: String) -> Int64? {
+        #if os(Linux)
+        if let id = _appLabelTextures[appId] { return id }
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let rec = AppRegistry.shared.installedApps.first { $0.id == appId }
+        let title = rec?.name ?? appId
+        let bg = rec.map { Color(Int($0.color) | 0xFF00_0000) } ?? Color(0xFF3A3F4B)
+        let w = 256, h = 300
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        let tile = Rect.fromLTWH(48, 8, 160, 160)
+        let paint = Paint()
+        paint.color = bg
+        canvas.drawRRect(RRect(left: tile.left, top: tile.top, right: tile.right, bottom: tile.bottom,
+                               tlRadiusX: 36, tlRadiusY: 36, trRadiusX: 36, trRadiusY: 36,
+                               brRadiusX: 36, brRadiusY: 36, blRadiusX: 36, blRadiusY: 36), paint)
+        canvas.save()
+        canvas.translate(tile.left + 32, tile.top + 32)
+        IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(96, 96))
+        canvas.restore()
+        let pb = NativeParagraphBuilder(ParagraphStyle(textAlign: .center, fontSize: 30,
+                                                       fontWeight: .w600))
+        pb.pushStyle(TextStyle(color: Color(0xFFFFFFFF), fontWeight: .w600, fontSize: 30))
+        pb.addText(title)
+        let para = pb.build()
+        para.layout(ParagraphConstraints(width: Double(w)))
+        canvas.drawParagraph(para, Offset(0, 192))
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: w, height: h) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        let id = registry.registerTexture(engine: wl.engine)
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: id, data: raw.baseAddress!,
+                                     width: w, height: h)
+        }
+        _appLabelTextures[appId] = id
+        return id
+        #else
+        return nil
         #endif
     }
 
@@ -1010,6 +1271,7 @@ extension _DesktopShellState {
         #if os(Linux)
         guard environmentTextureId >= 0, let registry = drmTextureRegistry,
               let wl = waylandIntegration else { return }
+        _desktop3DLog("release environment t=\(_desktop3DT)")
         _sceneTicker?.stop()
         registry.setSceneMirror(ids: [], target: -1)
         registry.unregisterTexture(engine: wl.engine, id: environmentTextureId)
@@ -1057,6 +1319,8 @@ extension _DesktopShellState {
     /// only bites along the axis the pane actually moves on.
     func _desktop3DSlidePane(_ win: WindowInfo, du: Double, dv: Double) {
         #if os(Linux)
+        // A moon keeps its orbit, and a window on the square its place.
+        if _desktop3DOrrery || _desktop3DVoxel { return }
         var p = win.pose3D
         let s = Self.k3DMetresPerPx
         let hw = win.rect.width * s / 2, hh = win.rect.height * s / 2

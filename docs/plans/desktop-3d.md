@@ -956,12 +956,144 @@ it still reads as concrete more than paint. The sun's shadow map now
 covers 25 m in three cascades at 2048 instead of the camera's 4 km far
 plane at 1024, which is what turned every shadow edge into a staircase.
 
-**Still to do:** occlusion by furniture is free now but nothing stands
-in front of a wall; the 1:1 step-up distance is derived from the LOGICAL
+**Entering and leaving (same day).** The GL room unfolds out of the
+wallpaper geometrically; the Filament room has no picture wall to unfold
+from, so it comes up THROUGH the wallpaper: through the 600 ms tween the
+slot shows the flat wallpaper with the room over it at opacity `t`,
+while the windows lift off the desktop to their walls exactly as before.
+The widgets keep painting their content until t = 1 and only then hand
+the picture to the pane beneath — so nothing dips — and the reverse on
+the way out. The functional check's contract holds: t = 0 is the plain
+wallpaper. Recorded with `shell-drive record-start/stop` and read as a
+contact sheet (`ffmpeg … tile=5x3`), since a screenshot cannot catch a
+600 ms fade.
+
+**The first entry put every window on the arc.** `_setDesktop3D` laid
+the windows out before it created the room renderer, and the layout
+picks the arc or the walls by which renderer exists — on a session's
+first entry there was none, so every window went to the arc, placed for
+good. Earlier runs had the renderer alive from a previous toggle and
+never showed it. The renderer is created first now.
+
+**Occlusion, on show.** The big floor plant stands in front of the right
+wall's first slot (`PLACEMENT_OVERRIDES` in the exporter — the bake keeps
+its arrangement), scaled so its top is above eye level: from the door a
+plant shorter than the viewer projects BELOW the pane's bottom edge and
+overlaps nothing. The Terminal pane's lower half is behind the leaves,
+which the layer tree could never have drawn.
+
+**Still to do:** the 1:1 step-up distance is derived from the LOGICAL
 width (1.74 m), which the arc layout shares; the pane's rounded corners
 vs the slab's square ones; per-frame cost while a video plays in a pane
 (every client frame is a room frame, 4–13 ms); a lighter wall texture
 (`beige_wall_001` is the most-downloaded painted wall).
+
+### Phase 9 — worlds, and the first one that is not a room: the orrery (2026-09-17)
+
+The room is one world. A world is a directory: a sky baked by cmgen, an
+optional glTF, and a `world.json` that says what kind it is and where its
+hub is. `STARLING_ROOM_DIR` picks it; the renderer reads the kind and the
+shell lays the desktop out to suit. The **orrery** is the first world
+with no geometry of its own: open apps are planets round a sun, each
+app's windows are moons round its planet, and there is no dock and no
+status bar — only the sky.
+
+```
+  build/tools/orrery-world.py     a procedural star field (.hdr) -> cmgen -> the
+                                  two cubemaps, plus world.json
+  world.json                      kind, exposure, ibl_intensity, point_light,
+                                  hub, sun/planet/moon radii, camera_home
+  sr_room_set_orb / _label /      spheres (lit, or glowing for the sun), billboard
+  _point_light                    labels that turn to the viewer, a light at the hub
+  Desktop3D._desktop3DLayoutOrrery   the layout, recomputed every build
+  Desktop3D._desktop3DAppLabelTexture  the app's tile and name, drawn once into a
+                                  texture by the shell (IconPainter + a paragraph)
+```
+
+- **Planets** sit on a ring tilted 20° toward the viewer, like an orrery
+  on a stand, so that from eye level it reads as an ellipse and not a
+  line of beads. The tilt is on the ring, not the camera: the home camera
+  must look level, because the flat pose that makes t = 0 the exact
+  desktop assumes a level camera looking down −z.
+- **Moons** are the windows' own panes at `moon_scale` (0.12), facing out
+  from their planet, showing their live content in miniature. The one
+  with the focus is drawn at full size and turned to the viewer; a click
+  on a moon, or Space, steps the viewer up to it at 1:1 and it grows.
+  Clicking the sky lets it shrink back onto its orbit.
+- **Labels** are the app's dock tile and name, drawn by the shell into a
+  256×300 texture (premultiplied; the material un-premultiplies, since
+  Filament blends straight colour) and hung on a quad that wears the
+  viewer's rotation every frame.
+- **Moving**: Q/E/A/D orbit the sun, W/S move in and out, R/F rise and
+  sink, Home returns. Drag on a pane does nothing here; a moon keeps its
+  orbit.
+- **Light**: a point light at the hub (candela) and a night exposure
+  (f/2, 1/30, ISO 1600). Planets show phases. The sun is an unlit sphere
+  above 1.0 so the bloom haloes it.
+
+**Bugs this found, both older than the orrery:**
+
+- **A session that starts with 3D already on could not leave.** The
+  tween's controller is created lazily on the first animated toggle, at
+  value 0, while t is already 1 — and a reverse from 0 is a no-op. The
+  scene stayed up with `_desktop3DOn` false. In the room this passed for
+  "the leave is instant"; with the orrery's chrome hidden it meant no
+  dock ever came back and no app could be launched. The controller now
+  starts at the current t.
+- cmgen names its outputs after the DEPLOY directory, not the input
+  file (`ibl/ibl_ibl.ktx`), which the world generator learned the hard way.
+
+**Measured**: 8–10 ms a frame at 2560x1600 with three planets, their
+moons and labels; the room's cost, since the sky and the panes dominate.
+
+**Still to do:** an entering animation that suits space (the fade is
+fine, a dolly in would be better); a label that does not sit over the
+sun for the nearest planet; the moons' backs read as wood slabs — a
+thinner frame or content on both faces; drag a moon to another planet
+to move a window between apps' groups is meaningless, but drag to
+reorder planets is not; the plaza next.
+
+### Phase 10 — the voxel city (2026-09-17)
+
+The orrery did not look good, and the next ask was a Minecraft-style
+scene. A blocky world turns out to be the EASIEST kind to make look
+right here: the geometry is cubes a script can lay out, the textures are
+16×16 pixel art the same script draws, and Filament's sun and shadow
+maps on flat faces are exactly what "Minecraft with shaders" means.
+
+`build/tools/voxel-world.py` makes the whole world in ten seconds: a
+street grid (asphalt with lane lines, pavements), concrete and brick
+buildings with windows lit here and there and parapeted roofs, taller
+toward the middle, and a square with a low pool, a lamp, and four trees.
+Every visible block face is a quad with a tile from a 4×4 atlas sampled
+NEAREST (the glTF sampler says so; pixels stay pixels). One material,
+25k triangles, 1.9 MB. The sky is a gradient with a SQUARE sun, made in
+cmgen's own equirect convention; the world's `sun` in world.json drives
+the directional light so the sky's sun and the shadows agree.
+
+The shell side is the third `World3D.Kind`, `voxel`: a walking world.
+The camera rides the ground (`heightmap` in world.json: the surface y
+per column, `World3D.ground(x, z)`) at `eye_height` 1.62, and the world
+has edges instead of walls. The windows stand on an arc round the far
+side of the square, facing in, one dead ahead and the rest fanned to
+either side up to 200°, so a viewer coming in from the door sees every
+window front-on over the pool and walks up to whichever they want; the
+app's nameplate (the same shell-drawn label as the orrery, a metre wide
+here) floats over each group. No dock and no status bar, as in the
+orrery. Space and click step up as everywhere else.
+
+**Measured**: 10–12 ms a frame at 2560x1600, the same as the room.
+
+**Notes for the next world:**
+
+- Nothing tall in the middle of the square: the first fountain had a
+  three-block pillar and it hid the middle window from the door.
+- A tree at the start spot fills the view with its trunk. Trees go in
+  the corners.
+- The walking clamp is the world's own size (`heightmap.size`), not
+  `Room3D`'s constants — the room's numbers are the ROOM's.
+- The trap from the orrery holds here too: the tilt or any slant belongs
+  on the layout, never on the home camera.
 
 ### Still open
 

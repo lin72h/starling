@@ -678,6 +678,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// must never accumulate into it.
     var _lean3D: (x: Double, y: Double) = (0, 0)
     var _lean3DTarget: (x: Double, y: Double) = (0, 0)
+    /// The orrery's viewer: on a circle round the hub.
+    var _orbit3D: (theta: Double, radius: Double, height: Double)? = nil
+    /// App labels drawn for the scene, by app id.
+    var _appLabelTextures: [String: Int64] = [:]
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -3002,6 +3006,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if fullscreenWindow(onOutput: output) != nil && !_dockRevealed { return nil }
         // Same builder the host tree uses, so a secondary monitor cannot end
         // up drawing a different bar from the primary's.
+        if _desktop3DChromeless { return nil }
         return chrome.bottomBar(forOutput: output, opacity: 1)
     }
 
@@ -4438,7 +4443,19 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                _ensureEnvironment() {
                 // The room, or the wallpaper mid-unfold: the environment
                 // renderer's texture stands in the wallpaper's slot.
-                wallpaperWidget = TextureWidget(textureId: Int(environmentTextureId), filterQuality: .low)
+                let room = TextureWidget(textureId: Int(environmentTextureId), filterQuality: .low)
+                if _desktop3DScene && _desktop3DT < 1 {
+                    // The GL room unfolds out of the wallpaper geometrically;
+                    // the Filament room has no picture wall to unfold from,
+                    // so it comes up through the wallpaper as the windows
+                    // lift off it, and goes the same way.
+                    wallpaperWidget = Stack(fit: .expand, children: [
+                        TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low),
+                        Opacity(opacity: _desktop3DT, child: room),
+                    ])
+                } else {
+                    wallpaperWidget = room
+                }
             } else if wallpaperPreset == .still, wallpaperTextureId >= 0 {
                 wallpaperWidget = TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low)
             } else {
@@ -4512,7 +4529,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // The top bar, if the active style has one — it always renders above
         // windows so the clock stays visible, and fullscreen windows lay out
         // below it. nil in a style whose chrome is all on the bottom edge.
-        let topBarWidget: Widget? = chrome.topBar()
+        let topBarWidget: Widget? = _desktop3DChromeless ? nil : chrome.topBar()
 
         // Whether the topmost visible window is fullscreen — gates the
         // macOS-style auto-hide of the desktop status bar.
@@ -4563,7 +4580,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // drawn there — including everything, in a session that came up
         // with the room already open.
         if _desktop3DT > 0 {
-            _desktop3DPlaceWindows()
+            if _desktop3DOrrery { _desktop3DLayoutOrrery() }
+            else if _desktop3DVoxel { _desktop3DLayoutVoxel() }
+            else { _desktop3DPlaceWindows() }
             // When the room draws the windows itself, tell it where they
             // are before their widgets are built at the same places.
             if _desktop3DScene { _desktop3DPublishPanes() }
@@ -4627,7 +4646,11 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // there — lit, framed, occluded — and the widget's content
             // area is only what the pointer lands on. The room's own
             // light cues (haze, edges, shadow) are the renderer's too.
-            let inScene = tilted && _desktop3DScene && win.textureId != nil
+            // Only once the room is fully up: through the unfold the
+            // widget keeps painting its content, so the picture never
+            // dips while the room fades in underneath — at t = 1 the pane
+            // is exactly beneath it and the widget simply stops painting.
+            let inScene = tilted && _desktop3DScene && win.textureId != nil && _desktop3DT >= 1
             let roomLight = tilted && !inScene
                 ? _desktop3DRoomLight(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
@@ -4659,6 +4682,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         setState {
                             windowManager.bringToFront(winId)
                             _layerKeyboardSurface = nil
+                        }
+                        // A moon that is clicked grows into its window and
+                        // the viewer steps up to it.
+                        if _desktop3DOrrery && _desktop3DT >= 1,
+                           let win = windowManager.windows.first(where: { $0.id == winId }) {
+                            _desktop3DStepUp(to: win)
                         }
                     },
                     onMove: { [self] (delta: Offset) in
@@ -4796,6 +4825,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // SecondaryOutputScreen instead — there is one bottom bar, and it is
         // on the primary display.
         if dockIsOnHost,
+           !_desktop3DChromeless,
            let bar = chrome.bottomBar(forOutput: dockOutput, opacity: dockOpacity) {
             children.append(bar)
             // Whatever the bar hangs above itself — Windows' live window

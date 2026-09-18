@@ -93,6 +93,30 @@ static const uint8_t SCREEN_MAT[] = {
 static const uint8_t FRAME_MAT[] = {
 #include "frame.inc"
 };
+static const uint8_t GLOW_MAT[] = {
+#include "glow.inc"
+};
+static const uint8_t LABEL_MAT[] = {
+#include "label.inc"
+};
+
+/// A sphere in the scene: a planet, or the sun.
+struct Orb {
+    utils::Entity entity;
+    MaterialInstance* mi = nullptr;
+    bool glowing = false;
+};
+
+/// A billboard: a labelled quad turned toward the viewer every frame.
+struct Label {
+    utils::Entity entity;
+    MaterialInstance* mi = nullptr;
+    Texture* texture = nullptr;
+    uint32_t glName = 0;
+    int texW = 0, texH = 0;
+    float3 centre{};
+    float width = 0, height = 0;
+};
 
 /// One window in the room: the client's picture on a quad, in a slab.
 struct Pane {
@@ -144,6 +168,21 @@ struct sr_room {
     // a little over half of that.
     float screenIntensity = 0.6f;
     std::unordered_map<int64_t, Pane> panes;
+
+    // Orbs and labels (the orrery), and the light at its hub.
+    VertexBuffer* sphereVb = nullptr;
+    IndexBuffer* sphereIb = nullptr;
+    int sphereIndexCount = 0;
+    std::vector<float> sphereVerts;
+    std::vector<float4> sphereTangents;
+    std::vector<uint16_t> sphereIdx;
+    Material* glowMat = nullptr;
+    Material* labelMat = nullptr;
+    std::unordered_map<int64_t, Orb> orbs;
+    std::unordered_map<int64_t, Label> labels;
+    utils::Entity pointLight;
+    bool havePointLight = false;
+    mat4f cameraModel;   // inverse of the view: where the viewer is, and which way
 
     Texture* output = nullptr;
     RenderTarget* target = nullptr;
@@ -223,36 +262,40 @@ sr_room* sr_room_create(void* egl_display, void* shared_egl_context) {
 int sr_room_load(sr_room* r, const char* glb_path, const char* ibl_ktx_path,
                  const char* skybox_ktx_path) {
     double t0 = nowMs();
-    std::vector<uint8_t> glb;
-    if (!readFile(glb_path, glb)) {
-        fprintf(stderr, "[room] cannot read %s\n", glb_path);
-        return -1;
+    // A world need not have any geometry of its own (the orrery is only
+    // a sky and what the shell puts in it): an empty path skips the asset.
+    if (glb_path && *glb_path) {
+        std::vector<uint8_t> glb;
+        if (!readFile(glb_path, glb)) {
+            fprintf(stderr, "[room] cannot read %s\n", glb_path);
+            return -1;
+        }
+        r->materials = gltfio::createUbershaderProvider(
+                r->engine, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
+        gltfio::AssetConfiguration ac{};
+        ac.engine = r->engine;
+        ac.materials = r->materials;
+        r->loader = gltfio::AssetLoader::create(ac);
+        r->asset = r->loader->createAsset(glb.data(), uint32_t(glb.size()));
+        if (!r->asset) {
+            fprintf(stderr, "[room] %s is not a glTF the loader accepts\n", glb_path);
+            return -2;
+        }
+        gltfio::ResourceConfiguration rc{};
+        rc.engine = r->engine;
+        rc.normalizeSkinningWeights = true;
+        r->resources = new gltfio::ResourceLoader(rc);
+        r->stb = gltfio::createStbProvider(r->engine);
+        r->resources->addTextureProvider("image/png", r->stb);
+        r->resources->addTextureProvider("image/jpeg", r->stb);
+        if (!r->resources->loadResources(r->asset)) {
+            fprintf(stderr, "[room] resources of %s failed to load\n", glb_path);
+            return -3;
+        }
+        r->asset->releaseSourceData();
+        r->scene->addEntities(r->asset->getRenderableEntities(),
+                              r->asset->getRenderableEntityCount());
     }
-    r->materials = gltfio::createUbershaderProvider(
-            r->engine, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
-    gltfio::AssetConfiguration ac{};
-    ac.engine = r->engine;
-    ac.materials = r->materials;
-    r->loader = gltfio::AssetLoader::create(ac);
-    r->asset = r->loader->createAsset(glb.data(), uint32_t(glb.size()));
-    if (!r->asset) {
-        fprintf(stderr, "[room] %s is not a glTF the loader accepts\n", glb_path);
-        return -2;
-    }
-    gltfio::ResourceConfiguration rc{};
-    rc.engine = r->engine;
-    rc.normalizeSkinningWeights = true;
-    r->resources = new gltfio::ResourceLoader(rc);
-    r->stb = gltfio::createStbProvider(r->engine);
-    r->resources->addTextureProvider("image/png", r->stb);
-    r->resources->addTextureProvider("image/jpeg", r->stb);
-    if (!r->resources->loadResources(r->asset)) {
-        fprintf(stderr, "[room] resources of %s failed to load\n", glb_path);
-        return -3;
-    }
-    r->asset->releaseSourceData();
-    r->scene->addEntities(r->asset->getRenderableEntities(),
-                          r->asset->getRenderableEntityCount());
     double t1 = nowMs();
 
     std::vector<uint8_t> ibl, sky;
@@ -281,7 +324,7 @@ int sr_room_load(sr_room* r, const char* glb_path, const char* ibl_ktx_path,
     r->skybox = Skybox::Builder().environment(r->skyTexture).showSun(false).build(*r->engine);
     r->scene->setSkybox(r->skybox);
     fprintf(stderr, "[room] loaded %s: %zu renderables in %.0f ms, sky in %.0f ms\n",
-            glb_path, r->asset->getRenderableEntityCount(), t1 - t0, nowMs() - t1);
+            glb_path, r->asset ? r->asset->getRenderableEntityCount() : 0, t1 - t0, nowMs() - t1);
     return 0;
 }
 
@@ -358,12 +401,26 @@ void sr_room_set_camera(sr_room* r, const float view[16], const float proj[16],
     // test tool that wrote its picture bottom row first; the desktop
     // showed the room upside down. Measure on the desktop, not the tool.)
     r->camera->setCustomProjection(mat4(p), double(near_plane), double(far_plane));
-    r->camera->setModelMatrix(inverse(v));
+    r->cameraModel = inverse(v);
+    r->camera->setModelMatrix(r->cameraModel);
 }
 
 int sr_room_render(sr_room* r) {
     if (!r->target) return -1;
     double t0 = nowMs();
+    if (!r->labels.empty()) {
+        // A label wears the viewer's own rotation, so its face is toward
+        // the viewer wherever the viewer stands.
+        auto& tcm = r->engine->getTransformManager();
+        mat4f rot = r->cameraModel;
+        rot[3] = float4{ 0, 0, 0, 1 };
+        for (auto& kv : r->labels) {
+            Label& l = kv.second;
+            tcm.setTransform(tcm.getInstance(l.entity),
+                    mat4f::translation(l.centre) * rot
+                    * mat4f::scaling(float3{ l.width, l.height, 1.0f }));
+        }
+    }
     if (r->renderer->beginFrame(r->swapChain)) {
         r->renderer->render(r->view);
         r->renderer->endFrame();
@@ -564,6 +621,196 @@ void sr_room_remove_pane(sr_room* r, int64_t id) {
     r->panes.erase(it);
 }
 
+void sr_room_set_point_light(sr_room* r, const float pos[3], const float colour[3],
+                             float candela) {
+    Engine& e = *r->engine;
+    if (r->havePointLight) {
+        r->scene->remove(r->pointLight);
+        e.getLightManager().destroy(r->pointLight);
+        utils::EntityManager::get().destroy(r->pointLight);
+        r->havePointLight = false;
+    }
+    if (candela <= 0) return;
+    r->pointLight = utils::EntityManager::get().create();
+    LightManager::Builder(LightManager::Type::POINT)
+            .position({ pos[0], pos[1], pos[2] })
+            .color({ colour[0], colour[1], colour[2] })
+            .intensityCandela(candela)
+            .falloff(40.0f)
+            .castShadows(false)
+            .build(e, r->pointLight);
+    r->scene->addEntity(r->pointLight);
+    r->havePointLight = true;
+}
+
+} // extern "C"
+
+namespace {
+
+bool ensureOrbGeometry(sr_room* r) {
+    if (r->sphereVb) return true;
+    if (!ensurePaneGeometry(r)) return false;
+    Engine& e = *r->engine;
+    r->glowMat = Material::Builder().package(GLOW_MAT, sizeof(GLOW_MAT)).build(e);
+    r->labelMat = Material::Builder().package(LABEL_MAT, sizeof(LABEL_MAT)).build(e);
+    if (!r->glowMat || !r->labelMat) {
+        fprintf(stderr, "[room] orb materials failed to load\n");
+        return false;
+    }
+    // A unit sphere: latitude rings and longitude lines, normals radial.
+    const int stacks = 18, slices = 36;
+    std::vector<float3> normals;
+    for (int i = 0; i <= stacks; i++) {
+        const float v = float(i) / stacks, phi = v * float(M_PI);
+        for (int j = 0; j <= slices; j++) {
+            const float u = float(j) / slices, theta = u * 2.0f * float(M_PI);
+            const float3 n{ sinf(phi) * cosf(theta), cosf(phi), sinf(phi) * sinf(theta) };
+            r->sphereVerts.push_back(n.x * 0.5f);
+            r->sphereVerts.push_back(n.y * 0.5f);
+            r->sphereVerts.push_back(n.z * 0.5f);
+            normals.push_back(n);
+        }
+    }
+    for (int i = 0; i < stacks; i++) {
+        for (int j = 0; j < slices; j++) {
+            const uint16_t a = uint16_t(i * (slices + 1) + j), b = uint16_t(a + slices + 1);
+            // Counter-clockwise seen from outside.
+            r->sphereIdx.insert(r->sphereIdx.end(), { a, uint16_t(a + 1), b, uint16_t(a + 1), uint16_t(b + 1), b });
+        }
+    }
+    const size_t n = normals.size();
+    r->sphereTangents.resize(n);
+    auto* orientation = geometry::SurfaceOrientation::Builder()
+            .vertexCount(n).normals(normals.data()).build();
+    orientation->getQuats(reinterpret_cast<quatf*>(r->sphereTangents.data()), n);
+    delete orientation;
+    r->sphereVb = VertexBuffer::Builder()
+            .vertexCount(uint32_t(n)).bufferCount(2)
+            .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3, 0, 12)
+            .attribute(VertexAttribute::TANGENTS, 1, VertexBuffer::AttributeType::FLOAT4, 0, 16)
+            .build(e);
+    r->sphereVb->setBufferAt(e, 0, VertexBuffer::BufferDescriptor(
+            r->sphereVerts.data(), r->sphereVerts.size() * sizeof(float)));
+    r->sphereVb->setBufferAt(e, 1, VertexBuffer::BufferDescriptor(
+            r->sphereTangents.data(), r->sphereTangents.size() * sizeof(float4)));
+    r->sphereIndexCount = int(r->sphereIdx.size());
+    r->sphereIb = IndexBuffer::Builder().indexCount(uint32_t(r->sphereIdx.size()))
+            .bufferType(IndexBuffer::IndexType::USHORT).build(e);
+    r->sphereIb->setBuffer(e, IndexBuffer::BufferDescriptor(
+            r->sphereIdx.data(), r->sphereIdx.size() * sizeof(uint16_t)));
+    return true;
+}
+
+void destroyOrb(sr_room* r, Orb& o) {
+    r->scene->remove(o.entity);
+    r->engine->destroy(o.entity);
+    utils::EntityManager::get().destroy(o.entity);
+    if (o.mi) r->engine->destroy(o.mi);
+    o = Orb{};
+}
+
+void destroyLabel(sr_room* r, Label& l) {
+    r->scene->remove(l.entity);
+    r->engine->destroy(l.entity);
+    utils::EntityManager::get().destroy(l.entity);
+    if (l.mi) r->engine->destroy(l.mi);
+    if (l.texture) r->engine->destroy(l.texture);
+    l = Label{};
+}
+
+} // namespace
+
+extern "C" {
+
+int sr_room_set_orb(sr_room* r, int64_t id, const float centre[3], float radius,
+                    const float colour[3], float glow) {
+    if (!ensureOrbGeometry(r)) return -1;
+    Engine& e = *r->engine;
+    auto& tcm = e.getTransformManager();
+    Orb& o = r->orbs[id];
+    const bool glowing = glow > 0;
+    if (!o.entity.isNull() && o.glowing != glowing) destroyOrb(r, o);
+    if (o.entity.isNull()) {
+        o.entity = utils::EntityManager::get().create();
+        o.glowing = glowing;
+        o.mi = (glowing ? r->glowMat : r->frameMat)->createInstance();
+        RenderableManager::Builder(1)
+                .boundingBox({ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } })
+                .material(0, o.mi)
+                .geometry(0, RenderableManager::PrimitiveType::TRIANGLES,
+                          r->sphereVb, r->sphereIb, 0, size_t(r->sphereIndexCount))
+                .culling(true).castShadows(!glowing).receiveShadows(!glowing)
+                .build(e, o.entity);
+        tcm.create(o.entity);
+        r->scene->addEntity(o.entity);
+    }
+    if (glowing) {
+        o.mi->setParameter("colour", float3{ colour[0], colour[1], colour[2] });
+        o.mi->setParameter("intensity", glow);
+    } else {
+        o.mi->setParameter("baseColor", float3{ colour[0], colour[1], colour[2] });
+        o.mi->setParameter("roughness", 0.45f);
+    }
+    tcm.setTransform(tcm.getInstance(o.entity),
+            mat4f::translation(float3{ centre[0], centre[1], centre[2] })
+            * mat4f::scaling(float3{ radius * 2, radius * 2, radius * 2 }));
+    return 0;
+}
+
+void sr_room_remove_orb(sr_room* r, int64_t id) {
+    auto it = r->orbs.find(id);
+    if (it == r->orbs.end()) return;
+    destroyOrb(r, it->second);
+    r->orbs.erase(it);
+}
+
+int sr_room_set_label(sr_room* r, int64_t id, const float centre[3],
+                      float width, float height,
+                      uint32_t gl_texture, int tex_w, int tex_h) {
+    if (!ensureOrbGeometry(r)) return -1;
+    Engine& e = *r->engine;
+    auto& tcm = e.getTransformManager();
+    Label& l = r->labels[id];
+    if (l.entity.isNull()) {
+        l.entity = utils::EntityManager::get().create();
+        l.mi = r->labelMat->createInstance();
+        l.mi->setParameter("intensity", 1.0f);
+        RenderableManager::Builder(1)
+                .boundingBox({ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } })
+                .material(0, l.mi)
+                .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, r->quadVb, r->quadIb, 0, 6)
+                .culling(false).castShadows(false).receiveShadows(false)
+                .build(e, l.entity);
+        tcm.create(l.entity);
+        r->scene->addEntity(l.entity);
+    }
+    if (gl_texture != l.glName || tex_w != l.texW || tex_h != l.texH) {
+        if (l.texture) e.destroy(l.texture);
+        l.texture = Texture::Builder()
+                .width(uint32_t(std::max(tex_w, 1))).height(uint32_t(std::max(tex_h, 1)))
+                .levels(1).sampler(Texture::Sampler::SAMPLER_2D)
+                .format(Texture::InternalFormat::RGBA8)
+                .usage(Texture::Usage::SAMPLEABLE)
+                .import(intptr_t(gl_texture))
+                .build(e);
+        l.glName = gl_texture; l.texW = tex_w; l.texH = tex_h;
+        TextureSampler sampler(TextureSampler::MinFilter::LINEAR, TextureSampler::MagFilter::LINEAR);
+        sampler.setWrapModeS(TextureSampler::WrapMode::CLAMP_TO_EDGE);
+        sampler.setWrapModeT(TextureSampler::WrapMode::CLAMP_TO_EDGE);
+        l.mi->setParameter("image", l.texture, sampler);
+    }
+    l.centre = float3{ centre[0], centre[1], centre[2] };
+    l.width = width; l.height = height;
+    return 0;
+}
+
+void sr_room_remove_label(sr_room* r, int64_t id) {
+    auto it = r->labels.find(id);
+    if (it == r->labels.end()) return;
+    destroyLabel(r, it->second);
+    r->labels.erase(it);
+}
+
 void sr_room_set_screen_intensity(sr_room* r, float intensity) {
     r->screenIntensity = intensity;
     for (auto& kv : r->panes) kv.second.screenMi->setParameter("intensity", intensity);
@@ -575,6 +822,18 @@ void sr_room_destroy(sr_room* r) {
         r->engine->flushAndWait();
         for (auto& kv : r->panes) destroyPane(r, kv.second);
         r->panes.clear();
+        for (auto& kv : r->orbs) destroyOrb(r, kv.second);
+        r->orbs.clear();
+        for (auto& kv : r->labels) destroyLabel(r, kv.second);
+        r->labels.clear();
+        if (r->havePointLight) {
+            r->scene->remove(r->pointLight);
+            r->engine->getLightManager().destroy(r->pointLight);
+        }
+        if (r->sphereVb) r->engine->destroy(r->sphereVb);
+        if (r->sphereIb) r->engine->destroy(r->sphereIb);
+        if (r->glowMat) r->engine->destroy(r->glowMat);
+        if (r->labelMat) r->engine->destroy(r->labelMat);
         if (r->quadVb) r->engine->destroy(r->quadVb);
         if (r->quadIb) r->engine->destroy(r->quadIb);
         if (r->boxVb) r->engine->destroy(r->boxVb);
