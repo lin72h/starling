@@ -236,7 +236,12 @@ install -Dm644 "$SESSION/starling.desktop" \
 # The fallback is a last resort, only for a host where dpkg-shlibdeps cannot
 # run. It must stay in sync with what the scanner actually emits — a stale
 # list ships a .deb that under-declares and then fails on a lean system.
-FALLBACK_DEPS="libc6, libgcc-s1, libstdc++6, libinput10, libgbm1, libegl1, libgles2, libxkbcommon0, libwayland-server0, libxshmfence1, libdrm2, libsystemd0, libudev1, libva2, libva-drm2, libpipewire-0.3-0t64"
+FALLBACK_DEPS="libc6, libgcc-s1, libstdc++6, libc++1, libc++abi1, libinput10, libgbm1, libegl1, libgles2, libxkbcommon0, libwayland-server0, libxshmfence1, libdrm2, libsystemd0, libudev1, libva2, libva-drm2, libpipewire-0.3-0t64"
+if [ ! -f "$LIB/libstarling_room.so" ]; then
+    echo "WARNING: no libstarling_room.so in the stage: this package ships the 3D desktop" >&2
+    echo "         without its Filament renderer (build/build-filament.sh once, then" >&2
+    echo "         build/build-all.sh), so the city is out of reach and 3D is the GL room." >&2
+fi
 SCAN="usr/lib/starling/DesktopShellApp"
 for a in $APPS; do SCAN="$SCAN usr/lib/starling/apps/$a"; done
 for so in "$LIB"/*.so; do SCAN="$SCAN usr/lib/starling/$(basename "$so")"; done

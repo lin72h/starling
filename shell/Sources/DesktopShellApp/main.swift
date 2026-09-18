@@ -748,6 +748,11 @@ func runDRM() -> Never {
         _shellState?._setScreensaverIdle(seconds: Double(seconds))
     }
 
+    // The 3D desktop switch (SettingsApp's Appearance pane).
+    processManager.onDesktop3DChangeRequested = { on in
+        _shellState?._setDesktop3D(on)
+    }
+
     // Primary-display picks (SettingsApp's Displays pane).
     processManager.onPrimaryDisplayChangeRequested = { outputId in
         _shellState?._setPrimaryDisplay(outputId: outputId)

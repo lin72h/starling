@@ -154,6 +154,8 @@ struct DmaBufMeta {
  * small integer and an unknown value means "the default". Distinct from
  * SET_THEME, which is only light vs dark WITHIN a style. */
 #define DMABUF_CONTROL_SET_STYLE 0x10
+/* The 3D desktop (either direction): x = 1 on, 0 off. */
+#define DMABUF_CONTROL_SET_DESKTOP_3D 0x11
 
 /// Configure message sent from parent to child before the child creates its
 /// buffer. Tells the child the content area dimensions (logical pixels).

@@ -799,6 +799,14 @@ class _SettingsAppState: State<StatefulWidget>, @unchecked Sendable {
                                     onChanged: { [self] (val: Bool) in bloc.add(.toggleTilingWM(val)) }
                                 )
                             ),
+                            _divider(),
+                            _settingsRowWithTrailing(
+                                "3D Desktop", "Walk the desktop as a city, with your windows in it",
+                                MacosSwitch(
+                                    value: s.desktop3D,
+                                    onChanged: { [self] (val: Bool) in bloc.add(.toggleDesktop3D(val)) }
+                                )
+                            ),
                         ]),
                         SizedBox(height: 20),
                         _sectionHeader("Wallpaper"),

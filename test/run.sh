@@ -386,6 +386,22 @@ if [ "$BUILD" = 1 ]; then
         fi
     done
 
+    # The 3D desktop's Filament renderer, when Filament is built on this
+    # box (build/build-filament.sh, once); otherwise the package ships the
+    # GL room and says so.
+    FIL="${STARLING_FILAMENT:-$HOME/dev/filament/gles}"
+    if [ -f "$FIL/lib/x86_64/libfilament.a" ]; then
+        if out=$(as_user env STARLING_SCRATCH="$SCRATCH" "$REPO/build/build-room.sh" 2>&1); then
+            echo "  ok    room renderer"
+        else
+            echo "  FAIL  room renderer"
+            echo "$out" | tail -3 | sed 's/^/        /'
+            fails=$((fails + 1))
+        fi
+    else
+        echo "  skip  room renderer — no Filament build at $FIL (build/build-filament.sh)"
+    fi
+
     step "package"
     # Packaging needs ~500 MB (a 227 MB stage, the same again as the package
     # root, then the .deb). /tmp is a tmpfs here and is mounted with usrquota, so

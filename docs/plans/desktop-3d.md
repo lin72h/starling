@@ -65,6 +65,15 @@ they said.
   draws its face — a dial with blocky marks and two hands — on all four
   sides, and redraws it on the minute while the city is up (one wake a
   minute, none once 3D is off).
+- **It ships.** The city is checked in (`shell/Resources/Worlds/city`,
+  staged as `share/starling/worlds/city`), `build-all.sh` builds the
+  Filament shim when Filament is built on the box and says so when it
+  is not, the package declares the shim's `libc++` runtime, and the
+  shell picks Filament and the city on its own whenever both are beside
+  it (`STARLING_ROOM=gl` forces the GL room, `STARLING_ROOM_DIR`
+  another world). Settings → Appearance has a **3D Desktop** switch,
+  live in both directions like Tiling Windows, and the choice persists
+  across logins as it always did (`~/.config/starling/desktop-3d`).
 - **Driving it**: `~/tmp/filament/play.sh` (the session scratchpad
   copy) starts the dev shell with the city and turns 3D on;
   `shell-drive` for input — one invocation per gesture (`down`, moves,
@@ -74,12 +83,12 @@ they said.
   screenshot of a drag. Transitions: `record-start/stop` + an ffmpeg
   tile.
 
-**Next**, in the order I would take it: bricks and windows through
-buildings (nothing in the city is solid to them); persisting brick
-positions; real icons for third-party apps on their bricks; the room's
-walls read as concrete; packaging (`libc++1`, the Filament build on
-the build box, and the city is not staged — `STARLING_ROOM_DIR` still
-points at `~/tmp/filament/voxel`).
+**Next**, in the order I would take it: day and night following the
+clock; an overview of every open window (Mission Control for the
+city); bricks and windows through buildings (nothing in the city is
+solid to them) and persisting brick positions; real icons for
+third-party apps on their bricks; looking up and down; the room's
+walls read as concrete.
 
 ## How it is built
 

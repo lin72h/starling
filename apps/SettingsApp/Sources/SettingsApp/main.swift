@@ -35,6 +35,12 @@ class _ThemedSettingsRootState: State<StatefulWidget> {
         GpuDmaBufRenderer.onLayoutChanged = { tiling in
             settingsBlocShared?.add(.layoutApplied(tiling))
         }
+        // The 3D desktop can also be entered from the desktop's context
+        // menu, the control centre, a key or the door in the world; every
+        // one of those flips the switch here.
+        GpuDmaBufRenderer.onDesktop3DChanged = { on in
+            settingsBlocShared?.add(.desktop3DApplied(on))
+        }
         // Wallpaper pushes keep the picker's selection ring live.
         // A style switch repaints this app as well as the shell's chrome:
         // the palette is a function of the pushed style, so the tree has to

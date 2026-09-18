@@ -1068,6 +1068,9 @@ extension _DesktopShellState {
         if on == _desktop3DOn, animated { return }
         _desktop3DOn = on
         _desktop3DPersist()
+        #if os(Linux)
+        linuxProcessAppManager?.broadcastDesktop3D(on: on)
+        #endif
         if on {
             // Start from the one spot where the room looks like the flat
             // desktop, and give every window a place in the hall. The room
@@ -2381,14 +2384,24 @@ extension _DesktopShellState {
               wallpaperTextureId >= 0,
               let phys = PlatformDispatcher.instance.implicitView?.physicalSize,
               phys.width > 0, phys.height > 0 else { return false }
-        // STARLING_ROOM=filament: the same slot, drawn by Filament (see
-        // Compositor/FilamentRoom.swift) from a glTF and a cmgen'd sky.
+        // The renderer: Filament (Compositor/FilamentRoom.swift), drawing a
+        // world from its directory — the city shipped under
+        // share/starling/worlds/city — whenever its library is beside the
+        // shell; the shell's own GL room otherwise. STARLING_ROOM=gl forces
+        // the GL room, STARLING_ROOM_DIR picks another world (one being
+        // generated under ~/tmp, say).
         let renderer: EnvironmentRenderer
         let env = ProcessInfo.processInfo.environment
-        if env["STARLING_ROOM"] == "filament" {
-            let dir = env["STARLING_ROOM_DIR"]
-                ?? Self.dataFilePath("room/filament").map { ($0 as NSString).deletingLastPathComponent + "/filament" }
-                ?? "room/filament"
+        let worldDir = env["STARLING_ROOM_DIR"]
+            ?? Self.dataFilePath("worlds/city/world.json").map { ($0 as NSString).deletingLastPathComponent }
+        let filament: Bool
+        switch env["STARLING_ROOM"] {
+        case "gl": filament = false
+        case "filament": filament = true
+        default: filament = worldDir != nil && FilamentRoomRenderer.isAvailable
+        }
+        if filament {
+            let dir = worldDir ?? "room/filament"
             let fr = FilamentRoomRenderer(width: Int(phys.width), height: Int(phys.height),
                                           roomDir: dir)
             fr.sceneTexture = { [weak registry] id in registry?.sceneTexture(id: id) }

@@ -77,6 +77,12 @@ docs/plans/    design notes, including standalone-sdk.md — the framework's
   $PWD/.build-shared`. Staging prints the tree's `BUILD-STAMP` (git sha +
   build time) and warns if a package-local scratch holds newer binaries —
   believe those two lines over any mtime.
+- 3D desktop renderer → `build/build-filament.sh` once (~20 min); after
+  that `build-all.sh` builds `libstarling_room.so` beside the shell and
+  says `skipped` when Filament is missing (the .deb then ships the GL
+  room, not the city). The city world is checked in under
+  `shell/Resources/Worlds/city`; regenerate with `build/tools/voxel-world.py
+  --no-sky` and commit the result.
 - Engine C++ change → rebuild in the **engine repo** (`ninja -C engine/src/out/host_debug
   libflutter_linux_drm.so libflutter_engine.so`) — no shell relink needed.
   Rebuild host_release too before packaging.

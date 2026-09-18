@@ -1508,6 +1508,13 @@ public class GpuDmaBufRenderer {
         writeControlEvent(&event)
     }
 
+    /// Ask the shell to enter or leave the 3D desktop (Settings switch).
+    public func sendDesktop3DChange(on: Bool) {
+        var event = DmaBufInputEvent(x: on ? 1 : 0, y: 0, buttons: 0,
+                                     type: DMABUF_CONTROL_SET_DESKTOP_3D, phase: 0)
+        writeControlEvent(&event)
+    }
+
     /// Ask the shell to switch the wallpaper preset (Settings picker). The
     /// value is the shell's WallpaperPreset raw value — opaque here.
     public func sendWallpaperChange(preset: Int) {
@@ -1611,6 +1618,30 @@ public class GpuDmaBufRenderer {
             deliverBoolChange(cb, tiling)
         } else {
             pendingLayoutTiling = tiling
+        }
+    }
+
+    // 3D desktop push — same latch/replay contract as the layout.
+
+    public nonisolated(unsafe) static var onDesktop3DChanged: ((Bool) -> Void)? = nil {
+        didSet {
+            guard let cb = onDesktop3DChanged, let on = pendingDesktop3D else { return }
+            pendingDesktop3D = nil
+            deliverBoolChange(cb, on)
+        }
+    }
+
+    /// Whether the parent last said the 3D desktop is on, or nil.
+    public private(set) nonisolated(unsafe) static var lastPushedDesktop3D: Bool? = nil
+
+    private nonisolated(unsafe) static var pendingDesktop3D: Bool? = nil
+
+    fileprivate static func receiveDesktop3DPush(_ on: Bool) {
+        lastPushedDesktop3D = on
+        if let cb = onDesktop3DChanged {
+            deliverBoolChange(cb, on)
+        } else {
+            pendingDesktop3D = on
         }
     }
 
@@ -2362,6 +2393,11 @@ public class GpuDmaBufRenderer {
 
                     if inputEvent.type == DMABUF_CONTROL_SET_LAYOUT {
                         GpuDmaBufRenderer.receiveLayoutPush(inputEvent.x > 0.5)
+                        continue
+                    }
+
+                    if inputEvent.type == DMABUF_CONTROL_SET_DESKTOP_3D {
+                        GpuDmaBufRenderer.receiveDesktop3DPush(inputEvent.x > 0.5)
                         continue
                     }
 

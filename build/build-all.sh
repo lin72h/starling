@@ -78,6 +78,25 @@ echo "building into $SCRATCH ($CONFIG)"
 build "sdk" "$REPO/sdk" --product FlutterShared
 build "shell" "$REPO/shell"
 
+# The 3D desktop's Filament renderer (build/build-room.sh), when Filament
+# is built on this box — build/build-filament.sh, once, ~20 min. Without
+# it the shell says so at run time and draws its own GL room instead, and
+# a package built here ships without the city.
+FIL="${STARLING_FILAMENT:-$HOME/dev/filament/gles}"
+if [ -f "$FIL/lib/x86_64/libfilament.a" ]; then
+    printf '  %-18s' "room renderer"
+    start=$SECONDS
+    if out=$(STARLING_SCRATCH="$SCRATCH" "$REPO/build/build-room.sh" 2>&1); then
+        printf '%4ss\n' "$((SECONDS - start))"
+    else
+        printf 'FAILED\n'
+        echo "$out" | grep -E "error" | head -5 | sed 's/^/      /'
+        exit 1
+    fi
+else
+    echo "  room renderer     skipped: no Filament build at $FIL (build/build-filament.sh)"
+fi
+
 if [ "$DO_APPS" = 1 ]; then
     if [ -z "$APPS" ]; then
         for d in "$REPO"/apps/*/; do

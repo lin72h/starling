@@ -69,6 +69,8 @@ struct SettingsState {
     var darkMode: Bool = GpuDmaBufRenderer.lastPushedThemeIsDark ?? true
     /// Window-manager layout — the shell owns it and pushes at connect.
     var tilingWM: Bool = GpuDmaBufRenderer.lastPushedLayoutIsTiling ?? false
+    /// The 3D desktop — the shell owns it and pushes at connect.
+    var desktop3D: Bool = GpuDmaBufRenderer.lastPushedDesktop3D ?? false
     /// Wallpaper preset raw value — the shell owns it and pushes at connect.
     var wallpaper: Int = GpuDmaBufRenderer.lastPushedWallpaper ?? 0
     /// Desktop style index — the shell owns the list and pushes at connect.
@@ -82,6 +84,7 @@ struct SettingsState {
     #else
     var darkMode: Bool = true
     var tilingWM: Bool = false
+    var desktop3D: Bool = false
     var wallpaper: Int = 0
     var style: Int = 0
     var screensaverIdle: Int = 600
@@ -158,6 +161,9 @@ enum SettingsEvent {
     case toggleTilingWM(Bool)
     /// Layout pushed by the shell (no echo back).
     case layoutApplied(Bool)
+    case toggleDesktop3D(Bool)
+    /// 3D desktop state pushed by the shell (no echo back).
+    case desktop3DApplied(Bool)
     case selectWallpaper(Int)
     /// Wallpaper pushed by the shell (no echo back).
     case wallpaperApplied(Int)
@@ -263,6 +269,11 @@ final class SettingsBloc: @unchecked Sendable {
             _applyLayout(value)
         case .layoutApplied(let value):
             state.tilingWM = value
+        case .toggleDesktop3D(let value):
+            state.desktop3D = value
+            _applyDesktop3D(value)
+        case .desktop3DApplied(let value):
+            state.desktop3D = value
         case .selectWallpaper(let value):
             state.wallpaper = value
             _applyWallpaper(value)
@@ -493,6 +504,14 @@ final class SettingsBloc: @unchecked Sendable {
     private func _applyLayout(_ tiling: Bool) {
         #if os(Linux)
         GpuDmaBufRenderer.current?.sendLayoutChange(tiling: tiling)
+        #endif
+    }
+
+    /// Forward the 3D Desktop switch to the shell, which enters or leaves
+    /// the world and persists the choice.
+    private func _applyDesktop3D(_ on: Bool) {
+        #if os(Linux)
+        GpuDmaBufRenderer.current?.sendDesktop3DChange(on: on)
         #endif
     }
 

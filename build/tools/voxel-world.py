@@ -708,7 +708,8 @@ def sky(w=1024, h=512, sun_dir=(0.55, 0.75, 0.45), with_sun=True):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default=os.path.expanduser("~/tmp/filament/voxel"))
+    ap.add_argument("--out", default=os.path.join(HERE, "..", "..", "shell", "Resources", "Worlds", "city"),
+                    help="the world directory (default: the shipped city in shell/Resources/Worlds)")
     ap.add_argument("--size", type=int, default=96)
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--cmgen", default=os.path.expanduser("~/dev/filament/gles/bin/cmgen"))

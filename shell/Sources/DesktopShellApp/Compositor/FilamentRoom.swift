@@ -300,6 +300,32 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     /// room is still, and only a camera move earns a frame.
     override func tick(_ seconds: Double) {}
 
+    /// Where the renderer's library may be: named outright, beside the
+    /// shell (the staged tree and the package put it there), or on the
+    /// loader's path.
+    static func libraryCandidates() -> [String] {
+        var candidates: [String] = []
+        if let p = ProcessInfo.processInfo.environment["STARLING_ROOM_LIB"] { candidates.append(p) }
+        if let real = realpath("/proc/self/exe", nil) {
+            let selfDir = (String(cString: real) as NSString).deletingLastPathComponent
+            free(real)
+            candidates.append(selfDir + "/libstarling_room.so")
+        }
+        candidates.append("libstarling_room.so")
+        return candidates
+    }
+
+    /// Whether the library is here to be loaded — asked before the shell
+    /// chooses this renderer over its own GL room, so a package built on a
+    /// box without Filament still has a 3D desktop, just the room. The
+    /// probe loads the library once; start() gets the same handle back.
+    static let isAvailable: Bool = {
+        for path in libraryCandidates() {
+            if let h = dlopen(path, RTLD_NOW | RTLD_LOCAL) { dlclose(h); return true }
+        }
+        return false
+    }()
+
     // MARK: Raster thread
 
     override func renderToTexture(_ textureName: UInt32) {
@@ -405,15 +431,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
             return false
         }
 
-        var candidates: [String] = []
-        if let p = ProcessInfo.processInfo.environment["STARLING_ROOM_LIB"] { candidates.append(p) }
-        if let real = realpath("/proc/self/exe", nil) {
-            let selfDir = (String(cString: real) as NSString).deletingLastPathComponent
-            free(real)
-            candidates.append(selfDir + "/libstarling_room.so")
-        }
-        candidates.append("libstarling_room.so")
-        for path in candidates {
+        for path in Self.libraryCandidates() {
             if let h = dlopen(path, RTLD_NOW | RTLD_LOCAL) { lib = h; break }
         }
         guard let lib else {

@@ -1309,6 +1309,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         linuxProcessAppManager?.currentLayoutIsTiling = windowManager.tilingEnabled
         #endif
         _loadDesktop3DPreference()
+        #if os(Linux)
+        linuxProcessAppManager?.currentDesktop3D = _desktop3DOn
+        #endif
         // Wallpaper choice persists the same way.
         if let s = try? String(contentsOfFile: Self._wallpaperFile, encoding: .utf8),
            let raw = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)),

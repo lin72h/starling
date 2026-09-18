@@ -160,6 +160,14 @@ class LinuxProcessAppManager {
     /// The shell's current layout, pushed to children at connect so the
     /// Settings toggle reflects reality (kept in sync by _setTiling).
     nonisolated(unsafe) var currentLayoutIsTiling: Bool = false
+
+    /// Fired on the platform thread when a child (SettingsApp's 3D Desktop
+    /// switch) asks to enter or leave the 3D desktop.
+    var onDesktop3DChangeRequested: ((Bool) -> Void)?
+    /// Whether the 3D desktop is on, pushed to children at connect so the
+    /// Settings switch reflects reality (kept in sync by _setDesktop3D).
+    nonisolated(unsafe) var currentDesktop3D: Bool = false
+    private let pendingDesktop3DRequests = AtomicBox<[Bool]>([])
     /// The active style's index in the shell's registry, mirrored here so a
     /// child that connects later inherits it like every other desktop-wide
     /// setting.
@@ -296,6 +304,7 @@ class LinuxProcessAppManager {
                 sendTheme(textureId: texId, dark: shellTheme.isDark)
                 sendStyle(textureId: texId, index: currentStyleIndex)
                 sendLayout(textureId: texId, tiling: currentLayoutIsTiling)
+                sendDesktop3D(textureId: texId, on: currentDesktop3D)
                 sendWallpaper(textureId: texId, preset: currentWallpaper)
                 sendScreensaver(textureId: texId, seconds: currentScreensaverIdle)
                 sendRdp(textureId: texId)
@@ -479,6 +488,10 @@ class LinuxProcessAppManager {
             if let lastIdle = screensaverRequests.last {
                 onScreensaverChangeRequested?(lastIdle)
             }
+        }
+
+        if let last = pendingDesktop3DRequests.take([]).last {
+            onDesktop3DChangeRequested?(last)
         }
 
         let primaryDisplayRequests = pendingPrimaryDisplayRequests.take([])
@@ -723,6 +736,7 @@ class LinuxProcessAppManager {
         let pendingWallpaperRequests = self.pendingWallpaperRequests
         let pendingStyleRequests = self.pendingStyleRequests
         let pendingScreensaverRequests = self.pendingScreensaverRequests
+        let pendingDesktop3DRequests = self.pendingDesktop3DRequests
         let pendingPrimaryDisplayRequests = self.pendingPrimaryDisplayRequests
         let pendingRdpRequests = self.pendingRdpRequests
         let pendingCaretUpdates = self.pendingCaretUpdates
@@ -835,6 +849,9 @@ class LinuxProcessAppManager {
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CONTROL_SET_LAYOUT {
                         pendingLayoutRequests.withLock { $0.append(event.x > 0.5) }
+                        FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
+                    } else if event.type == DMABUF_CONTROL_SET_DESKTOP_3D {
+                        pendingDesktop3DRequests.withLock { $0.append(event.x > 0.5) }
                         FlutterEngineScheduleFrame(unsafeBitCast(capturedEngine, to: OpaquePointer.self))
                     } else if event.type == DMABUF_CONTROL_SET_WALLPAPER {
                         pendingWallpaperRequests.withLock { $0.append(Int(event.x)) }
@@ -973,6 +990,24 @@ class LinuxProcessAppManager {
         currentLayoutIsTiling = tiling
         for texId in apps.keys {
             sendLayout(textureId: texId, tiling: tiling)
+        }
+    }
+
+    /// Pushes whether the 3D desktop is on to one child.
+    func sendDesktop3D(textureId: Int64, on: Bool) {
+        guard let entry = apps[textureId] else { return }
+        var event = DmaBufInputEvent(x: on ? 1 : 0, y: 0, buttons: 0,
+                                     type: Int32(DMABUF_CONTROL_SET_DESKTOP_3D),
+                                     phase: 0)
+        entry.sock.write(&event, MemoryLayout<DmaBufInputEvent>.size)
+    }
+
+    /// 3D desktop on or off: push to every child so the Settings switch
+    /// stays live.
+    func broadcastDesktop3D(on: Bool) {
+        currentDesktop3D = on
+        for texId in apps.keys {
+            sendDesktop3D(textureId: texId, on: on)
         }
     }
 
