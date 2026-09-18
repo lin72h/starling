@@ -703,6 +703,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DBricks: [String: BrickBody] = [:]
     var _brickTicker: Ticker? = nil
     var _brickClock: Double = 0
+    /// The world's power block was pressed: "Shut down the computer?"
+    var _desktop3DConfirmPower = false
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -4384,6 +4386,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 // Last in the hit path: a press that reached no client
                 // surface dismisses a grabbed menu (xdg_popup.grab).
                 waylandIntegration?.notePointerDown()
+                // The world's own things — bricks, the door, the power —
+                // take a press from here, whatever widget was under it:
+                // a brick in front of a window is still the nearer thing.
+                _desktop3DSignDown(e.position)
             },
             onPointerMove: { [self] e in
                 let echo = _isInjectEcho(e.position)
@@ -4391,17 +4397,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 _constraintPointerMoved(e.position, echo: echo)
                 _dragPointerMoved(e.position)
                 _desktop3DNotePointer()
+                _desktop3DSignMove(e.position)
             },
             onPointerUp: { [self] e in
                 _lastPointer = e.position; _lastButtons = 0; _injectedPointer = nil
                 _dragPointerReleased(e.position)
                 _desktop3DNotePointer()
+                _desktop3DSignUp(e.position)
             },
             onPointerHover: { [self] e in
                 let echo = _isInjectEcho(e.position)
                 _lastPointer = e.position; _injectedPointer = nil
                 _constraintPointerMoved(e.position, echo: echo)
                 _desktop3DNotePointer()
+                _desktop3DSignHover(e.position)
             },
             behavior: .translucent,
             child: _buildShellRoot(context))
@@ -4478,18 +4487,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         Opacity(opacity: min(1, _desktop3DT * 1.6), child: room),
                     ])
                 } else {
-                    // In the city the world takes the pointer too: the
-                    // signs round the pool are the dock, and a click on one
-                    // opens its app.
-                    wallpaperWidget = _desktop3DVoxel
-                        ? Listener(
-                            onPointerDown: { [self] e in _desktop3DSignDown(e.position) },
-                            onPointerMove: { [self] e in _desktop3DSignMove(e.position) },
-                            onPointerUp: { [self] e in _desktop3DSignUp(e.position) },
-                            onPointerHover: { [self] e in _desktop3DSignHover(e.position) },
-                            behavior: .opaque,
-                            child: room)
-                        : room
+                    wallpaperWidget = room
                 }
             } else if wallpaperPreset == .still, wallpaperTextureId >= 0 {
                 wallpaperWidget = TextureWidget(textureId: Int(wallpaperTextureId), filterQuality: .low)
@@ -4738,7 +4736,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         // (one already at reading distance takes the click
                         // as a click).
                         if _desktop3DT >= 1, walkUp || _desktop3DOrrery,
-                           let win = windowManager.windows.first(where: { $0.id == winId }) {
+                           let win = windowManager.windows.first(where: { $0.id == winId }),
+                           !(_desktop3DVoxel && _desktop3DSignAtVisible(_lastPointer) != nil) {
                             _desktop3DStepUp(to: win)
                         }
                     },
@@ -4916,6 +4915,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if !(_missionControlOpen && mcIsOnHost) {
             children.append(Positioned(fill: (), child: LayerSurfacesLayer(
                 shell: self, layers: [2, 3], slot: "above")))
+        }
+
+        // The world's own dialogs (the power block's confirm), above
+        // everything in a chromeless world, which has no status bar to
+        // hang the usual panel from.
+        if _desktop3DChromeless, let dialog = _desktop3DDialog() {
+            children.append(dialog)
         }
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen
@@ -5664,7 +5670,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// Hands the request to systemd and lets it decide. Deliberately no
     /// fallback to `shutdown`/`halt`: if logind refuses, the honest outcome is
     /// nothing happening rather than a second path with different semantics.
-    private func _runPowerAction(_ action: PowerAction) {
+    func _runPowerAction(_ action: PowerAction) {
         #if os(Linux)
         let (path, args) = action.command
         let process = Process()

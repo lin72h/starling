@@ -1202,6 +1202,16 @@ extension _DesktopShellState {
                                          x: b.x, y: max(roof, b.y + b.size / 2) + 0.65, z: b.z, width: 0.8, height: 0.94))
             }
         }
+        for (i, c) in _desktop3DControls().enumerated() {
+            guard let tex = _desktop3DControlTexture(c.id) else { continue }
+            blocks.append(SceneBlock(id: Self.k3DControlIdBase + Int64(i), texture: tex,
+                                     x: c.x, y: c.y, z: c.z, yaw: 0, roll: 0, size: c.size))
+            if c.id == _desktop3DHoveredSign,
+               let name = _desktop3DNameTexture(c.id, c.id == Self.k3DControlExit ? "Back to the desktop" : "Shut down") {
+                labels.append(SceneLabel(id: Self.k3DSignIdBase + name, texture: name,
+                                         x: c.x, y: c.y + c.size / 2 + 0.3, z: c.z, width: 1.2, height: 0.27))
+            }
+        }
         var changed = env.setOrbs([])
         if env.setBlocks(blocks) { changed = true }
         if env.setLabels(labels.sorted { $0.id < $1.id }) { changed = true }
@@ -1234,6 +1244,174 @@ extension _DesktopShellState {
     static let k3DTowerSignOut = 0.04
     /// The first window's angle from dead ahead, so it clears the tower.
     static let k3DTowerClearDeg = 32.0
+
+    // MARK: The controls — a way out, and the power
+
+    static let k3DControlIdBase: Int64 = 3_000_000
+    static let k3DControlExit = "@exit"
+    static let k3DControlPower = "@power"
+    static let k3DControlSize = 0.7
+
+    /// Two blocks on the pool's front rim, to the right of the way in: a
+    /// door out of the world (back to the flat desktop) and the power.
+    /// The chromeless world has no status bar to keep them in, and the
+    /// keyboard is not a way anyone finds.
+    func _desktop3DControls() -> [(id: String, x: Double, y: Double, z: Double, size: Double)] {
+        guard let w = _desktop3DWorld, w.kind == .voxel, let sc = w.sculpture else { return [] }
+        let s = Self.k3DControlSize
+        let y = sc.base + s / 2, z = sc.z + 3.5
+        return [(Self.k3DControlExit, sc.x + 2.0, y, z, s), (Self.k3DControlPower, sc.x + 2.9, y, z, s)]
+            .map { ($0.0, $0.1, $0.2, $0.3 + ($0.0 == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0), $0.4) }
+    }
+
+    /// A control block's face: a dark block with the glyph in white — a
+    /// door with an arrow out of it, or the power ring — and, for the
+    /// power, red, as power is.
+    func _desktop3DControlTexture(_ id: String) -> Int64? {
+        #if os(Linux)
+        if let t = _appFaceTextures[id] { return t }
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let s = 128
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        let paint = Paint()
+        paint.color = Color(0xFF2B2F36)
+        canvas.drawRect(Rect.fromLTWH(0, 0, Double(s), Double(s)), paint)
+        paint.style = .stroke
+        paint.strokeWidth = 9
+        if id == Self.k3DControlPower {
+            paint.color = Color(0xFFE5484D)
+            // The ring, open at the top, and the bar through the gap.
+            canvas.drawArc(Rect.fromLTWH(30, 30, 68, 68), -Double.pi / 2 + 0.55, 2 * Double.pi - 1.1, false, paint)
+            canvas.drawLine(Offset(64, 22), Offset(64, 64), paint)
+        } else {
+            paint.color = Color(0xFFFFFFFF)
+            // A door frame, and an arrow leaving through it.
+            let door = Path()
+            door.moveTo(84, 30); door.lineTo(40, 30); door.lineTo(40, 98); door.lineTo(84, 98)
+            canvas.drawPath(door, paint)
+            canvas.drawLine(Offset(58, 64), Offset(104, 64), paint)
+            paint.style = .fill
+            let head = Path()
+            head.moveTo(112, 64); head.lineTo(94, 50); head.lineTo(94, 78); head.close()
+            canvas.drawPath(head, paint)
+        }
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: s, height: s) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        let tex = registry.registerTexture(engine: wl.engine)
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: tex, data: raw.baseAddress!, width: s, height: s)
+        }
+        _appFaceTextures[id] = tex
+        return tex
+        #else
+        return nil
+        #endif
+    }
+
+    /// A name alone, white over a hard shadow, for a nameplate over a
+    /// control block (an app's plate carries its tile; these have none).
+    func _desktop3DNameTexture(_ key: String, _ title: String) -> Int64? {
+        #if os(Linux)
+        if let t = _appLabelTextures[key] { return t }
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let w = 320, h = 72
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        for (dx, dy, c) in [(3.0, 3.0, Color(0xC0000000)), (0.0, 0.0, Color(0xFFFFFFFF))] {
+            let pb = NativeParagraphBuilder(ParagraphStyle(textAlign: .center, fontSize: 30, fontWeight: .w600))
+            pb.pushStyle(TextStyle(color: c, fontWeight: .w600, fontSize: 30))
+            pb.addText(title)
+            let para = pb.build()
+            para.layout(ParagraphConstraints(width: Double(w)))
+            canvas.drawParagraph(para, Offset(dx, 14 + dy))
+        }
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: w, height: h) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        let tex = registry.registerTexture(engine: wl.engine)
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: tex, data: raw.baseAddress!, width: w, height: h)
+        }
+        _appLabelTextures[key] = tex
+        return tex
+        #else
+        return nil
+        #endif
+    }
+
+    /// A control block pressed: the door leaves the world for the flat
+    /// desktop; the power asks first.
+    func _desktop3DControlActivate(_ id: String) {
+        _desktop3DLog("control \(id)")
+        if id == Self.k3DControlExit {
+            _setDesktop3D(false)
+        } else if id == Self.k3DControlPower {
+            setState { _desktop3DConfirmPower = true }
+        }
+    }
+
+    /// The world's dialog, if one is up: "Shut down the computer?" over a
+    /// scrim, in the middle of the screen. A press on the scrim is a no.
+    func _desktop3DDialog() -> Widget? {
+        guard _desktop3DConfirmPower else { return nil }
+        func button(_ label: String, destructive: Bool, _ onTap: @escaping () -> Void) -> Widget {
+            GestureDetector(
+                onTap: onTap,
+                behavior: .opaque,
+                child: DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: destructive ? shellTheme.accent : shellTheme.hoverFill,
+                        borderRadius: BorderRadius.circular(6)),
+                    child: Padding(
+                        padding: EdgeInsets(left: 16, top: 7, right: 16, bottom: 7),
+                        child: Text(label, style: TextStyle(
+                            color: destructive ? shellTheme.accentInk : shellTheme.fgPrimary,
+                            fontSize: 13, fontWeight: .w600, fontFamily: shellTheme.fontFamilyStrong)))))
+        }
+        let panel = DecoratedBox(
+            decoration: BoxDecoration(color: Color(0xF0262A31), borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+                padding: EdgeInsets(left: 22, top: 18, right: 22, bottom: 18),
+                child: Column(
+                    mainAxisSize: .min,
+                    crossAxisAlignment: .start,
+                    children: [
+                        Text("Shut Down", style: TextStyle(color: Color(0xFFFFFFFF), fontSize: 15,
+                                                           fontWeight: .w700, fontFamily: shellTheme.fontFamilyStrong)),
+                        SizedBox(height: 6),
+                        Text(PowerAction.shutDown.prompt,
+                             style: TextStyle(color: Color(0xFFC8CCD2), fontSize: 13, fontFamily: shellTheme.fontFamily)),
+                        SizedBox(height: 16),
+                        Row(
+                            mainAxisAlignment: .end,
+                            children: [
+                                button("Cancel", destructive: false) { [self] in
+                                    setState { _desktop3DConfirmPower = false }
+                                },
+                                SizedBox(width: 10),
+                                button("Shut Down", destructive: true) { [self] in
+                                    setState { _desktop3DConfirmPower = false }
+                                    _runPowerAction(.shutDown)
+                                },
+                            ]),
+                    ])))
+        return Positioned(
+            fill: (),
+            child: Listener(
+                onPointerDown: { [self] _ in setState { _desktop3DConfirmPower = false } },
+                behavior: .opaque,
+                child: ColoredBox(
+                    color: Color(0x66000000),
+                    child: Center(
+                        child: Listener(
+                            onPointerDown: { _ in },
+                            behavior: .opaque,
+                            child: SizedBox(width: 360, child: panel))))))
+    }
 
     // MARK: The sculpture — the dock as a spiral of blocks
 
@@ -1500,6 +1678,10 @@ extension _DesktopShellState {
     /// the viewer, so its screen box is its centre projected and its size
     /// over its depth — nearest wins where two overlap.
     func _desktop3DSignAt(_ screen: Offset, excluding: String? = nil) -> String? {
+        _desktop3DSignAtDepth(screen, excluding: excluding)?.app
+    }
+
+    func _desktop3DSignAtDepth(_ screen: Offset, excluding: String? = nil) -> (app: String, depth: Double)? {
         let host = displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         guard host.width > 0, _desktop3DT >= 1 else { return nil }
@@ -1524,7 +1706,10 @@ extension _DesktopShellState {
             }
             if best == nil || depth < best!.depth { best = (s.app, depth) }
         }
-        for b in _desktop3DSculpture() where b.app != excluding {
+        let boxes: [(app: String, x: Double, y: Double, z: Double, size: Double)] =
+            _desktop3DSculpture().map { ($0.app, $0.x, $0.y, $0.z, $0.size) }
+            + _desktop3DControls().map { ($0.id, $0.x, $0.y, $0.z, $0.size) }
+        for b in boxes where b.app != excluding {
             // A block: its projected box, a little generous for the corners.
             let v = view.perspectiveTransform(Vector3(b.x, b.y, b.z))
             let depth = -v.z
@@ -1535,12 +1720,40 @@ extension _DesktopShellState {
             guard abs(screen.dx - sx) <= half, abs(screen.dy - sy) <= half else { continue }
             if best == nil || depth < best!.depth { best = (b.app, depth) }
         }
-        return best?.app
+        return best
+    }
+
+    /// The nearest window pane under a screen point, and how far it is.
+    func _desktop3DPaneUnder(_ screen: Offset) -> (win: WindowInfo, depth: Double)? {
+        let host = displayLayout?.host.logicalRect
+            ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        guard host.width > 0 else { return nil }
+        let cam = _desktop3DEffectiveCamera(_desktop3DT)
+        let s = Self.k3DMetresPerPx
+        var best: (win: WindowInfo, depth: Double)? = nil
+        for win in windowManager.visibleWindows where win.pose3D.placed && !win.isFullscreen {
+            let p = win.pose3D
+            guard let (u, v) = _desktop3DPlaneHit(screen, camera: cam, host: host, pose: p),
+                  abs(u) <= win.rect.width * s * p.scale / 2, abs(v) <= win.rect.height * s * p.scale / 2 else { continue }
+            let dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z
+            let depth = (dx * dx + dy * dy + dz * dz).squareRoot()
+            if best == nil || depth < best!.depth { best = (win, depth) }
+        }
+        return best
+    }
+
+    /// The world thing under a screen point that is actually the nearest
+    /// thing there: nil when a window's pane is in front of it.
+    func _desktop3DSignAtVisible(_ screen: Offset) -> String? {
+        guard _desktop3DVoxel, _desktop3DT >= 1, let (obj, depth) = _desktop3DSignAtDepth(screen) else { return nil }
+        if let pane = _desktop3DPaneUnder(screen), pane.depth < depth { return nil }
+        return obj
     }
 
     /// Pointer over the world: the sign under it grows a little.
     func _desktop3DSignHover(_ screen: Offset) {
-        let hit = _desktop3DSignAt(screen)
+        guard _desktop3DVoxel else { return }
+        let hit = _desktop3DSignAtVisible(screen)
         if hit != _desktop3DHoveredSign {
             setState { _desktop3DHoveredSign = hit }
         }
@@ -1561,8 +1774,10 @@ extension _DesktopShellState {
     /// may be the start of a drag — a click is decided on release; on any
     /// other sign it is a click.
     func _desktop3DSignDown(_ screen: Offset) {
-        guard let app = _desktop3DSignAt(screen) else { return }
-        if _desktop3DSculpture().contains(where: { $0.app == app }) {
+        guard _desktop3DVoxel, _desktop3DBrickDrag == nil, let app = _desktop3DSignAtVisible(screen) else { return }
+        if app.hasPrefix("@") {
+            _desktop3DControlActivate(app)
+        } else if _desktop3DSculpture().contains(where: { $0.app == app }) {
             _desktop3DBrickDrag = (app, screen, screen, false)
         } else {
             _desktop3DLog("sign \(app) clicked")

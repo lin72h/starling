@@ -43,7 +43,8 @@ touching anything.
   blocks in courses that tip and fall when what held them is pulled
   out, and can be re-piled by hand (Phases 17–19; the signboard tower,
   the floating spiral and the tall curling stack before it were each
-  rejected), and windows
+  rejected), a door block out of the world and a power block on the
+  pool's rim (Phase 20), and windows
   wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
@@ -1400,6 +1401,28 @@ quarter, which tips.
 **Harness trap (the third):** a drag is `down`, `move`s and `up` in
 ONE shell-drive invocation; and record the collapse as video — stills
 half a second apart miss the whole tumble.
+
+### Phase 20 — the door and the power (2026-09-18)
+
+"Add an exit button to exit 3D to 2D, and power off." Two blocks on
+the pool's front rim, right of the way in, the same primitive as the
+app bricks with faces the shell draws: a door with an arrow leaving it,
+and the power ring in red. Hover names them ("Back to the desktop",
+"Shut down"); the door is `_setDesktop3D(false)` — the dolly out — and
+the power puts up "Shut down the computer?" over a scrim in the middle
+of the screen (the chromeless world has no status bar to hang the
+usual panel from; a press on the scrim is a no; Shut Down runs the
+same `systemctl poweroff` the status bar's panel does).
+
+**The world's pointer handling moved to the root Listener.** It had
+lived on the wallpaper slot, which is UNDER the windows: the exit
+block stood in front of the Files pane on screen, and a press on it
+walked up to Files instead, because the window's widget is what the
+stack hit-tests first. Now the root sees every press, move and hover,
+and a world thing is "there" for the pointer only when no pane is
+nearer (`_desktop3DSignAtVisible`: the pane under the pointer via the
+ray-plane test, its depth against the thing's). A window's walk-up
+yields to a nearer brick or control the same way.
 
 ### Still open
 
