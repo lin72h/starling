@@ -254,7 +254,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     // The `isFullscreen` and `isTopBarRevealed` keys force a rebuild when the
     // window changes its fullscreen state or when the auto-hide reveal flips
     // (so the title-bar overlay shows/hides correctly).
-    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool)] = [:]
+    var _windowChildCache: [String: (widget: DesktopWindow, isFocused: Bool, width: Double, height: Double, isFullscreen: Bool, isTopBarRevealed: Bool, isTilted: Bool, roomLight: RoomLight?, sceneContent: Bool, walkUp: Bool)] = [:]
     /// The wallpaper as a coarse colour grid — the 3D desktop's light
     /// source, since the room's back wall is the picture itself.
     var _wallpaperLight: (cells: [Color], cols: Int, rows: Int)? = nil
@@ -668,6 +668,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DT: Double = 0
     var _desktop3DController: AnimationController? = nil
     var _desktop3DCurve: CurvedAnimation? = nil
+    /// The short glide a step-up takes (Desktop3D._desktop3DGlide).
+    var _desktop3DGlide: AnimationController? = nil
+    var _desktop3DGlideCurve: CurvedAnimation? = nil
+    var _desktop3DGlidePath: (from: Camera3D, to: Camera3D)? = nil
     /// One camera per output, keyed by output id. Pointer parallax writes
     /// the host's; the arc and the environment read it.
     var _cameras3D: [Int: Camera3D] = [:]
@@ -4654,6 +4658,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             // dips while the room fades in underneath — at t = 1 the pane
             // is exactly beneath it and the widget simply stops painting.
             let inScene = tilted && _desktop3DScene && win.textureId != nil && _desktop3DT >= 1
+            // In the city, a window across the square is walked up to on
+            // a click, and that click is not the app's.
+            let walkUp = inScene && _desktop3DVoxel && _desktop3DFarFromPane(win)
             let roomLight = tilted && !inScene
                 ? _desktop3DRoomLight(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
@@ -4670,7 +4677,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                cached.isTopBarRevealed == windowTopBarRevealed,
                cached.isTilted == tilted,
                cached.roomLight == roomLight,
-               cached.sceneContent == inScene {
+               cached.sceneContent == inScene,
+               cached.walkUp == walkUp {
                 window = cached.widget
             } else {
                 window = DesktopWindow(
@@ -4691,9 +4699,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         // clicked from across the square is walked up to
                         // (one already at reading distance takes the click
                         // as a click).
-                        if _desktop3DT >= 1,
-                           let win = windowManager.windows.first(where: { $0.id == winId }),
-                           _desktop3DOrrery || (_desktop3DVoxel && _desktop3DFarFromPane(win)) {
+                        if _desktop3DT >= 1, walkUp || _desktop3DOrrery,
+                           let win = windowManager.windows.first(where: { $0.id == winId }) {
                             _desktop3DStepUp(to: win)
                         }
                     },
@@ -4728,9 +4735,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                         _desktop3DScroll(winId, delta: delta)
                     },
                     roomLight: roomLight,
-                    sceneContent: inScene
+                    sceneContent: inScene,
+                    walkUpOnClick: walkUp
                 )
-                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene)
+                _windowChildCache[winId] = (window, isFocused, win.rect.width, win.rect.height, win.isFullscreen, windowTopBarRevealed, tilted, roomLight, inScene, walkUp)
             }
 
             // Open zoom plays only when the window is genuinely appearing

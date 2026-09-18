@@ -104,12 +104,15 @@ class DesktopWindow: StatelessWidget {
         // Wrap with Listener to capture pointer events and forward to child process.
         // behavior: .opaque ensures hit-testing succeeds even though TextureWidget
         // (a LeafRenderObjectWidget) doesn't report hits by default.
+        let walkUp = walkUpOnClick
         return Listener(
             onPointerDown: { event in
+                if walkUp { return }
                 forward(2, event.localPosition.dx, event.localPosition.dy,
                         Int64(event.buttons))
             },
             onPointerMove: { [self, windowInfo] event in
+                if walkUp { return }
                 // Client-initiated interactive move/resize (xdg_toplevel.move/
                 // resize): the compositor owns the rest of this drag. Divert
                 // motion into window move/resize; the client stops receiving
@@ -131,6 +134,7 @@ class DesktopWindow: StatelessWidget {
                         Int64(event.buttons))
             },
             onPointerUp: { [windowInfo] event in
+                if walkUp { return }
                 // End of a client-initiated move/resize: clear the grab and,
                 // for resize, force-send the final configure (same contract
                 // as the shell's own resize handles).
@@ -197,6 +201,10 @@ class DesktopWindow: StatelessWidget {
     /// The client's picture is drawn by the room renderer, in its scene;
     /// the content area here is transparent and only takes the pointer.
     let sceneContent: Bool
+    /// A click on this window walks the viewer up to it (it stands far
+    /// off in a world) — so the click is the shell's, and the client
+    /// gets none of the pointer sequence.
+    let walkUpOnClick: Bool
 
     init(
         windowInfo: WindowInfo,
@@ -212,7 +220,8 @@ class DesktopWindow: StatelessWidget {
         onTitleBarDoubleTap: (() -> Void)? = nil,
         onDepthScroll: ((Double) -> Void)? = nil,
         roomLight: RoomLight? = nil,
-        sceneContent: Bool = false
+        sceneContent: Bool = false,
+        walkUpOnClick: Bool = false
     ) {
         self.windowInfo = windowInfo
         self.isFocused = isFocused
@@ -228,6 +237,7 @@ class DesktopWindow: StatelessWidget {
         self.onDepthScroll = onDepthScroll
         self.roomLight = roomLight
         self.sceneContent = sceneContent
+        self.walkUpOnClick = walkUpOnClick
     }
 
     /// The glass tint, leaned toward the light behind the window when the

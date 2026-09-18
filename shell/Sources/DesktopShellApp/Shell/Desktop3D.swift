@@ -725,20 +725,54 @@ extension _DesktopShellState {
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         let p = winner.pose3D
         let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
-        setState {
-            // Square on to the pane, at the 1:1 distance, eye on its centre.
-            // The pane's normal is (sin yaw, 0, cos yaw) and the camera
-            // looks along (sin yaw, 0, -cos yaw), so looking back down the
-            // normal is yaw NEGATED — the same number only for a pane that
-            // faces straight down the hall, which is all the arc ever made,
-            // and which hid this: on a side wall the old value turned the
-            // viewer to face the opposite wall.
-            _camera3D = Camera3D(x: p.x + sin(p.yaw) * d1, y: p.y,
-                                 z: p.z + cos(p.yaw) * d1,
-                                 yaw: -p.yaw, pitch: 0)
-            windowManager.bringToFront(winner.id)
+        setState { windowManager.bringToFront(winner.id) }
+        // Square on to the pane, at the 1:1 distance, eye on its centre.
+        // The pane's normal is (sin yaw, 0, cos yaw) and the camera
+        // looks along (sin yaw, 0, -cos yaw), so looking back down the
+        // normal is yaw NEGATED — the same number only for a pane that
+        // faces straight down the hall, which is all the arc ever made,
+        // and which hid this: on a side wall the old value turned the
+        // viewer to face the opposite wall.
+        _desktop3DGlide(to: Camera3D(x: p.x + sin(p.yaw) * d1, y: p.y,
+                                     z: p.z + cos(p.yaw) * d1,
+                                     yaw: -p.yaw, pitch: 0))
+    }
+
+    /// How long a step-up takes to get there.
+    static let k3DGlideMs = 380
+
+    /// Move the viewer to `target` over a short glide rather than a cut,
+    /// so a step-up reads as walking there — a cut from across the square
+    /// to a window filling the screen reads as nothing happening and then
+    /// being somewhere else. Turns the short way round. A new glide
+    /// restarts from wherever the last one had got to.
+    func _desktop3DGlide(to target: Camera3D) {
+        let from = _camera3D
+        var to = target
+        let dyaw = to.yaw - from.yaw
+        to.yaw = from.yaw + atan2(sin(dyaw), cos(dyaw))
+        _desktop3DGlidePath = (from, to)
+        if _desktop3DGlide == nil {
+            let c = AnimationController(duration: .milliseconds(Self.k3DGlideMs), vsync: self)
+            let curve = CurvedAnimation(parent: c, curve: Curves.easeInOutCubic)
+            curve.addListener { [weak self] in
+                guard let self, let p = self._desktop3DGlidePath else { return }
+                let k = curve.value
+                self.setState {
+                    self._camera3D = Camera3D(
+                        x: p.from.x + (p.to.x - p.from.x) * k,
+                        y: p.from.y + (p.to.y - p.from.y) * k,
+                        z: p.from.z + (p.to.z - p.from.z) * k,
+                        yaw: p.from.yaw + (p.to.yaw - p.from.yaw) * k,
+                        pitch: p.from.pitch + (p.to.pitch - p.from.pitch) * k)
+                }
+                self._desktop3DPublishCamera()
+            }
+            _desktop3DGlide = c
+            _desktop3DGlideCurve = curve
         }
-        _desktop3DPublishCamera()
+        _desktop3DGlide!.value = 0
+        _ = _desktop3DGlide!.forward()
     }
 
     // MARK: The light
