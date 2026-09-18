@@ -1452,11 +1452,57 @@ extension _DesktopShellState {
         }
     }
 
+    /// The pool: a raised block, seven metres square and a metre high,
+    /// whose blocks run from −3 to +4 about the hub (a block covers
+    /// [i, i + 1)), so its centre is half a metre past the hub.
+    static let k3DPoolHalf = 3.5
+    static let k3DPoolOffset = 0.5
+    func _desktop3DPoolCentre(_ sc: (x: Double, z: Double, radius: Double, base: Double)) -> (x: Double, z: Double) {
+        (sc.x + Self.k3DPoolOffset, sc.z + Self.k3DPoolOffset)
+    }
+    func _desktop3DOverPool(_ x: Double, _ z: Double, sc: (x: Double, z: Double, radius: Double, base: Double)) -> Bool {
+        let c = _desktop3DPoolCentre(sc)
+        return max(abs(x - c.x), abs(z - c.z)) <= Self.k3DPoolHalf
+    }
+
     /// The ground a brick stands on at a spot: the water's top over the
     /// pool, the walkable surface elsewhere.
     func _desktop3DBrickGround(_ x: Double, _ z: Double, sc: (x: Double, z: Double, radius: Double, base: Double), w: World3D) -> Double {
-        if max(abs(x - sc.x), abs(z - sc.z)) <= 3.5 { return sc.base }
+        if _desktop3DOverPool(x, z, sc: sc) { return sc.base }
         return w.ground(x, z)
+    }
+
+    /// What of a brick's footprint the ground holds up, as intervals in
+    /// x and z, or nil when the ground is not at its foot. On the pool:
+    /// the footprint within the pool's square. On the plaza: the
+    /// footprint less what hangs over the pool's square — which is the
+    /// rim's wall there, not the plaza. So a brick set down on the rim's
+    /// edge tips to whichever side its centre is on, as one would.
+    func _desktop3DGroundSupport(_ b: BrickBody, sc: (x: Double, z: Double, radius: Double, base: Double), w: World3D)
+        -> (lox: Double, hix: Double, loz: Double, hiz: Double)? {
+        let s = Self.k3DSculptSize, bottom = b.y - s / 2
+        var lox = b.x - s / 2, hix = b.x + s / 2, loz = b.z - s / 2, hiz = b.z + s / 2
+        let c = _desktop3DPoolCentre(sc), h = Self.k3DPoolHalf
+        let sx = (lo: c.x - h, hi: c.x + h), sz = (lo: c.z - h, hi: c.z + h)
+        let ix = (lo: max(lox, sx.lo), hi: min(hix, sx.hi)), iz = (lo: max(loz, sz.lo), hi: min(hiz, sz.hi))
+        let straddles = ix.lo < ix.hi && iz.lo < iz.hi
+        if abs(bottom - sc.base) < 0.03 {
+            guard straddles else { return nil }
+            return (ix.lo, ix.hi, iz.lo, iz.hi)
+        }
+        guard abs(bottom - w.ground(b.x, b.z)) < 0.03 else { return nil }
+        if straddles {
+            // Cut the part over the pool away, along whichever axis loses
+            // the least of the footprint.
+            let cutX = ix.hi - ix.lo, cutZ = iz.hi - iz.lo
+            if cutX <= cutZ {
+                if ix.lo > lox { hix = ix.lo } else { lox = ix.hi }
+            } else {
+                if iz.lo > loz { hiz = iz.lo } else { loz = iz.hi }
+            }
+            guard lox < hix, loz < hiz else { return nil }
+        }
+        return (lox, hix, loz, hiz)
     }
 
     /// Where a carried brick goes for a pointer: under the pointer, at
@@ -1542,7 +1588,12 @@ extension _DesktopShellState {
                     return
                 }
                 let moving = self._desktop3DBrickStep(dt, sc: sc)
-                if !moving { self._brickTicker?.stop() }
+                if !moving {
+                    self._brickTicker?.stop()
+                    self._desktop3DLog("bricks settled: " + self._desktop3DBricks.sorted { $0.key < $1.key }.map {
+                        String(format: "%@(%.2f,%.2f,%.2f %@)", $0.key, $0.value.x, $0.value.y, $0.value.z, "\($0.value.mode)")
+                    }.joined(separator: " "))
+                }
                 self.setState {}
             }
         }
@@ -1565,6 +1616,11 @@ extension _DesktopShellState {
         let s = Self.k3DSculptSize, m = Self.k3DBrickTipMargin
         let before = _desktop3DBricks
         var moving = false
+        // A brick that has just come to rest has not had its footing
+        // checked: one more step for that, or a brick that landed with its
+        // centre past the edge of what it landed on would hang there —
+        // the ticker stopped the moment it touched down.
+        var landed = false
         func overlapXZ(_ a: BrickBody, _ b: BrickBody, _ slack: Double) -> Bool {
             abs(a.x - b.x) < s - slack && abs(a.z - b.z) < s - slack
         }
@@ -1575,10 +1631,9 @@ extension _DesktopShellState {
                 continue
             case .rest:
                 let bottom = b.y - s / 2
-                let ground = _desktop3DBrickGround(b.x, b.z, sc: sc, w: w)
                 var lox = Double.infinity, hix = -Double.infinity, loz = Double.infinity, hiz = -Double.infinity
-                if bottom <= ground + 0.03 {
-                    lox = b.x - s / 2; hix = b.x + s / 2; loz = b.z - s / 2; hiz = b.z + s / 2
+                if let g = _desktop3DGroundSupport(b, sc: sc, w: w) {
+                    lox = g.lox; hix = g.hix; loz = g.loz; hiz = g.hiz
                 }
                 for (other, o) in before where other != app && o.mode == .rest {
                     guard overlapXZ(o, b, 0.01), abs((o.y + s / 2) - bottom) < 0.03 else { continue }
@@ -1611,7 +1666,7 @@ extension _DesktopShellState {
                     land = max(land, top)
                 }
                 if bottom - b.vy * dt <= land {
-                    b.y = land + s / 2; b.vy = 0; b.mode = .rest
+                    b.y = land + s / 2; b.vy = 0; b.mode = .rest; landed = true
                 } else {
                     b.y -= b.vy * dt
                 }
@@ -1670,11 +1725,30 @@ extension _DesktopShellState {
             if !pushed { break }
             moving = true
         }
+        // The pool is a block too: a brick pushed into its rim comes out
+        // of it — up onto the pool when that is the short way, else
+        // sideways onto the plaza.
+        let pc = _desktop3DPoolCentre(sc)
+        let poolMid = sc.base - 0.5, poolHalfY = 0.5
+        for (app, var b) in _desktop3DBricks where b.mode != .held && b.mode != .tumble {
+            let px = Self.k3DPoolHalf + s / 2 - abs(b.x - pc.x), py = poolHalfY + s / 2 - abs(b.y - poolMid)
+            let pz = Self.k3DPoolHalf + s / 2 - abs(b.z - pc.z)
+            guard px > 0.002, py > 0.002, pz > 0.002 else { continue }
+            moving = true
+            if py <= px && py <= pz, b.y >= poolMid {
+                b.y = sc.base + s / 2 + 0.001; b.vy = 0; if b.mode == .fall { b.mode = .rest }
+            } else if px <= pz {
+                b.x += (b.x < pc.x ? -1 : 1) * (px + 0.001)
+            } else {
+                b.z += (b.z < pc.z ? -1 : 1) * (pz + 0.001)
+            }
+            _desktop3DBricks[app] = b
+        }
         for (app, var b) in _desktop3DBricks where b.mode != .held {
             let floor = _desktop3DBrickGround(b.x, b.z, sc: sc, w: w) + s / 2
-            if b.y < floor { b.y = floor; b.vy = 0; if b.mode == .fall { b.mode = .rest }; _desktop3DBricks[app] = b }
+            if b.y < floor { b.y = floor; b.vy = 0; if b.mode == .fall { b.mode = .rest }; _desktop3DBricks[app] = b; landed = true }
         }
-        return moving
+        return moving || landed
     }
 
     /// An app's block face: its colour to the edges, its glyph in white —

@@ -1543,6 +1543,37 @@ Checked by dropping a brick half into another (pushed clear, climbed
 onto the pile), hovering (lit, still), and dropping one onto the pile
 from the side (settled beside, nothing merged).
 
+### Phase 28 — footing, and the pool is solid (2026-09-18)
+
+"The boxes still overlap." Reproducing with the harness and a
+`bricks settled` log line (positions and modes when the ticker
+stops) found the gap: a brick that LANDED came to rest in the same
+step the ticker stopped, so its footing was never checked — a brick
+landing with its centre past the edge of what it landed on hung there
+for good, and whatever was done to its neighbours next started from a
+wrong pile. One more step after any landing now (`landed`), and the
+support test runs.
+
+Two more things the numbers showed. The pool's blocks run from −3 to
++4 about the hub (a block covers [i, i+1)), so its centre is half a
+metre past the hub — the ground test had it centred on the hub. And a
+brick's ground support was decided at its CENTRE: set down on the rim's
+edge, it stood as if the whole footprint were held, balanced on a
+knife-edge. `_desktop3DGroundSupport` gives the footprint the ground
+actually holds — on the pool, the part within its square; on the plaza,
+the part not over the square, which is the rim's wall — so a brick on
+the edge tips to the side its centre is on. And the pool is a box in
+the resolver: a brick pushed into its rim comes out, up onto the pool
+or sideways onto the plaza.
+
+Checked by the numbers: a brick dropped hanging half a metre over
+another tips off and lands beside it (0.9 m apart); a brick set on the
+rim edge ends on the plaza; twelve random drops at random depths (the
+wheel) leave no pair overlapping. A first stress run "passed" while
+the desktop had quietly left 3D — a random press landed on the door —
+so the harness now checks 3D is on every drop and keeps clear of the
+door.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
