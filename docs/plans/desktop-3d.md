@@ -7,68 +7,71 @@ keyboard, step up to a window and it is pixel-exact again, and turning
 
 Branch: `desktop-3d`.
 
-## Where it stands (2026-09-17, checkpoint)
+## Where it stands (2026-09-18, checkpoint)
 
-**Filament renders the scene; the windows are in it; the room is one
-world of several.** Branch `desktop-3d`, pushed. Read this section,
-then "Phase 7" onward for how it got here, and "Traps paid for" before
-touching anything.
+**The city is a desktop you can play in, and the user has.** Branch
+`desktop-3d`, pushed, this repo only (the engine is untouched since
+the last checkpoint). Read this section, then "Phase 7" onward for how
+it got here, and "Traps paid for" before touching anything. Phases 11
+to 31 are one day of the user playing and asking; each one names what
+they said.
 
 - **The renderer is Filament** (`STARLING_ROOM=filament`), built from
   source the one way that shares the engine's EGL context
   (`build/build-filament.sh`, ~20 min once), wrapped in a C shim the
   shell dlopens (`build/build-room.sh`, `shell/Sources/StarlingRoom/`).
   It draws into the wallpaper's texture slot from its own thread and
-  waits for the GPU, so the engine samples a finished frame. Real
-  shadows, ambient occlusion, sky reflections, tone mapping, MSAA.
-  8–13 ms a frame at 2560x1600. Without the library the slot falls back
-  to the hand-written GL room, which still works and is untouched.
-- **Windows are panes in the scene.** Each window's client texture is a
-  quad in a slab; its widget keeps its pose but stops painting content,
-  so the pointer still lands on it and nothing about input changed.
-  Clicks from across the room, typing, live updates, drag along a wall,
-  step-up to 1:1 with Space — all verified on the desktop.
+  waits for the GPU. Real shadows, ambient occlusion, sky reflections,
+  tone mapping, MSAA; 8–13 ms a frame at 2560x1600. Primitives the
+  shim offers: panes (a client texture in a slab, with a world's block
+  tile as the frame — `sr_room_set_pane_style`), labels (billboards, or
+  fixed-yaw signs), orbs, and blocks (lit cubes with a shell-drawn face
+  — `sr_room_set_block`, with a roll for tipping).
 - **A world is a directory** (`STARLING_ROOM_DIR`): a cmgen sky, an
-  optional glTF, and `world.json` (kind, exposure, sun, hub, heightmap).
-  Three kinds: `room` (the living room, windows on the walls),
-  `orrery` (planets and moons — works, rejected on looks), and `voxel`
-  — **a Minecraft-style city**, generated in ten seconds by
-  `build/tools/voxel-world.py`, walked on foot at eye height, the open
-  windows standing round the square facing in with nameplates over
-  them, no dock or status bar; a brick double-clicked pops its window
-  up in front of the viewer. A window clicked from across the square
-  is walked up to (one at reading distance takes the click as a click;
-  the first person to play clicked Terminal from 17 m and nothing
-  happened, because that was wired for the orrery only). **The dock is
-  a small building of bricks in the pool**, with weight: the apps as lit
-  blocks in courses that tip and fall when what held them is pulled
-  out, and can be carried anywhere in the city and piled by hand
-  (Phases 17–19, 24; the signboard tower,
-  the floating spiral and the tall curling stack before it were each
-  rejected), a door block on the pool's rim that is the way back to the
-  flat desktop (Phases 20–22), and windows
-  wear the world's block chrome (Phase 13). The city is
-  the direction. Since Phase
-  11 it is 96 blocks across with eight building styles, doors and
-  shopfronts facing the square under awnings and signs, roof tanks and
-  aerials, crosswalks and lamp posts — and **the window frames are
-  blocks of the world** (world.json `pane_frame`), not the room's wood.
-- **Entering** is a dolly where the world asks for one (`camera_home.dolly`,
-  the city: 6 m over a 1 s tween): the world comes up through the
-  wallpaper while the viewer glides in, and the windows leave the desktop
-  last, taking their places in the square as the viewer arrives. Leaving
-  is the reverse, windows first. The room keeps its 600 ms fade. t = 0 is
-  still the exact flat desktop, wherever the dolly starts.
-- **Driving it**: `~/tmp/filament/{compare,panes,panes-drag,city}.py`
-  stop GDM, run the dev shell with a world, enter, drive, screenshot,
-  restore GDM. The broker socket is root-only in dev mode. Transitions
-  are checked with `shell-drive record-start/stop` and an ffmpeg tile.
+  optional glTF, and `world.json`. Three kinds: `room` (the living
+  room, windows on the walls), `orrery` (rejected on looks), and
+  `voxel` — **the Minecraft-style city**, 96 blocks across, eight
+  building styles, doors and shopfronts under awnings and signs, roof
+  tanks, crosswalks, thin lamp posts, generated in ten seconds by
+  `build/tools/voxel-world.py`, walked on foot; entered by a 6 m dolly
+  over a second, left by Escape (Alt+Escape with a window focused) or
+  the door block on the pool's rim. The city is the direction; the
+  room still works and is untouched.
+- **Windows in the city** are panes with the world's block frame and a
+  block title bar (planks, redstone/gold/emerald buttons) drawn IN the
+  scene, so a brick in front of a window covers it. A window gets its
+  place when it arrives and keeps it: the arc round the square for
+  windows brought in from the flat desktop, or right in front of the
+  viewer at reading size for one opened here. A window clicked from
+  across the square is walked up to (a 380 ms glide, the click kept
+  from the app). Fullscreen works there (emerald block; the top-edge
+  reveal shows the bar alone, no status bar).
+- **The dock is a small building of bricks in the pool**, each app a
+  lit block with its colour and glyph. Hover lights one and names it;
+  double-click opens its app, whose window pops up in front of you
+  (or brings its open window to you); press and drag carries it —
+  anywhere in the city, at the distance it was picked up, the wheel
+  pushing and pulling, riding over other bricks — and let go, it
+  falls onto whatever is under it. **The bricks have weight:** pull one
+  out and what it held up tips off and falls; they never overlap (a
+  pairwise resolver every step, the pool's rim a box too), they settle
+  onto a quarter-brick grid, and a pile that will not settle in twenty
+  seconds stops and says so. Positions live in memory only.
+- **Driving it**: `~/tmp/filament/play.sh` (the session scratchpad
+  copy) starts the dev shell with the city and turns 3D on;
+  `shell-drive` for input — one invocation per gesture (`down`, moves,
+  `up`; `dblclick` for a double-click); the `[3D] bricks settled:` log
+  line for positions, checked pairwise for overlap by a script, never
+  by eye; `[Input] UP` against the shot's line before reading a
+  screenshot of a drag. Transitions: `record-start/stop` + an ffmpeg
+  tile.
 
-**Next**: walking through walls (the heightmap is level and nothing is
-solid); the room's walls read as
-concrete; packaging (`libc++1`, the Filament build on the build box,
-and the city is not staged — `STARLING_ROOM_DIR` still points at
-`~/tmp/filament/voxel`).
+**Next**, in the order I would take it: bricks and windows through
+buildings (nothing in the city is solid to them); persisting brick
+positions; real icons for third-party apps on their bricks; the room's
+walls read as concrete; packaging (`libc++1`, the Filament build on
+the build box, and the city is not staged — `STARLING_ROOM_DIR` still
+points at `~/tmp/filament/voxel`).
 
 ## How it is built
 
