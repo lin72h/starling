@@ -84,6 +84,10 @@ struct World3D {
     var moonScale = 0.12
     var cameraRadius = 5.2
     var cameraHeight = 1.0
+    /// What the windows' frames are made of, if not the plain slab: a
+    /// block tile image in the world's directory, laid `block` metres to
+    /// a tile over a frame `margin` wide and `depth` deep.
+    var paneFrame: (texture: String, block: Double, margin: Double, depth: Double)? = nil
 
     static func load(_ dir: String) -> World3D {
         var w = World3D()
@@ -116,6 +120,10 @@ struct World3D {
         }
         if let v = j["eye_height"] as? Double { w.eyeHeight = v }
         if let v = j["ring_radius"] as? Double { w.ringRadius = v }
+        if let f = j["pane_frame"] as? [String: Any], let t = f["texture"] as? String {
+            w.paneFrame = (dir + "/" + t, f["block"] as? Double ?? 0.25,
+                           f["margin"] as? Double ?? 0.25, f["depth"] as? Double ?? 0.25)
+        }
         if let hm = j["heightmap"] as? [String: Any],
            let o = hm["origin"] as? [Int], o.count == 2,
            let sz = hm["size"] as? [Int], sz.count == 2,
@@ -138,6 +146,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     private typealias EGLGetCurrentFn = @convention(c) () -> UnsafeMutableRawPointer?
     private typealias SetPaneFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, Float, Float, Float, Float, Float, UInt32, Int32, Int32, Int32, Int32) -> Int32
     private typealias RemovePaneFn = @convention(c) (OpaquePointer?, Int64) -> Void
+    private typealias SetPaneStyleFn = @convention(c) (OpaquePointer?, UInt32, Int32, Int32, Float, Float, Float) -> Void
     private typealias SetPointLightFn = @convention(c) (OpaquePointer?, UnsafePointer<Float>?, UnsafePointer<Float>?, Float) -> Void
     private typealias SetOrbFn = @convention(c) (OpaquePointer?, Int64, UnsafePointer<Float>?, Float, UnsafePointer<Float>?, Float) -> Int32
     private typealias RemoveIdFn = @convention(c) (OpaquePointer?, Int64) -> Void
@@ -183,6 +192,22 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     private var knownPanes = Set<Int64>()
     private var fnSetPane: SetPaneFn!
     private var fnRemovePane: RemovePaneFn!
+    private var fnSetPaneStyle: SetPaneStyleFn!
+
+    /// The engine texture holding the world's frame tile (world.paneFrame),
+    /// once the shell has decoded it; -1 for the plain slab. Any thread.
+    var frameTextureId: Int64 {
+        get { paneLock.lock(); defer { paneLock.unlock() }; return _frameTextureId }
+        set {
+            paneLock.lock()
+            let changed = _frameTextureId != newValue
+            _frameTextureId = newValue
+            if changed { dirty = true }
+            paneLock.unlock()
+        }
+    }
+    private var _frameTextureId: Int64 = -1
+    private var appliedFrame: UInt32 = 0
 
     /// Publish the windows that hang in the room; the next frame draws
     /// them. Returns whether anything changed.
@@ -269,8 +294,20 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
     /// it stands this frame, and take down the ones that have gone.
     private func syncPanes() {
         paneLock.lock()
-        let panes = _panes
+        let panes = _panes, frameId = _frameTextureId
         paneLock.unlock()
+        // The frames' style, once its tile is a texture (the tile decodes
+        // asynchronously, so the first frames may hang in plain slabs).
+        if let f = world.paneFrame, frameId >= 0, let tex = sceneTexture?(frameId), tex.name != 0 {
+            if tex.name != appliedFrame {
+                fnSetPaneStyle(room, tex.name, Int32(tex.width), Int32(tex.height),
+                               Float(f.block), Float(f.margin), Float(f.depth))
+                appliedFrame = tex.name
+            }
+        } else if appliedFrame != 0 {
+            fnSetPaneStyle(room, 0, 0, 0, 0, 0, 0)
+            appliedFrame = 0
+        }
         var live = Set<Int64>()
         for p in panes {
             guard let tex = sceneTexture?(p.id), tex.name != 0 else { continue }
@@ -333,6 +370,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
               let render = sym("sr_room_render", RenderFn.self),
               let setPane = sym("sr_room_set_pane", SetPaneFn.self),
               let removePane = sym("sr_room_remove_pane", RemovePaneFn.self),
+              let setPaneStyle = sym("sr_room_set_pane_style", SetPaneStyleFn.self),
               let setPointLight = sym("sr_room_set_point_light", SetPointLightFn.self),
               let setOrb = sym("sr_room_set_orb", SetOrbFn.self),
               let removeOrb = sym("sr_room_remove_orb", RemoveIdFn.self),
@@ -340,7 +378,7 @@ final class FilamentRoomRenderer: EnvironmentRenderer {
               let removeLabel = sym("sr_room_remove_label", RemoveIdFn.self) else { return false }
         fnLoad = load; fnSetLight = setLight; fnSetExposure = setExposure
         fnSetOutput = setOutput; fnSetCamera = setCamera; fnRender = render
-        fnSetPane = setPane; fnRemovePane = removePane
+        fnSetPane = setPane; fnRemovePane = removePane; fnSetPaneStyle = setPaneStyle
         fnSetPointLight = setPointLight; fnSetOrb = setOrb; fnRemoveOrb = removeOrb
         fnSetLabel = setLabel; fnRemoveLabel = removeLabel
 

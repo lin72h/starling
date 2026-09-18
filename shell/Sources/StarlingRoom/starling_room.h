@@ -74,6 +74,15 @@ SR_EXPORT int sr_room_set_pane(sr_room*, int64_t id, const float centre[3], floa
                                int flip_y, int focused);
 SR_EXPORT void sr_room_remove_pane(sr_room*, int64_t id);
 
+/// What the panes' frames are made of. By default a plain dark slab a few
+/// centimetres round the window; given a world's block tile (`gl_texture`
+/// in the shared context, sampled nearest and repeated every `block`
+/// metres), the frames are built of that block instead, `margin` metres
+/// round the window and `depth` metres deep. `gl_texture` 0 restores the
+/// plain slab. Applies to every pane, present and future.
+SR_EXPORT void sr_room_set_pane_style(sr_room*, uint32_t gl_texture, int tex_w, int tex_h,
+                                      float block, float margin, float depth);
+
 /// How bright a white pixel of a pane is, in the room's light units.
 SR_EXPORT void sr_room_set_screen_intensity(sr_room*, float intensity);
 

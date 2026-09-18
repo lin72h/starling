@@ -1096,6 +1096,42 @@ extension _DesktopShellState {
         #endif
     }
 
+    /// The world's frame tile (world.json `pane_frame`), decoded into a
+    /// registry texture the renderer builds the window frames from. The
+    /// decode is asynchronous; the renderer draws plain slabs until it
+    /// lands, then a fresh frame of the scene picks the tile up.
+    func _desktop3DLoadFrameTile(_ fr: FilamentRoomRenderer) {
+        #if os(Linux)
+        guard let frame = fr.world.paneFrame else { return }
+        let path = frame.texture
+        Task { @MainActor in
+            guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let codec = try? await FlutterSwiftBridge.instantiateImageCodec([UInt8](d)),
+                  let f = try? await codec.getNextFrame() else {
+                FileHandle.standardError.write(Data("[room] cannot decode frame tile \(path)\n".utf8))
+                return
+            }
+            codec.dispose()
+            let image = f.image
+            defer { image.dispose() }
+            // The renderer that asked, if it is still the one on the desktop.
+            guard let shell = _shellState, let fr = shell._environment as? FilamentRoomRenderer,
+                  fr.world.paneFrame?.texture == path,
+                  let registry = drmTextureRegistry, let wl = waylandIntegration,
+                  let bytes = try? image.toByteData(format: .rawRgba) else { return }
+            let id = registry.registerTexture(engine: wl.engine)
+            bytes.withUnsafeBytes { raw in
+                registry.updatePixelData(engine: wl.engine, id: id, data: raw.baseAddress!,
+                                         width: image.width, height: image.height)
+            }
+            fr.frameTextureId = id
+            if shell.environmentTextureId >= 0 {
+                registry.markGLTextureDirty(engine: wl.engine, id: shell.environmentTextureId)
+            }
+        }
+        #endif
+    }
+
     /// An app's label for the scene — its tile (colour and glyph) with its
     /// name under it — drawn once into a texture the renderer can hang on
     /// a billboard. Cached per app for the life of the shell.
@@ -1168,6 +1204,7 @@ extension _DesktopShellState {
                                           roomDir: dir)
             fr.sceneTexture = { [weak registry] id in registry?.sceneTexture(id: id) }
             renderer = fr
+            _desktop3DLoadFrameTile(fr)
         } else {
             renderer = EnvironmentRenderer(width: Int(phys.width), height: Int(phys.height))
         }

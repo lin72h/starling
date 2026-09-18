@@ -126,6 +126,7 @@ struct Pane {
     Texture* texture = nullptr;
     uint32_t glName = 0;
     int texW = 0, texH = 0;
+    int styleGen = -1;      // which pane style its frame material carries
 };
 
 struct sr_room {
@@ -168,6 +169,16 @@ struct sr_room {
     // a little over half of that.
     float screenIntensity = 0.6f;
     std::unordered_map<int64_t, Pane> panes;
+    // The frames' style: a plain slab, or a world's block tile repeated
+    // over a thicker one (sr_room_set_pane_style). Bumping styleGen makes
+    // every pane refresh its frame material on its next update.
+    Texture* frameTexture = nullptr;
+    Texture* frameBlank = nullptr;      // a 1x1 stand-in, so the sampler is never unset
+    uint32_t frameGlName = 0;
+    int frameTexW = 0, frameTexH = 0;
+    float frameBlock = 0.25f;
+    float paneMargin = 0.04f, paneDepth = 0.035f;
+    int styleGen = 0;
 
     // Orbs and labels (the orrery), and the light at its hub.
     VertexBuffer* sphereVb = nullptr;
@@ -470,6 +481,12 @@ bool ensurePaneGeometry(sr_room* r) {
         fprintf(stderr, "[room] pane materials failed to load\n");
         return false;
     }
+    r->frameBlank = Texture::Builder()
+            .width(1).height(1).levels(1).sampler(Texture::Sampler::SAMPLER_2D)
+            .format(Texture::InternalFormat::RGBA8).build(e);
+    static const uint8_t white[4] = { 255, 255, 255, 255 };
+    r->frameBlank->setImage(e, 0, Texture::PixelBufferDescriptor(
+            white, sizeof(white), Texture::Format::RGBA, Texture::Type::UBYTE));
     r->quadVb = VertexBuffer::Builder()
             .vertexCount(4).bufferCount(1)
             .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3, 0, 20)
@@ -562,6 +579,9 @@ int sr_room_set_pane(sr_room* r, int64_t id, const float centre[3], float yaw,
         p.frameMi = r->frameMat->createInstance();
         p.frameMi->setParameter("baseColor", float3{ 0.20f, 0.14f, 0.09f });
         p.frameMi->setParameter("roughness", 0.55f);
+        p.frameMi->setParameter("useMap", 0.0f);
+        p.frameMi->setParameter("block", 0.25f);
+        p.frameMi->setParameter("frameMap", r->frameBlank, TextureSampler());
         RenderableManager::Builder(1)
                 .boundingBox({ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } })
                 .material(0, p.screenMi)
@@ -596,13 +616,36 @@ int sr_room_set_pane(sr_room* r, int64_t id, const float centre[3], float yaw,
     }
     p.screenMi->setParameter("flipY", flip_y ? 1.0f : 0.0f);
     p.screenMi->setParameter("intensity", r->screenIntensity);
-    p.frameMi->setParameter("baseColor", focused ? float3{ 0.30f, 0.21f, 0.13f }
-                                                 : float3{ 0.20f, 0.14f, 0.09f });
+    if (p.styleGen != r->styleGen) {
+        p.styleGen = r->styleGen;
+        if (r->frameTexture) {
+            // A world's block: nearest, so the pixels stay pixels, and
+            // repeated, so the slab is as many blocks as it is long.
+            TextureSampler sampler(TextureSampler::MinFilter::NEAREST, TextureSampler::MagFilter::NEAREST);
+            sampler.setWrapModeS(TextureSampler::WrapMode::REPEAT);
+            sampler.setWrapModeT(TextureSampler::WrapMode::REPEAT);
+            p.frameMi->setParameter("frameMap", r->frameTexture, sampler);
+            p.frameMi->setParameter("block", r->frameBlock);
+            p.frameMi->setParameter("roughness", 0.9f);
+        } else {
+            p.frameMi->setParameter("frameMap", r->frameBlank, TextureSampler());
+            p.frameMi->setParameter("roughness", 0.55f);
+        }
+        p.frameMi->setParameter("useMap", r->frameTexture ? 1.0f : 0.0f);
+    }
+    if (r->frameTexture) {
+        // The tile carries the colour; focus is a brightness.
+        p.frameMi->setParameter("baseColor", focused ? float3{ 1.0f, 1.0f, 1.0f }
+                                                     : float3{ 0.72f, 0.72f, 0.72f });
+    } else {
+        p.frameMi->setParameter("baseColor", focused ? float3{ 0.30f, 0.21f, 0.13f }
+                                                     : float3{ 0.20f, 0.14f, 0.09f });
+    }
 
-    // The slab: a margin round the window and a few centimetres deep,
-    // its front face on the pane's plane and its body toward the wall.
-    // The picture floats a hair in front of the slab so they never fight.
-    const float margin = 0.04f, depth = 0.035f;
+    // The slab: a margin round the window and some depth, its front face
+    // on the pane's plane and its body toward the wall. The picture floats
+    // a hair in front of the slab so they never fight.
+    const float margin = r->paneMargin, depth = r->paneDepth;
     const mat4f place = mat4f::translation(float3{ centre[0], centre[1], centre[2] })
             * mat4f::rotation(yaw, float3{ 0, 1, 0 });
     tcm.setTransform(tcm.getInstance(p.frame),
@@ -619,6 +662,36 @@ void sr_room_remove_pane(sr_room* r, int64_t id) {
     if (it == r->panes.end()) return;
     destroyPane(r, it->second);
     r->panes.erase(it);
+}
+
+void sr_room_set_pane_style(sr_room* r, uint32_t gl_texture, int tex_w, int tex_h,
+                            float block, float margin, float depth) {
+    Engine& e = *r->engine;
+    if (gl_texture != r->frameGlName || tex_w != r->frameTexW || tex_h != r->frameTexH) {
+        // Every pane's material instance holds the old texture until its
+        // next update; the engine keeps it alive until then.
+        if (r->frameTexture) e.destroy(r->frameTexture);
+        r->frameTexture = nullptr;
+        r->frameGlName = gl_texture; r->frameTexW = tex_w; r->frameTexH = tex_h;
+        if (gl_texture) {
+            r->frameTexture = Texture::Builder()
+                    .width(uint32_t(std::max(tex_w, 1))).height(uint32_t(std::max(tex_h, 1)))
+                    .levels(1).sampler(Texture::Sampler::SAMPLER_2D)
+                    .format(Texture::InternalFormat::RGBA8)
+                    .usage(Texture::Usage::SAMPLEABLE)
+                    .import(intptr_t(gl_texture))
+                    .build(e);
+        }
+        r->styleGen++;
+    }
+    if (gl_texture) {
+        r->frameBlock = block > 0 ? block : 0.25f;
+        r->paneMargin = margin;
+        r->paneDepth = depth;
+    } else {
+        r->paneMargin = 0.04f;
+        r->paneDepth = 0.035f;
+    }
 }
 
 void sr_room_set_point_light(sr_room* r, const float pos[3], const float colour[3],
@@ -840,6 +913,8 @@ void sr_room_destroy(sr_room* r) {
         if (r->boxIb) r->engine->destroy(r->boxIb);
         if (r->screenMat) r->engine->destroy(r->screenMat);
         if (r->frameMat) r->engine->destroy(r->frameMat);
+        if (r->frameTexture) r->engine->destroy(r->frameTexture);
+        if (r->frameBlank) r->engine->destroy(r->frameBlank);
         if (r->asset) {
             r->scene->removeEntities(r->asset->getRenderableEntities(),
                                      r->asset->getRenderableEntityCount());

@@ -123,12 +123,49 @@ int main(int argc, char** argv) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glBindTexture(GL_TEXTURE_2D, 0);
         glFinish();
+        // ROOMTEST_FRAME=<tile.ppm>[,block,margin,depth]: the frame is a
+        // world's block (a P6 tile) instead of the plain slab.
+        if (const char* fr = getenv("ROOMTEST_FRAME")) {
+            char path[512]; float block = 0.25f, margin = 0.25f, depth = 0.25f;
+            sscanf(fr, "%511[^,],%f,%f,%f", path, &block, &margin, &depth);
+            FILE* pf = fopen(path, "rb");
+            int fw = 0, fh = 0, mx = 0;
+            if (pf && fscanf(pf, "P6 %d %d %d", &fw, &fh, &mx) == 3 && fgetc(pf) >= 0) {
+                std::vector<unsigned char> rgb(size_t(fw) * fh * 3), rgba(size_t(fw) * fh * 4);
+                if (fread(rgb.data(), 1, rgb.size(), pf) == rgb.size()) {
+                    for (size_t i = 0; i < size_t(fw) * fh; i++) {
+                        rgba[i * 4] = rgb[i * 3]; rgba[i * 4 + 1] = rgb[i * 3 + 1];
+                        rgba[i * 4 + 2] = rgb[i * 3 + 2]; rgba[i * 4 + 3] = 255;
+                    }
+                    GLuint ft = 0;
+                    glGenTextures(1, &ft);
+                    glBindTexture(GL_TEXTURE_2D, ft);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fw, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    glFinish();
+                    sr_room_set_pane_style(room, ft, fw, fh, block, margin, depth);
+                    fprintf(stderr, "frame tile %dx%d, block %.2f margin %.2f depth %.2f\n", fw, fh, block, margin, depth);
+                }
+            } else {
+                fprintf(stderr, "ROOMTEST_FRAME: cannot read %s as P6\n", path);
+            }
+            if (pf) fclose(pf);
+        }
+        // ROOMTEST_PANE_AT=x,y,z,yawDegrees puts it elsewhere (a world
+        // that is not the room); the camera stands 3.47 m in front of it.
         float c[3] = { -3.955f, 1.6f, 1.5f };
+        float paneYaw = float(M_PI / 2);
+        if (const char* at = getenv("ROOMTEST_PANE_AT")) {
+            float deg = 90;
+            sscanf(at, "%f,%f,%f,%f", &c[0], &c[1], &c[2], &deg);
+            paneYaw = deg * float(M_PI) / 180;
+        }
         const float s = 0.0019f;
-        if (sr_room_set_pane(room, 1, c, float(M_PI / 2), 1280 * s, 800 * s,
+        if (sr_room_set_pane(room, 1, c, paneYaw, 1280 * s, 800 * s,
                              -38 / 2.0f * s, 1280 * s, (800 - 38) * s,
                              paneTex, tw, th, 0, 1) != 0) return 1;
-        cx = -3.955 + 3.47; cy = 1.6; cz = 1.5; yaw = -M_PI / 2; pitch = 0;
+        cx = c[0] + 3.47 * sin(paneYaw); cy = c[1]; cz = c[2] + 3.47 * cos(paneYaw);
+        yaw = -paneYaw; pitch = 0;
     }
 
     float proj[16], view[16];

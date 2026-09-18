@@ -35,7 +35,11 @@ touching anything.
   — **a Minecraft-style city**, generated in ten seconds by
   `build/tools/voxel-world.py`, walked on foot at eye height, the open
   windows standing round the square facing in with nameplates over
-  them, no dock or status bar. The city is the direction.
+  them, no dock or status bar. The city is the direction. Since Phase
+  11 it is 96 blocks across with eight building styles, doors and
+  shopfronts facing the square under awnings and signs, roof tanks and
+  aerials, crosswalks and lamp posts — and **the window frames are
+  blocks of the world** (world.json `pane_frame`), not the room's wood.
 - **Entering** fades the world up through the wallpaper over the 600 ms
   tween while the windows lift off the desktop; leaving is the reverse;
   t = 0 is still the exact flat desktop.
@@ -44,10 +48,11 @@ touching anything.
   restore GDM. The broker socket is root-only in dev mode. Transitions
   are checked with `shell-drive record-start/stop` and an ffmpeg tile.
 
-**Next**: the city's buildings want doors, signs and variety and the
-city wants to be bigger; the window frames should be blocks there, not
-the room's wood; a dolly-in instead of the fade; the room's walls read
-as concrete; packaging (`libc++1`, the Filament build on the build box).
+**Next**: a dolly-in instead of the fade; walking through walls (the
+heightmap is level and nothing is solid); the room's walls read as
+concrete; packaging (`libc++1`, the Filament build on the build box,
+and the city is not staged — `STARLING_ROOM_DIR` still points at
+`~/tmp/filament/voxel`).
 
 ## How it is built
 
@@ -1110,6 +1115,77 @@ orrery. Space and click step up as everywhere else.
   `Room3D`'s constants — the room's numbers are the ROOM's.
 - The trap from the orrery holds here too: the tilt or any slant belongs
   on the layout, never on the home camera.
+
+### Phase 11 — the city gets doors, signs and its own frames (2026-09-17)
+
+Two of the checkpoint's "next" items, both done in the generator's
+ten-second loop plus one pane-style call.
+
+**The city.** 96 blocks across (was 60), 75k triangles, still 10–12 ms
+a frame. Eight building styles — concrete, brick, four plaster colours,
+sandstone, glass curtain wall — each with its own window tile and
+rhythm, and a third of the inner lots are towers with a setback and an
+aerial. Every building has a door on the wall that faces the square,
+two blocks tall, under a striped awning that sticks out over the
+pavement, with a three-block sign above it whose "lettering" is random
+runs of dark pixels — it reads as a sign from across the street and as
+nothing up close, which is right. Half the buildings have a shopfront
+ground floor (big glass, something warm lit inside). Roofs get a water
+tank on legs or an air handler. Streets have crosswalks at the corners
+and lane lines; a lamp post stands at every corner and a street tree on
+one lot in seven. Trees were first on a third of the lots and it read
+as a forest of trunks: what makes it a *city* is that the trunks are
+few and thin.
+
+**Not everything is a block.** Lamp posts as blocks were 1 m pillars
+with a glowing cube on top and read as monuments. The generator now
+also emits *props* — thin axis-aligned boxes (a 20 cm log post with a
+50 cm lamp, a 16 cm mast with a crossbar) — into the same mesh, with
+the tile stretched over each face. Same material, same pixels, and the
+scene stops looking like it was built at one grid size.
+
+**The sun moved.** It stood ahead of the viewer, so the facades across
+the square and every window's front were back-lit, and the frames came
+out near-black. Three candidates rendered headlessly in one tile: from
+behind-right and high (`0.55, 0.75, 0.45`) lights the facades, the
+plaza and the panes at once; side-on put the square in the shadow of
+the buildings beside it; ahead-left back-lit the facades again. The
+sky's square sun follows it, so the shadows still agree with the sky.
+
+**Block frames.** `frame.mat` takes a tile texture and lays it over the
+slab from the slab's *own* axes — the box has no UVs, its scale is in
+the model matrix, so the vertex shader scales the unit-cube position by
+the matrix's column lengths and picks the two axes each face lies in
+from the object-space normal. One tile per `block` metres, sampled
+NEAREST and REPEAT, so a wider window is more planks rather than
+stretched ones. `sr_room_set_pane_style` sets the texture and the
+margin/depth for every pane, present and future (a generation counter
+on the room; each pane refreshes its material instance on its next
+update). The shell reads `pane_frame` from world.json, decodes the
+tile through the engine's codec into a registry texture (the label
+path), and the renderer applies it on the raster thread the first
+frame the texture resolves. `roomtest` takes `ROOMTEST_FRAME=tile.ppm`
+and `ROOMTEST_PANE_AT=x,y,z,yaw` so the frame can be looked at without
+the desktop. Focus is a brightness on the tile (1.0 / 0.72) instead of
+a colour.
+
+**Measured**: the city loads in 30–50 ms; frames 8–13 ms at 2560x1600
+with three panes; the generator runs in 10 s (55 s of CPU — the mesh
+is one pass of array arithmetic per face direction, not a loop over
+cells).
+
+**Traps:**
+
+- An unset sampler parameter is a warning every frame (`[1] frameMap`)
+  even when the shader never samples it; the shim binds a 1x1 white
+  stand-in until a real tile arrives.
+- `roomtest`'s pane test hangs the pane at the ROOM's coordinates; in
+  the city that is inside the stone under the street. Hence
+  `ROOMTEST_PANE_AT`.
+- A `for … && break` loop in the shell breaks on the *pipe's* exit
+  status — `tail` — not the renderer's, which is how the AMD render
+  node "never ran". `/dev/dri` renumbered again today: the AMD node is
+  `renderD128` and the NVIDIA device is gone from the list.
 
 ### Still open
 
