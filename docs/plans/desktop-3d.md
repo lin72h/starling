@@ -7,31 +7,47 @@ keyboard, step up to a window and it is pixel-exact again, and turning
 
 Branch: `desktop-3d`.
 
-## Where it stands (2026-09-17)
+## Where it stands (2026-09-17, checkpoint)
 
-Working, on the dev box:
+**Filament renders the scene; the windows are in it; the room is one
+world of several.** Branch `desktop-3d`, pushed. Read this section,
+then "Phase 7" onward for how it got here, and "Traps paid for" before
+touching anything.
 
-- **A real camera.** WASD or the arrows to walk, Q/E to turn, R/F to
-  rise and sink, Home to return to where you started, Space to step up
-  to the window in front of you. Alt drives it while a window has the
-  keyboard, because something is focused almost all of the time.
-- **Windows are panes in the room**, sorted far to near, back-face
-  culled and near-plane guarded — and still windows: clicking one across
-  the room lands on the right client pixel and typing reaches the client,
-  because the whole projection·view·model chain rides in the `Transform`
-  the shell already had and `RenderTransform` runs it backwards.
-- **The room is a real 3D asset**, not geometry anyone typed: CC0
-  furniture from Poly Haven, placed in a generated shell (floor, walls,
-  ceiling, a wall of windows), with the light baked in.
-- **Lit by a captured sky.** One HDRI is the view through the windows
-  AND the room's light: its sun casts the shadows, and the rest of it
-  becomes nine spherical-harmonic coefficients that say how that sky
-  lights a surface facing any direction.
-- **The 2D contract holds.** At t = 0 no window gets a matrix at all and
-  the wallpaper slot shows the plain wallpaper, so leaving 3D is the
-  flat desktop exactly. `test/functional.py --only "3D desktop"` measures
-  it, and refuses to run with tiling on, where a maximised window covers
-  the whole room and the check cannot see anything.
+- **The renderer is Filament** (`STARLING_ROOM=filament`), built from
+  source the one way that shares the engine's EGL context
+  (`build/build-filament.sh`, ~20 min once), wrapped in a C shim the
+  shell dlopens (`build/build-room.sh`, `shell/Sources/StarlingRoom/`).
+  It draws into the wallpaper's texture slot from its own thread and
+  waits for the GPU, so the engine samples a finished frame. Real
+  shadows, ambient occlusion, sky reflections, tone mapping, MSAA.
+  8–13 ms a frame at 2560x1600. Without the library the slot falls back
+  to the hand-written GL room, which still works and is untouched.
+- **Windows are panes in the scene.** Each window's client texture is a
+  quad in a slab; its widget keeps its pose but stops painting content,
+  so the pointer still lands on it and nothing about input changed.
+  Clicks from across the room, typing, live updates, drag along a wall,
+  step-up to 1:1 with Space — all verified on the desktop.
+- **A world is a directory** (`STARLING_ROOM_DIR`): a cmgen sky, an
+  optional glTF, and `world.json` (kind, exposure, sun, hub, heightmap).
+  Three kinds: `room` (the living room, windows on the walls),
+  `orrery` (planets and moons — works, rejected on looks), and `voxel`
+  — **a Minecraft-style city**, generated in ten seconds by
+  `build/tools/voxel-world.py`, walked on foot at eye height, the open
+  windows standing round the square facing in with nameplates over
+  them, no dock or status bar. The city is the direction.
+- **Entering** fades the world up through the wallpaper over the 600 ms
+  tween while the windows lift off the desktop; leaving is the reverse;
+  t = 0 is still the exact flat desktop.
+- **Driving it**: `~/tmp/filament/{compare,panes,panes-drag,city}.py`
+  stop GDM, run the dev shell with a world, enter, drive, screenshot,
+  restore GDM. The broker socket is root-only in dev mode. Transitions
+  are checked with `shell-drive record-start/stop` and an ffmpeg tile.
+
+**Next**: the city's buildings want doors, signs and variety and the
+city wants to be bigger; the window frames should be blocks there, not
+the room's wood; a dolly-in instead of the fade; the room's walls read
+as concrete; packaging (`libc++1`, the Filament build on the build box).
 
 ## How it is built
 
