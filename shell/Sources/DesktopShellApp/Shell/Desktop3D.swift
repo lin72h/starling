@@ -949,6 +949,11 @@ extension _DesktopShellState {
             _camera3D = _desktop3DHomeCamera(displayLayout?.host.logicalRect
                 ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
             _desktop3DPlaceWindows()
+            // A walking world is entered on foot: the keys are the
+            // camera's until a window is clicked. Whatever app had the
+            // keyboard on the flat desktop would otherwise swallow the
+            // first arrow pressed, and nothing shows why.
+            if _desktop3DVoxel { windowManager.focusedWindowId = nil }
         }
         if !animated {
             setState { _desktop3DT = on ? 1 : 0 }
