@@ -1595,6 +1595,17 @@ extension _DesktopShellState {
         x = min(max(x, w.hub.x - lim), w.hub.x + lim)
         z = min(max(z, w.hub.z - lim), w.hub.z + lim)
         y = max(y, _desktop3DBrickGround(x, z, sc: sc, w: w) + s / 2 + 0.02)
+        // Over bricks, not through them: carried into a brick, it rides
+        // up onto that brick, and onto the one on that.
+        for _ in 0..<8 {
+            var lifted = false
+            for (app, o) in _desktop3DBricks where app != d.app && o.mode != .held {
+                if abs(o.x - x) < s - 0.01, abs(o.z - z) < s - 0.01, abs(o.y - y) < s - 0.01 {
+                    y = o.y + s + 0.02; lifted = true
+                }
+            }
+            if !lifted { break }
+        }
         return (x, y, z)
     }
 
@@ -1657,6 +1668,13 @@ extension _DesktopShellState {
                     self._brickTicker?.stop()
                     return
                 }
+                // A pile that has not settled in twenty seconds is fighting
+                // itself: stop, and say so, rather than burn a core.
+                if now > 20 {
+                    self._desktop3DLog("bricks did not settle in 20 s — stopping")
+                    self._brickTicker?.stop()
+                    return
+                }
                 var moving = self._desktop3DBrickStep(dt, sc: sc)
                 // Settled: onto the grid, and if that moved anything, once
                 // more round for its footing.
@@ -1697,6 +1715,12 @@ extension _DesktopShellState {
             for (other, o) in _desktop3DBricks where other != app && o.mode != .held {
                 if s - abs(o.x - sx) > 0.002, s - abs(o.y - b.y) > 0.002, s - abs(o.z - sz) > 0.002 { free = false; break }
             }
+            // Nor into the pool's rim: the grid is the hub's and the pool
+            // is half a metre off it, and a brick beside the rim would be
+            // snapped into it and pushed out of it for ever.
+            let pc = _desktop3DPoolCentre(sc)
+            if Self.k3DPoolHalf + s / 2 - abs(sx - pc.x) > 0.002, 0.5 + s / 2 - abs(b.y - (sc.base - 0.5)) > 0.002,
+               Self.k3DPoolHalf + s / 2 - abs(sz - pc.z) > 0.002 { free = false }
             guard free else { continue }
             b.x = sx; b.z = sz
             _desktop3DBricks[app] = b

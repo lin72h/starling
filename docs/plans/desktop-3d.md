@@ -1613,6 +1613,28 @@ edge now, so two bricks side by side are two. The replay of the user's
 drop — editor to the plaza, settings a third over it — ends with the
 two side by side, 0.9 m apart, on the grid.
 
+### Phase 31 — a carried brick rides over the pile (2026-09-18)
+
+"Take screenshot" — the purple brick inside the green one. The log's
+order settled it: the user's mouse-up came one line AFTER the shot;
+the brick was in their hand, carried through the other, which a held
+brick did by design (it took no part in collisions). Now a carried
+brick rides UP onto any brick it is moved into, and onto the one on
+that (`_desktop3DBrickCarryPoint`, up to eight lifts), so it slides
+over the pile the way a Lego brick does over studs, and never shows
+inside another.
+
+Found on the way, by the shell sitting at 27% CPU with nothing
+moving: a brick set down beside the pool's rim fought for ever between
+the grid (the hub's, with the pool half a metre off it) and the rim's
+collider — snapped into the rim, pushed out, snapped in. The snap now
+counts the pool as occupied, and a pile that has not settled in
+twenty seconds stops and says so in the log rather than burn a core.
+
+**Reading a screenshot of a drag:** check `[Input] UP` against the
+shot's line in the log before calling a brick's position wrong. The
+carry ends where the button does, not where the picture was taken.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
