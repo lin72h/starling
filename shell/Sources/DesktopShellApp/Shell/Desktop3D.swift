@@ -1205,12 +1205,16 @@ extension _DesktopShellState {
         for (i, c) in _desktop3DControls().enumerated() {
             guard let tex = _desktop3DControlTexture(c.id) else { continue }
             blocks.append(SceneBlock(id: Self.k3DControlIdBase + Int64(i), texture: tex,
-                                     x: c.x, y: c.y, z: c.z, yaw: 0, roll: 0, size: c.size))
-            if c.id == _desktop3DHoveredSign,
+                                     x: c.x, y: c.y, z: c.z, yaw: c.yaw, roll: 0, size: c.size))
+            if c.id == _desktop3DHoveredSign, c.id == Self.k3DControlExit || c.id == Self.k3DControlPower,
                let name = _desktop3DNameTexture(c.id, c.id == Self.k3DControlExit ? "Back to the desktop" : "Shut down") {
                 labels.append(SceneLabel(id: Self.k3DSignIdBase + name, texture: name,
                                          x: c.x, y: c.y + c.size / 2 + 0.3, z: c.z, width: 1.2, height: 0.27))
             }
+        }
+        if let p = _desktop3DDialogPanel(), let tex = _desktop3DDialogTexture() {
+            labels.append(SceneLabel(id: Self.k3DSignIdBase + tex, texture: tex,
+                                     x: p.x, y: p.y, z: p.z, width: p.w, height: p.h, yaw: p.yaw))
         }
         var changed = env.setOrbs([])
         if env.setBlocks(blocks) { changed = true }
@@ -1250,18 +1254,107 @@ extension _DesktopShellState {
     static let k3DControlIdBase: Int64 = 3_000_000
     static let k3DControlExit = "@exit"
     static let k3DControlPower = "@power"
+    static let k3DControlCancel = "@cancel"
+    static let k3DControlShutDown = "@shutdown"
     static let k3DControlSize = 0.7
+    /// The signboard: how far in front of the viewer it stands, its size,
+    /// and its buttons' size.
+    static let k3DDialogDistance = 2.4
+    static let k3DDialogWidth = 1.6
+    static let k3DDialogHeight = 0.8
+    static let k3DDialogButton = 0.5
 
     /// Two blocks on the pool's front rim, to the right of the way in: a
     /// door out of the world (back to the flat desktop) and the power.
     /// The chromeless world has no status bar to keep them in, and the
     /// keyboard is not a way anyone finds.
-    func _desktop3DControls() -> [(id: String, x: Double, y: Double, z: Double, size: Double)] {
+    func _desktop3DControls() -> [(id: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] {
         guard let w = _desktop3DWorld, w.kind == .voxel, let sc = w.sculpture else { return [] }
         let s = Self.k3DControlSize
         let y = sc.base + s / 2, z = sc.z + 3.5
-        return [(Self.k3DControlExit, sc.x + 2.0, y, z, s), (Self.k3DControlPower, sc.x + 2.9, y, z, s)]
-            .map { ($0.0, $0.1, $0.2, $0.3 + ($0.0 == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0), $0.4) }
+        var out: [(id: String, x: Double, y: Double, z: Double, yaw: Double, size: Double)] =
+            [(Self.k3DControlExit, sc.x + 2.0, y, z, 0, s), (Self.k3DControlPower, sc.x + 2.9, y, z, 0, s)]
+            .map { ($0.0, $0.1, $0.2, $0.3 + ($0.0 == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0), $0.4, $0.5) }
+        if let d = _desktop3DPowerDialog {
+            // The signboard's buttons, under its panel, left and right;
+            // the hovered one comes toward the viewer.
+            let b = Self.k3DDialogButton
+            let right = (x: cos(d.yaw), z: -sin(d.yaw))   // the panel's own right, facing the viewer
+            let toward = (x: sin(d.yaw), z: cos(d.yaw))   // the panel's normal: toward the viewer
+            for (id, side) in [(Self.k3DControlCancel, -0.45), (Self.k3DControlShutDown, 0.45)] {
+                let out_ = id == _desktop3DHoveredSign ? Self.k3DSculptHoverOut : 0.0
+                out.append((id, d.x + right.x * side + toward.x * (0.15 + out_),
+                            d.y - Self.k3DDialogHeight / 2 - b / 2 - 0.12,
+                            d.z + right.z * side + toward.z * (0.15 + out_), d.yaw, b))
+            }
+        }
+        return out
+    }
+
+    /// The signboard's panel: planks with the question on them, or nil
+    /// when the power has not been pressed.
+    func _desktop3DDialogPanel() -> (x: Double, y: Double, z: Double, yaw: Double, w: Double, h: Double)? {
+        guard let d = _desktop3DPowerDialog else { return nil }
+        return (d.x, d.y, d.z, d.yaw, Self.k3DDialogWidth, Self.k3DDialogHeight)
+    }
+
+    /// The panel's picture: the world's planks, a dark edge, the title and
+    /// the question in white over a hard shadow.
+    func _desktop3DDialogTexture() -> Int64? {
+        #if os(Linux)
+        let key = "@powerpanel"
+        if let t = _appLabelTextures[key] { return t }
+        guard let registry = drmTextureRegistry, let wl = waylandIntegration else { return nil }
+        let w = 512, h = 256
+        let recorder = NativePictureRecorder()
+        let canvas = NativeCanvas(recorder: recorder)
+        let paint = Paint()
+        if let tile = _worldFrameTile {
+            paint.filterQuality = .none
+            let src = Rect.fromLTWH(0, 0, Double(tile.width), Double(tile.height))
+            let step = Double(tile.width) * 2
+            var y = 0.0
+            while y < Double(h) {
+                var x = 0.0
+                while x < Double(w) {
+                    canvas.drawImageRect(tile, src, Rect.fromLTWH(x, y, step, step), paint)
+                    x += step
+                }
+                y += step
+            }
+        } else {
+            paint.color = Color(0xFF946B40)
+            canvas.drawRect(Rect.fromLTWH(0, 0, Double(w), Double(h)), paint)
+        }
+        paint.color = Color(0xFF2E2013)
+        paint.style = .stroke
+        paint.strokeWidth = 8
+        canvas.drawRect(Rect.fromLTWH(4, 4, Double(w) - 8, Double(h) - 8), paint)
+        func text(_ str: String, _ size: Double, _ weight: FontWeight, _ top: Double) {
+            for (dx, dy, c) in [(3.0, 3.0, Color(0xC0000000)), (0.0, 0.0, Color(0xFFFFFFFF))] {
+                let pb = NativeParagraphBuilder(ParagraphStyle(textAlign: .center, fontSize: size, fontWeight: weight))
+                pb.pushStyle(TextStyle(color: c, fontWeight: weight, fontSize: size))
+                pb.addText(str)
+                let para = pb.build()
+                para.layout(ParagraphConstraints(width: Double(w)))
+                canvas.drawParagraph(para, Offset(dx, top + dy))
+            }
+        }
+        text("Shut Down", 44, .w700, 52)
+        text(PowerAction.shutDown.prompt, 30, .w600, 132)
+        let picture = recorder.endRecording()
+        guard let image = picture.toImageSync(width: w, height: h) else { return nil }
+        defer { image.dispose() }
+        guard let bytes = try? image.toByteData(format: .rawRgba) else { return nil }
+        let tex = registry.registerTexture(engine: wl.engine)
+        bytes.withUnsafeBytes { raw in
+            registry.updatePixelData(engine: wl.engine, id: tex, data: raw.baseAddress!, width: w, height: h)
+        }
+        _appLabelTextures[key] = tex
+        return tex
+        #else
+        return nil
+        #endif
     }
 
     /// A control block's face: a dark block with the glyph in white — a
@@ -1284,6 +1377,22 @@ extension _DesktopShellState {
             // The ring, open at the top, and the bar through the gap.
             canvas.drawArc(Rect.fromLTWH(30, 30, 68, 68), -Double.pi / 2 + 0.55, 2 * Double.pi - 1.1, false, paint)
             canvas.drawLine(Offset(64, 22), Offset(64, 64), paint)
+        } else if id == Self.k3DControlCancel || id == Self.k3DControlShutDown {
+            // A button block: its word on its face.
+            paint.style = .fill
+            paint.color = id == Self.k3DControlCancel ? Color(0xFF5A6270) : Color(0xFFC8383E)
+            canvas.drawRect(Rect.fromLTWH(0, 0, Double(s), Double(s)), paint)
+            paint.color = Color(0x50000000)
+            canvas.drawRect(Rect.fromLTWH(0, Double(s) - 10, Double(s), 10), paint)
+            let word = id == Self.k3DControlCancel ? "Cancel" : "Shut\nDown"
+            for (dx, dy, c) in [(2.0, 2.0, Color(0xB0000000)), (0.0, 0.0, Color(0xFFFFFFFF))] {
+                let pb = NativeParagraphBuilder(ParagraphStyle(textAlign: .center, fontSize: 26, fontWeight: .w700))
+                pb.pushStyle(TextStyle(color: c, fontWeight: .w700, fontSize: 26))
+                pb.addText(word)
+                let para = pb.build()
+                para.layout(ParagraphConstraints(width: Double(s)))
+                canvas.drawParagraph(para, Offset(dx, (id == Self.k3DControlCancel ? 48 : 32) + dy))
+            }
         } else {
             paint.color = Color(0xFFFFFFFF)
             // A door frame, and an arrow leaving through it.
@@ -1344,73 +1453,28 @@ extension _DesktopShellState {
     }
 
     /// A control block pressed: the door leaves the world for the flat
-    /// desktop; the power asks first.
+    /// desktop; the power raises the signboard in front of the viewer,
+    /// facing them; the signboard's blocks answer it.
     func _desktop3DControlActivate(_ id: String) {
         _desktop3DLog("control \(id)")
-        if id == Self.k3DControlExit {
+        switch id {
+        case Self.k3DControlExit:
             _setDesktop3D(false)
-        } else if id == Self.k3DControlPower {
-            setState { _desktop3DConfirmPower = true }
+        case Self.k3DControlPower:
+            let c = _camera3D
+            let f = (x: sin(c.yaw), z: -cos(c.yaw))
+            setState {
+                _desktop3DPowerDialog = (c.x + f.x * Self.k3DDialogDistance, c.y + 0.15,
+                                         c.z + f.z * Self.k3DDialogDistance, -c.yaw)
+            }
+        case Self.k3DControlCancel:
+            setState { _desktop3DPowerDialog = nil }
+        case Self.k3DControlShutDown:
+            setState { _desktop3DPowerDialog = nil }
+            _runPowerAction(.shutDown)
+        default:
+            break
         }
-    }
-
-    /// The world's dialog, if one is up: "Shut down the computer?" over a
-    /// scrim, in the middle of the screen. A press on the scrim is a no.
-    func _desktop3DDialog() -> Widget? {
-        guard _desktop3DConfirmPower else { return nil }
-        func button(_ label: String, destructive: Bool, _ onTap: @escaping () -> Void) -> Widget {
-            GestureDetector(
-                onTap: onTap,
-                behavior: .opaque,
-                child: DecoratedBox(
-                    decoration: BoxDecoration(
-                        color: destructive ? shellTheme.accent : shellTheme.hoverFill,
-                        borderRadius: BorderRadius.circular(6)),
-                    child: Padding(
-                        padding: EdgeInsets(left: 16, top: 7, right: 16, bottom: 7),
-                        child: Text(label, style: TextStyle(
-                            color: destructive ? shellTheme.accentInk : shellTheme.fgPrimary,
-                            fontSize: 13, fontWeight: .w600, fontFamily: shellTheme.fontFamilyStrong)))))
-        }
-        let panel = DecoratedBox(
-            decoration: BoxDecoration(color: Color(0xF0262A31), borderRadius: BorderRadius.circular(12)),
-            child: Padding(
-                padding: EdgeInsets(left: 22, top: 18, right: 22, bottom: 18),
-                child: Column(
-                    mainAxisSize: .min,
-                    crossAxisAlignment: .start,
-                    children: [
-                        Text("Shut Down", style: TextStyle(color: Color(0xFFFFFFFF), fontSize: 15,
-                                                           fontWeight: .w700, fontFamily: shellTheme.fontFamilyStrong)),
-                        SizedBox(height: 6),
-                        Text(PowerAction.shutDown.prompt,
-                             style: TextStyle(color: Color(0xFFC8CCD2), fontSize: 13, fontFamily: shellTheme.fontFamily)),
-                        SizedBox(height: 16),
-                        Row(
-                            mainAxisAlignment: .end,
-                            children: [
-                                button("Cancel", destructive: false) { [self] in
-                                    setState { _desktop3DConfirmPower = false }
-                                },
-                                SizedBox(width: 10),
-                                button("Shut Down", destructive: true) { [self] in
-                                    setState { _desktop3DConfirmPower = false }
-                                    _runPowerAction(.shutDown)
-                                },
-                            ]),
-                    ])))
-        return Positioned(
-            fill: (),
-            child: Listener(
-                onPointerDown: { [self] _ in setState { _desktop3DConfirmPower = false } },
-                behavior: .opaque,
-                child: ColoredBox(
-                    color: Color(0x66000000),
-                    child: Center(
-                        child: Listener(
-                            onPointerDown: { _ in },
-                            behavior: .opaque,
-                            child: SizedBox(width: 360, child: panel))))))
     }
 
     // MARK: The sculpture — the dock as a spiral of blocks
@@ -1774,7 +1838,14 @@ extension _DesktopShellState {
     /// may be the start of a drag — a click is decided on release; on any
     /// other sign it is a click.
     func _desktop3DSignDown(_ screen: Offset) {
-        guard _desktop3DVoxel, _desktop3DBrickDrag == nil, let app = _desktop3DSignAtVisible(screen) else { return }
+        guard _desktop3DVoxel, _desktop3DBrickDrag == nil else { return }
+        let hit = _desktop3DSignAtVisible(screen)
+        if _desktop3DPowerDialog != nil, hit != Self.k3DControlCancel, hit != Self.k3DControlShutDown {
+            // The signboard is up: a press anywhere else is a no.
+            setState { _desktop3DPowerDialog = nil }
+            return
+        }
+        guard let app = hit else { return }
         if app.hasPrefix("@") {
             _desktop3DControlActivate(app)
         } else if _desktop3DSculpture().contains(where: { $0.app == app }) {

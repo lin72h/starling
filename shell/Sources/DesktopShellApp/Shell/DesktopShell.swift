@@ -703,8 +703,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DBricks: [String: BrickBody] = [:]
     var _brickTicker: Ticker? = nil
     var _brickClock: Double = 0
-    /// The world's power block was pressed: "Shut down the computer?"
-    var _desktop3DConfirmPower = false
+    /// The world's power block was pressed: where the "Shut down the
+    /// computer?" signboard stands, facing the viewer, and which way.
+    var _desktop3DPowerDialog: (x: Double, y: Double, z: Double, yaw: Double)? = nil
     /// Runs only while the lean is catching up with the pointer, so a still
     /// pointer costs nothing.
     var _lean3DTicker: Ticker? = nil
@@ -4915,13 +4916,6 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         if !(_missionControlOpen && mcIsOnHost) {
             children.append(Positioned(fill: (), child: LayerSurfacesLayer(
                 shell: self, layers: [2, 3], slot: "above")))
-        }
-
-        // The world's own dialogs (the power block's confirm), above
-        // everything in a chromeless world, which has no status bar to
-        // hang the usual panel from.
-        if _desktop3DChromeless, let dialog = _desktop3DDialog() {
-            children.append(dialog)
         }
 
         // Edge cursor sensors for macOS-style auto-hide. While in fullscreen

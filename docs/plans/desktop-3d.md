@@ -44,7 +44,8 @@ touching anything.
   out, and can be re-piled by hand (Phases 17–19; the signboard tower,
   the floating spiral and the tall curling stack before it were each
   rejected), a door block out of the world and a power block on the
-  pool's rim (Phase 20), and windows
+  pool's rim, whose confirm is a plank signboard with block buttons
+  (Phases 20–21), and windows
   wear the world's block chrome (Phase 13). The city is
   the direction. Since Phase
   11 it is 96 blocks across with eight building styles, doors and
@@ -1423,6 +1424,23 @@ and a world thing is "there" for the pointer only when no pane is
 nearer (`_desktop3DSignAtVisible`: the pane under the pointer via the
 ray-plane test, its depth against the thing's). A window's walk-up
 yields to a nearer brick or control the same way.
+
+### Phase 21 — the signboard (2026-09-18)
+
+"The dialog should be in 3D model style." The flat confirm is gone;
+pressing the power block raises a SIGNBOARD 2.4 m in front of the
+viewer, facing them: a plank panel (the world's frame tile, a dark
+edge, the title and the question in the world's lettering — a label
+with a fixed yaw) with two block buttons under it, Cancel in stone
+grey and Shut Down in red, their words on their faces. They are
+controls like the door and the power: hover brings one forward, a
+press answers; a press anywhere else is a no. Placed once, where the
+viewer stood when they pressed; walk round it and it is a board on
+the square.
+
+The cube's top face took its picture turned half round (the side
+faces' UV rule, seen from above); tops and bottoms now take it turned
+back, so a word on a block's top reads from the front.
 
 ### Still open
 
