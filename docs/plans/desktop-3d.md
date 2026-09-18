@@ -41,7 +41,8 @@ touching anything.
   happened, because that was wired for the orrery only). **The dock is
   a small building of bricks in the pool**, with weight: the apps as lit
   blocks in courses that tip and fall when what held them is pulled
-  out, and can be re-piled by hand (Phases 17–19; the signboard tower,
+  out, and can be carried anywhere in the city and piled by hand
+  (Phases 17–19, 24; the signboard tower,
   the floating spiral and the tall curling stack before it were each
   rejected), a door block on the pool's rim that is the way back to the
   flat desktop (Phases 20–22), and windows
@@ -1459,6 +1460,25 @@ three-key chord on a laptop whose Home is Fn+Left, and their press
 never reached the shell as Home at all. So: **Escape** leaves the room
 while nothing has the keyboard, and **Alt+Escape** leaves it at any
 time. The door block stays for the mouse.
+
+### Phase 24 — anywhere in the city (2026-09-18)
+
+"We should allow moving the icon box to anywhere in the city." The
+bricks leave the wall's plane: bodies in x, y and z over the whole
+square. A carried brick rides the ground the pointer points at, a
+little above it — plaza, street, the pool's water (a step higher) —
+kept inside the world; let go, it falls and settles there, or on
+whatever brick it is over. The physics generalises: supports are
+rectangles in x and z, a brick tips along whichever axis its centre is
+past the edge of (a tip along z is drawn as yaw 90° and a roll), and a
+falling brick slides off a brick it is beside along the shorter way
+out. The nameplate stands over the hovered brick's own column, and the
+hovered brick comes toward the viewer rather than toward +z. The 2.2 m
+reach is gone.
+
+Buildings are not solid to bricks: one dropped over a shop lands on
+the plaza level inside it. The heightmap is level and nothing in it is
+a wall — the same thing that lets the viewer walk through walls.
 
 ### Still open
 

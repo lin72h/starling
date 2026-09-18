@@ -9052,14 +9052,17 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 /// rest, falling, tipping about a corner, or in the user's hand.
 struct BrickBody {
     enum Mode { case rest, fall, tumble, held }
-    var x: Double, y: Double
-    var roll = 0.0
+    var x: Double, y: Double, z: Double
+    var yaw = 0.0, roll = 0.0
     var vy = 0.0
     var mode: Mode = .rest
-    // Tipping: the point it turns about, which way (+1 left), how far it
-    // has turned, and where its centre started relative to the pivot.
-    var pivot: (x: Double, y: Double) = (0, 0)
-    var dir = 1.0
+    // Tipping: along x or along z; the edge it turns about (its position
+    // along that axis, and its height), which way along the axis (+1 or
+    // −1), how far it has turned, and where its centre started relative
+    // to the pivot (along the axis, and up).
+    var alongZ = false
+    var pivot: (a: Double, y: Double) = (0, 0)
+    var sigma = 1.0
     var angle = 0.0
-    var rel: (x: Double, y: Double) = (0, 0)
+    var rel: (a: Double, y: Double) = (0, 0)
 }
