@@ -713,6 +713,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The last click on a brick, so the second click of a double-click
     /// does not open the app twice.
     var _desktop3DBrickClick: (app: String, at: Double)? = nil
+    /// The one window the city shows (Desktop3D, "One window on screen").
+    var _desktop3DShownWindowId: String? = nil
     /// The city's window switcher while Alt+Tab holds it open: the windows
     /// in their order round the ring, which is chosen, and where each stood
     /// before — to go back to on Escape (Desktop3D, "The switcher").
@@ -4659,7 +4661,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // with the room already open.
         if _desktop3DT > 0 {
             if _desktop3DOrrery { _desktop3DLayoutOrrery() }
-            else if _desktop3DVoxel { _desktop3DPlaceWindows(); _desktop3DLayoutVoxel() }
+            else if _desktop3DVoxel { _desktop3DPlaceWindows(); _desktop3DUpdateShown(); _desktop3DLayoutVoxel() }
             else { _desktop3DPlaceWindows() }
             // When the room draws the windows itself, tell it where they
             // are before their widgets are built at the same places.
@@ -4678,6 +4680,9 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         for (win, layerDx) in orderedWindows {
             let winId = win.id
             liveWindowIds.insert(winId)
+            // The city shows one window; the rest have no widget either,
+            // so nothing of theirs is drawn or hit.
+            if _desktop3DT > 0, !_desktop3DIsShown(win) { continue }
             let isFocused = win.id == windowManager.focusedWindowId
             // Only the topmost fullscreen window gets the reveal flag — other
             // windows underneath are not affected.

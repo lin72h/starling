@@ -46,6 +46,13 @@ they said.
   across the square is walked up to (a 380 ms glide, the click kept
   from the app). Fullscreen works there (emerald block; the top-edge
   reveal shows the bar alone, no status bar).
+- **One window on screen.** The city shows the window that has the
+  focus (else the last one it showed, else the front-most), in front
+  of you at 1:1; every other window is out of sight. A new window, or
+  one that gains the focus, flies to the front and the previous one
+  goes; closing the front one hands the screen to the next. The rest
+  come back only on the ring (below), and glide out of sight again
+  after it. Step aside (Alt+A/D) to see the bricks past the window.
 - **Alt+Tab swings the open windows round you.** Hold Alt and press
   Tab: every open window glides onto a ring round where you stand, at
   eye height, facing in, the one you had before straight ahead and a
@@ -1779,6 +1786,34 @@ Instant pose writes elsewhere are untouched.
 
 Harness: `keydown alt`, `key tab` … `keyup alt` in ONE shell-drive
 invocation; `[3D] switcher open/select/commit/cancel` in the log.
+
+### Phase 36 — one window on screen (2026-09-18)
+
+"We shouldn't have multiple apps shown up on the same screen. Only
+one app has focus and is shown; other apps should be hidden from
+screen. Alt+Tab can show the switcher to switch." So the city shows
+ONE window now (`_desktop3DIsShown`): the focused one, else the last
+shown, else the front-most (`_desktop3DUpdateShown`, run each build
+before the layout). When the shown window changes to one that is not
+in front of the viewer it is brought there — gliding, while the city
+is up (a window closing hands the screen to the next, which flies in
+from wherever it stood); placed outright during the entrance, before
+anything is seen. Hidden windows have no widget, no pane, no
+nameplate, and take no hit — every enumeration in the city filters
+on the rule, and the rule says yes to a fullscreen window, to every
+window on the ring, and to one still gliding back from it, so the
+ring's windows fly home and vanish rather than blink out. Nothing is
+hidden on the flat desktop nor while leaving, so on Escape they all
+fly home with the rest. A click on a ring window chooses it.
+
+The arc is still where arrivals are parked (out of sight) and where
+the ring's windows fly in from — which reads well: Alt+Tab, and the
+city's windows come in from around the square.
+
+Trap, for the harness and for reading a test: the dev box is the
+user's laptop and they are AT it. Five step-ups with no key in the
+drive script were a held Space at the real keyboard, not a bug — the
+log's `step up:` burst at key-repeat rate is the tell.
 
 ### Still open
 

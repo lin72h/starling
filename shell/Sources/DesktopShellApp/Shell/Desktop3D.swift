@@ -455,6 +455,50 @@ extension _DesktopShellState {
         _launchOrFocusApp(app)
     }
 
+    // MARK: One window on screen
+
+    /// The city shows ONE window: the one with the focus, else the one it
+    /// showed last, else the front-most. The rest are out of sight until
+    /// Alt+Tab brings them onto the ring — and stay in sight while they
+    /// glide back from it. A fullscreen window is the screen and is
+    /// always drawn; nothing is hidden on the flat desktop, nor while the
+    /// city is being left, so windows fly home with the rest.
+    func _desktop3DIsShown(_ win: WindowInfo) -> Bool {
+        guard _desktop3DVoxel, _desktop3DOn, _desktop3DT > 0 else { return true }
+        if win.isFullscreen || win.id == _desktop3DShownWindowId { return true }
+        if let sw = _desktop3DSwitcher, sw.ids.contains(win.id) { return true }
+        return _desktop3DPoseTweens[win.id] != nil
+    }
+
+    /// Decide which window the city shows this build, and when that
+    /// changes to a window that is not in front of the viewer, bring it
+    /// there: gliding in while the city is up (a window closing hands the
+    /// screen to the next, which flies in from wherever it stood), and
+    /// simply placed there during the entrance, before anything is seen.
+    func _desktop3DUpdateShown() {
+        guard _desktop3DVoxel, _desktop3DOn else { _desktop3DShownWindowId = nil; return }
+        let candidates = windowManager.visibleWindows.filter { !$0.isFullscreen && $0.pose3D.placed }
+        let shown: WindowInfo?
+        if let f = windowManager.focusedWindowId, let w = candidates.first(where: { $0.id == f }) {
+            shown = w
+        } else if let last = _desktop3DShownWindowId, let w = candidates.first(where: { $0.id == last }) {
+            shown = w
+        } else {
+            shown = candidates.max { $0.zIndex < $1.zIndex }
+        }
+        guard let win = shown else { _desktop3DShownWindowId = nil; return }
+        guard win.id != _desktop3DShownWindowId else { return }
+        _desktop3DShownWindowId = win.id
+        _desktop3DLog("shown: \(win.title)")
+        guard _desktop3DPoseTweens[win.id] == nil, let w = _desktop3DWorld else { return }
+        let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        let target = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
+        let p = win.pose3D
+        let away = ((p.x - target.x) * (p.x - target.x) + (p.z - target.z) * (p.z - target.z)).squareRoot()
+        guard away > 0.05 || abs(p.yaw - target.yaw) > 0.01 || abs(p.scale - 1) > 0.01 else { return }
+        if _desktop3DT >= 1 { _desktop3DTween(win, to: target) } else { win.pose3D = target }
+    }
+
     // MARK: Windows on the move
 
     /// Send a window gliding to `pose` rather than cutting: the switcher's
@@ -987,7 +1031,7 @@ extension _DesktopShellState {
         let c = _camera3D
         let fx = sin(c.yaw), fz = -cos(c.yaw)
         var best: (WindowInfo, Double)? = nil
-        for win in windowManager.visibleWindows where win.pose3D.placed {
+        for win in windowManager.visibleWindows where win.pose3D.placed && _desktop3DIsShown(win) {
             let p = win.pose3D
             let dx = p.x - c.x, dz = p.z - c.z
             let len = (dx * dx + dz * dz).squareRoot()
@@ -1022,6 +1066,13 @@ extension _DesktopShellState {
     /// it the focus. In the orrery this is also what a click on a moon
     /// does: the moon grows to a window and the viewer steps up to it.
     func _desktop3DStepUp(to winner: WindowInfo) {
+        // On the ring, a click on a window is a choice, not a walk.
+        if var sw = _desktop3DSwitcher, let i = sw.ids.firstIndex(of: winner.id) {
+            sw.selected = i
+            _desktop3DSwitcher = sw
+            _desktop3DSwitcherCommit()
+            return
+        }
         let host = displayLayout?.host.logicalRect
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         let p = winner.pose3D
@@ -1358,7 +1409,7 @@ extension _DesktopShellState {
         let s = Self.k3DMetresPerPx
         let titleH = shellMetrics.titleBarHeight
         var specs: [ScenePane] = []
-        for win in windowManager.visibleWindows where !win.isFullscreen {
+        for win in windowManager.visibleWindows where !win.isFullscreen && _desktop3DIsShown(win) {
             guard let texId = win.textureId, win.rect.height > titleH else { continue }
             let p = _desktop3DLerpPose(rect: win.rect, host: host, t: t, pose: win.pose3D)
             let k = s * p.scale
@@ -1450,7 +1501,7 @@ extension _DesktopShellState {
         // (_desktop3DPlaceWindows: the arc, or in front of the viewer for
         // a pop-up) and kept; here their nameplates, the pile and the door
         // are laid out round them.
-        let windows = windowManager.visibleWindows.filter { !$0.isFullscreen && $0.pose3D.placed }
+        let windows = windowManager.visibleWindows.filter { !$0.isFullscreen && $0.pose3D.placed && _desktop3DIsShown($0) }
         var labels: [SceneLabel] = []
         var groups: [String: [(x: Double, y: Double, z: Double, top: Double)]] = [:]
         for win in windows {
@@ -2390,7 +2441,7 @@ extension _DesktopShellState {
         let cam = _desktop3DEffectiveCamera(_desktop3DT)
         let s = Self.k3DMetresPerPx
         var best: (win: WindowInfo, depth: Double)? = nil
-        for win in windowManager.visibleWindows where win.pose3D.placed && !win.isFullscreen {
+        for win in windowManager.visibleWindows where win.pose3D.placed && !win.isFullscreen && _desktop3DIsShown(win) {
             let p = win.pose3D
             guard let (u, v) = _desktop3DPlaneHit(screen, camera: cam, host: host, pose: p),
                   abs(u) <= win.rect.width * s * p.scale / 2, abs(v) <= win.rect.height * s * p.scale / 2 else { continue }
