@@ -165,6 +165,7 @@ extension _DesktopShellState {
             var isFirstParent = true
             var popupSpaceId: Int? = nil
             var popupLayerRoot: UInt32? = nil
+            var parentWindowId: String? = nil
             while true {
                 // Check if parent is another popup (a submenu's menu)
                 if let parentPopup = popups["popup-\(parentSurfaceId)"]
@@ -203,6 +204,7 @@ extension _DesktopShellState {
                     absX += parentWin.rect.left
                     absY += parentWin.rect.top + DesktopTheme.kTitleBarHeight
                     popupSpaceId = parentWin.spaceId
+                    parentWindowId = parentWin.id
                     if isFirstParent {
                         // Direct child of toplevel — no flip needed for x
                         immediateParentAbsX = parentWin.rect.left
@@ -350,13 +352,32 @@ extension _DesktopShellState {
                 popupChild = flipped
             }
 
+            // In the room, the popup rides its window's pane: the same
+            // matrix, centred on the same pivot made popup-local, so a menu
+            // on a window seen at an angle lies on the glass with it and
+            // its clicks map back through the same inverse. A window not
+            // drawn (behind the viewer, out of sight) keeps its popups too.
+            var popupBody: Widget = popupChild
+            if let pid = parentWindowId, let placement = _desktop3DPopupPlacements[pid] {
+                switch placement {
+                case .hidden:
+                    continue
+                case .posed(let m, let pivot):
+                    popupBody = Transform(
+                        transform: m,
+                        origin: Offset(pivot.dx - absX, pivot.dy - absY),
+                        child: popupChild)
+                case .flat:
+                    break
+                }
+            }
             let positioned = Positioned(
                 key: ValueKey(popupId),
                 left: absX,
                 top: absY,
                 width: popup.width,
                 height: popup.height,
-                child: popupChild
+                child: popupBody
             )
             // A menu on a top/overlay layer surface must sit above it, and
             // that layer is drawn after this pass.

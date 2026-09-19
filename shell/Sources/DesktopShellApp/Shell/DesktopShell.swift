@@ -284,6 +284,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The overlay layers' own states (OverlayLayers.swift): a popup or a
     /// layer-surface change rebuilds these, not the whole desktop.
     var _popupLayerState: PopupLayerState? = nil
+    /// Where each window stood in the room at the last build, for its
+    /// popups: a menu, a tooltip or a dropdown is drawn through the same
+    /// transform as the window it hangs off, so it lies ON the pane rather
+    /// than floating at the spot the window has on the flat desktop.
+    /// Empty on the flat desktop; a hidden window's popups are not drawn.
+    var _desktop3DPopupPlacements: [String: Desktop3DPlacement] = [:]
     /// wl_data_device drag: the icon surface riding the pointer
     /// (DragAndDrop.swift). Size arrives with its first buffer.
     var _dragIcon: (id: String, textureId: Int, width: Double, height: Double)? = nil
@@ -4692,6 +4698,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
             if _desktop3DScene { _desktop3DPublishPanes() }
         }
         let camera3D = _desktop3DEffectiveCamera(_desktop3DT)
+        _desktop3DPopupPlacements = [:]
         let orderedWindows: [(win: WindowInfo, layerDx: Double)] = _desktop3DT > 0
             ? layerWindows.sorted {
                 _desktop3DDistance(rect: $0.win.rect.translate($0.layerDx, 0),
@@ -4725,6 +4732,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 ? _desktop3DPlacement(rect: posedRect, t: _desktop3DT,
                                       camera: camera3D, pose: win.pose3D)
                 : .flat
+            if _desktop3DT > 0 { _desktop3DPopupPlacements[win.id] = placement }
             if case .hidden = placement {
                 _desktop3DLog("place \(win.title): HIDDEN rect=\(posedRect) pose=\(win.pose3D) cam=\(camera3D)")
                 continue
