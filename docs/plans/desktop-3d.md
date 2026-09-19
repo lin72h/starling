@@ -1935,6 +1935,28 @@ Idle in the city sits at ~13% there, spread over a dozen engine
 threads at 1% each — not the 0.00% the flat desktop idles at in
 display mode. Not chased yet.
 
+**And through Windows' own client:** `mstsc /v:localhost:3390 /w:1280
+/h:800`, run as an interactive scheduled task in the box's logged-in
+session (`~/tmp/filament/wsl/mstsc-view.ps1` + `.vbs` runner, the
+`capture-winshell.sh` shape), connected, activated (`NSCodec`), and
+showed the GPU-rendered city — Terminal in its brick frame, the
+street beyond — for the 45 s it was left open. Same frames as
+FreeRDP, as it must be. Two traps on the way:
+
+- **The WSL distro dies with the last `wsl.exe` session.** A shell
+  started from an ssh'd `wsl -- bash script.sh` lives exactly as long
+  as that command; once it returned, the distro shut down, `/tmp` and
+  the log with it, and mstsc sat at "Configuring remote session…"
+  against nothing. Keep the launching ssh open in the background for
+  as long as the desktop is wanted, and `tail -F` the session log to
+  `/mnt/c/dist` so a crash leaves evidence.
+- **Never `SendKeys` blind on that box.** It is a live desktop: Edge
+  was open on a GitHub issue when the first attempt typed "hello
+  world" at whatever was in front (the page scrolled; nothing worse).
+  mstsc is a viewer there; drive input from the WSL side.
+
+### Still open
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
