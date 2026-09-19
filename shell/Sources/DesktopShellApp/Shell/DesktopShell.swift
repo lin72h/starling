@@ -3650,9 +3650,20 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
 
     /// macOS-style: double-click the title bar toggles maximized state. Skipped
     /// while fullscreen — the green button owns that.
+    ///
+    /// In the room, with the window hanging on a wall, maximizing means
+    /// nothing (it only made the pane grow to the screen's size in metres):
+    /// there a double-click walks the viewer up to it — square on, at 1:1,
+    /// the pane centred on screen — the way a click on a window across the
+    /// square does.
     func requestWindowTitleBarDoubleTap(_ winId: String) {
+        _desktop3DLog("title double-tap \(winId): on=\(_desktop3DOn) t=\(_desktop3DT)")
         guard let w = windowManager.windows.first(where: { $0.id == winId }),
               !w.isFullscreen else { return }
+        if _desktop3DOn, _desktop3DT >= 1, w.pose3D.placed {
+            _desktop3DStepUp(to: w)
+            return
+        }
         setState {
             windowManager.maximizeWindow(
                 winId,
@@ -4793,6 +4804,7 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                             windowManager.bringToFront(winId)
                             _layerKeyboardSurface = nil
                         }
+                        _desktop3DLog("bring to front \(winId): walkUp=\(walkUp) t=\(_desktop3DT) sign=\(_desktop3DSignAtVisible(_lastPointer) ?? "-") at \(_lastPointer)")
                         // A moon that is clicked grows into its window and
                         // the viewer steps up to it; in the city, a window
                         // clicked from across the square is walked up to

@@ -1077,6 +1077,7 @@ extension _DesktopShellState {
             ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         let p = winner.pose3D
         let d1 = _desktop3DFocalPx(host) * Self.k3DMetresPerPx
+        _desktop3DLog("step up to \(winner.title): pose=\(p) cam=\(_camera3D)")
         setState { windowManager.bringToFront(winner.id) }
         // Square on to the pane, at the 1:1 distance, eye on its centre.
         // The pane's normal is (sin yaw, 0, cos yaw) and the camera
