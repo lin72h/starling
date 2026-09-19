@@ -344,7 +344,7 @@ class LinuxProcessAppManager {
                 // The child signaled its first frame before the texture was
                 // registered — deliver it now or the window never appears.
                 if earlyFrame {
-                    FlutterEngineMarkExternalTextureFrameAvailable(engine, texId)
+                    textureRegistry.noteFrameAvailable(engine: engine, id: texId)
                     if let cb = firstFrameCallbacks.removeValue(forKey: texId) {
                         cb()
                     }
@@ -437,7 +437,7 @@ class LinuxProcessAppManager {
                     FileHandle.standardError.write(Data(
                         "[ProcessApp] frame for tex=\(texId) but no cpuMap (dma-buf app)\n".utf8))
                 }
-                FlutterEngineMarkExternalTextureFrameAvailable(engine, texId)
+                textureRegistry.noteFrameAvailable(engine: engine, id: texId)
                 if let cb = firstFrameCallbacks.removeValue(forKey: texId) {
                     cb()
                 }

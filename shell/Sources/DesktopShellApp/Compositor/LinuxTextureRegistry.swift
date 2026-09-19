@@ -389,11 +389,32 @@ class LinuxTextureRegistry: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// A new frame on a texture whose pixels arrive by some path other
+    /// than this registry's own uploads — a child app's dma-buf that the
+    /// process manager attached once and the child redraws in place. Same
+    /// contract as the uploads: the engine is told, and a scene the
+    /// texture is mirrored into redraws. Calling the engine directly
+    /// skips the second half, which is what left a first-party window in
+    /// the city showing stale content until the camera moved.
+    func noteFrameAvailable(engine: OpaquePointer, id: Int64) {
+        frameAvailable(engine: engine, id: id)
+    }
+
     /// Every "this texture has a new frame" goes through here.
     private func frameAvailable(engine: OpaquePointer, id: Int64) {
         FlutterEngineMarkExternalTextureFrameAvailable(engine, id)
         lock.lock()
         let mirror = sceneMirror
+        // A client's new picture is a change to the SCENE it is drawn in:
+        // the scene renderer has to draw again, not merely be composited
+        // again. Marking the scene's texture available did the second and
+        // not the first, so a window in the city showed what its app had
+        // drawn only when something else — the camera leaning after the
+        // mouse — made the scene redraw: typing with the mouse still put
+        // nothing on screen, and read as a slow keyboard.
+        if mirror.target >= 0, mirror.ids.contains(id) {
+            entries[mirror.target]?.glRenderer?.dirty = true
+        }
         lock.unlock()
         if mirror.target >= 0, mirror.ids.contains(id) {
             markGLTextureDirty(engine: engine, id: mirror.target)

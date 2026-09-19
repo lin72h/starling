@@ -2704,6 +2704,12 @@ extension _DesktopShellState {
     /// nothing else is happening: a full-screen pass per frame.
     func _startSceneClock() {
         #if os(Linux)
+        // The Filament room is a still picture between changes — its tick
+        // is a no-op and every change (camera, panes, labels, a client's
+        // frame) marks it itself. A ticker here only made the engine
+        // composite the same frame sixty times a second: 120 page flips
+        // in two idle seconds, for nothing on screen.
+        if _environment is FilamentRoomRenderer { return }
         if _sceneTicker == nil {
             _sceneTicker = createTicker { [weak self] elapsed in
                 guard let self, let env = self._environment,

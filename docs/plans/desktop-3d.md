@@ -1823,6 +1823,47 @@ roof (it dated from the arc, where windows were read from across the
 square). The block title bar names the window, and on the ring each
 window is read at once. A hovered brick still wears its name.
 
+### Phase 38 — typing looked slow in the city (2026-09-18)
+
+"When app is not in fullscreen, the response to keyboard is slow, you
+can try terminal" — "or is it due to refresh rate in 3D not fast?" Not
+the refresh rate: the city was presenting sixty frames a second while
+idle (120 page flips in two seconds, by the debugfs fb-id oracle). It
+was not REDRAWING the window's picture. The room renders into its
+texture only when something marks it dirty (camera, panes, labels),
+and a client's new frame did not: the scene mirror in the texture
+registry told the engine the room's texture had a new frame, so the
+engine composited the same stale room again. Typed text appeared only
+when the pointer moved and the lean dirtied the camera. Proven with a
+keyboard-only driver (no pointer) and a SIGUSR1 screenshot: the prompt
+empty after "hello"; one pointer move later, "hello".
+
+Two halves to the fix, and a third that was hiding behind them:
+
+- The mirror now sets the room renderer dirty as well as telling the
+  engine (`LinuxTextureRegistry.frameAvailable`).
+- First-party apps never reached the mirror at all: the process
+  manager announced a child's frames to the engine DIRECTLY
+  (`FlutterEngineMarkExternalTextureFrameAvailable`), skipping the
+  registry, so the first half alone fixed Chrome and not Terminal.
+  `noteFrameAvailable` routes them through. (X11Integration has the
+  same direct call and was left alone: X11 is out of scope unless
+  asked.)
+- The scene ticker was started for the Filament room too, whose tick
+  is a no-op: sixty composites a second of the same frame, for
+  nothing. It is not started for the Filament renderer now. Idle
+  flips: 120 per two seconds → 3.
+
+Measured after (installed session, Terminal as a pane, 12 keys):
+key → first page flip median 24 ms, min 4, max 30 — one to two
+frames — and the same with the window fullscreen. Rig:
+`~/tmp/filament/lat/` (`rig.py` keyboard + fb-id poller, `still.py`
+keyboard-only typing, `keylog.py` for the app side). Lessons: with
+sixty idle flips a second the fb-id oracle cannot see a response, so
+check the baseline first; and shell-drive's `main()` creates a mouse
+on every invocation, which moves the pointer — a keyboard-only test
+needs its own driver.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
