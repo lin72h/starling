@@ -1904,6 +1904,37 @@ root socket from a killed dev shell makes `ask.py` refuse the
 connection — delete it; `xdotool mousemove --window <freerdp window>`
 takes the dock's logical coordinates 1:1 at 1280x800.
 
+### Phase 40 — the host GPU from WSL (2026-09-18)
+
+"You should test it on Windows's RDP client, so it has graphics
+acceleration?" The client cannot add any: the city is drawn where the
+shell runs, inside WSL, and an RDP client only receives finished
+pixels — FreeRDP and mstsc show the same frames at the same speed.
+The acceleration that matters is on the WSL side, and WSL2 has it:
+the host GPU is shared in as `/dev/dxg`, Mesa carries a D3D12 driver
+for it (`d3d12_dri.so`, with `libd3d12.so`/`libdxcore.so` under
+`/usr/lib/wsl/lib`), and on that box `GALLIUM_DRIVER=d3d12 eglinfo -B
+-p surfaceless` reports **D3D12 (AMD Radeon 780M Graphics)** where the
+default is llvmpipe. Mesa simply does not pick it by itself on the
+surfaceless platform.
+
+So the RDP display mode asks for it: `rdp_egl_create` sets
+`GALLIUM_DRIVER=d3d12` when `/dev/dxg` and the driver are present and
+nothing was asked for, falls back to Mesa's default if that display
+will not initialise, and logs `[RdpEgl] renderer: …` so the choice is
+never a guess. The first-party apps inherit the setting and render on
+the GPU too. The launcher passes the environment through, so a user's
+own `GALLIUM_DRIVER` still wins.
+
+| in WSL, 1280x800 | room frame | first frame | shell CPU redrawing |
+|---|---|---|---|
+| llvmpipe (before) | ~165 ms | 0.7–4.4 s | ~390% |
+| D3D12 on the 780M | 6.6–11.8 ms | 0.2–0.6 s | ~14% |
+
+Idle in the city sits at ~13% there, spread over a dozen engine
+threads at 1% each — not the 0.00% the flat desktop idles at in
+display mode. Not chased yet.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

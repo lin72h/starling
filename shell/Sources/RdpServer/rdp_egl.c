@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 
 #include <EGL/egl.h>
@@ -102,16 +103,41 @@ RdpEgl* rdp_egl_create(uint32_t width, uint32_t height) {
     e->width = width;
     e->height = height;
 
-    e->dpy = get_platform_display(EGL_PLATFORM_SURFACELESS_MESA,
-                                  EGL_DEFAULT_DISPLAY, NULL);
-    if (e->dpy == EGL_NO_DISPLAY) {
-        fprintf(stderr, "[RdpEgl] surfaceless eglGetPlatformDisplay failed\n");
-        goto fail;
+    // WSL2 shares the host's GPU as /dev/dxg, and Mesa can render on it
+    // through its D3D12 driver — but left to itself Mesa picks llvmpipe on
+    // the surfaceless platform there, and the whole desktop was drawn on
+    // the CPU: the 3D city at ~165 ms a frame on four cores, against 8 ms
+    // and a fraction of one core on the GPU (an AMD 780M, 2026-09-18). Ask
+    // for d3d12 where both halves are present and nothing was asked for;
+    // if that display will not initialise, fall back to Mesa's own choice.
+    // The setting is inherited by the first-party apps the shell spawns,
+    // which then render on the GPU too.
+    int forced_d3d12 = 0;
+    if (!getenv("GALLIUM_DRIVER") && access("/dev/dxg", F_OK) == 0 &&
+        (access("/usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so", F_OK) == 0 ||
+         access("/usr/lib/aarch64-linux-gnu/dri/d3d12_dri.so", F_OK) == 0)) {
+        setenv("GALLIUM_DRIVER", "d3d12", 1);
+        forced_d3d12 = 1;
     }
     EGLint major = 0, minor = 0;
-    if (!eglInitialize(e->dpy, &major, &minor)) {
-        fprintf(stderr, "[RdpEgl] eglInitialize failed (0x%x)\n", eglGetError());
-        goto fail;
+    for (;;) {
+        e->dpy = get_platform_display(EGL_PLATFORM_SURFACELESS_MESA,
+                                      EGL_DEFAULT_DISPLAY, NULL);
+        if (e->dpy != EGL_NO_DISPLAY && eglInitialize(e->dpy, &major, &minor)) {
+            break;
+        }
+        fprintf(stderr, "[RdpEgl] surfaceless EGL %s failed (0x%x)%s\n",
+                e->dpy == EGL_NO_DISPLAY ? "display" : "initialize", eglGetError(),
+                forced_d3d12 ? " with GALLIUM_DRIVER=d3d12; retrying with Mesa's default"
+                             : "");
+        if (!forced_d3d12) {
+            goto fail;
+        }
+        if (e->dpy != EGL_NO_DISPLAY) {
+            eglTerminate(e->dpy);
+        }
+        unsetenv("GALLIUM_DRIVER");
+        forced_d3d12 = 0;
     }
     if (!eglBindAPI(EGL_OPENGL_ES_API)) {
         fprintf(stderr, "[RdpEgl] eglBindAPI(ES) failed\n");
@@ -138,6 +164,13 @@ RdpEgl* rdp_egl_create(uint32_t width, uint32_t height) {
         fprintf(stderr, "[RdpEgl] eglCreateContext failed (0x%x)\n",
                 eglGetError());
         goto fail;
+    }
+    // Say what is drawing: on WSL this is the line that tells llvmpipe
+    // from the host GPU.
+    if (eglMakeCurrent(e->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, e->render_ctx)) {
+        fprintf(stderr, "[RdpEgl] renderer: %s\n",
+                (const char*)glGetString(GL_RENDERER));
+        eglMakeCurrent(e->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     }
     // Shares with the render context so uploaded textures are visible to it.
     e->resource_ctx =
