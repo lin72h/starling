@@ -7,14 +7,17 @@ keyboard, step up to a window and it is pixel-exact again, and turning
 
 Branch: `desktop-3d`.
 
-## Where it stands (2026-09-18, checkpoint)
+## Where it stands (2026-09-18 evening, checkpoint)
 
-**The city is a desktop you can play in, and the user has.** Branch
-`desktop-3d`, pushed, this repo only (the engine is untouched since
-the last checkpoint). Read this section, then "Phase 7" onward for how
-it got here, and "Traps paid for" before touching anything. Phases 11
-to 31 are one day of the user playing and asking; each one names what
-they said.
+**The city ships, and it works the way the user asked for it to.**
+Branch `desktop-3d`, pushed, this repo only (the engine is untouched
+since the last checkpoint). One window on screen at a time, Alt+Tab
+between them, a click on a brick to open, a clock on the square, a
+switch in Settings, the world and its renderer in the package, and it
+runs on the host GPU from inside WSL. Read this section, then "Phase
+7" onward for how it got here, and "Traps paid for" before touching
+anything. Phases 11 to 40 are two days of the user playing and asking;
+each one names what they said.
 
 - **The renderer is Filament** (`STARLING_ROOM=filament`), built from
   source the one way that shares the engine's EGL context
@@ -39,13 +42,19 @@ they said.
   room still works and is untouched.
 - **Windows in the city** are panes with the world's block frame and a
   block title bar (planks, redstone/gold/emerald buttons) drawn IN the
-  scene, so a brick in front of a window covers it. A window gets its
+  scene, so a brick in front of a window covers it; nothing floats over
+  a window (the nameplates went — the bar names it). A window gets its
   place when it arrives and keeps it: the arc round the square for
-  windows brought in from the flat desktop, or right in front of the
-  viewer at reading size for one opened here. A window clicked from
-  across the square is walked up to (a 380 ms glide, the click kept
-  from the app). Fullscreen works there (emerald block; the top-edge
-  reveal shows the bar alone, no status bar).
+  windows brought in from the flat desktop (out of sight, where the
+  ring fetches them from), or right in front of the viewer at reading
+  size for one opened here. A window is named after the app that owns
+  it (registry, not the Wayland id), so Chrome's pane says Chrome. A
+  window clicked from across the square is walked up to (a 380 ms
+  glide, the click kept from the app). Fullscreen works there (emerald
+  block; the top-edge reveal shows the bar alone, no status bar). **A
+  window redraws when its app draws** — it did not, once, and typing
+  read as slow (Phase 38); and the window that had the keyboard keeps
+  it on entry (Phase 39).
 - **One window on screen.** The city shows the window that has the
   focus (else the last one it showed, else the front-most), in front
   of you at 1:1; every other window is out of sight. A new window, or
@@ -62,7 +71,9 @@ they said.
   puts everything back. Windows have pose tweens now
   (`_desktop3DTween`), so the ring turns rather than cuts.
 - **The dock is a small building of bricks in the pool**, each app a
-  lit block with its colour and glyph. Hover lights one and names it;
+  lit block with its colour and glyph — its real icon where it has one
+  (Chrome, the App Store); a running app drops a brick onto the pile.
+  Hover lights one and names it;
   a click opens its app, whose window pops up in front of you (or
   brings its open window to you), and whatever was already in front
   steps back behind it; press and drag carries it —
@@ -89,20 +100,35 @@ they said.
   another world). Settings → Appearance has a **3D Desktop** switch,
   live in both directions like Tiling Windows, and the choice persists
   across logins as it always did (`~/.config/starling/desktop-3d`).
-- **Driving it**: `~/tmp/filament/play.sh` (the session scratchpad
-  copy) starts the dev shell with the city and turns 3D on;
-  `shell-drive` for input — one invocation per gesture (`down`, moves,
-  `up`; `click` on a brick opens its app); the `[3D] bricks settled:` log
-  line for positions, checked pairwise for overlap by a script, never
-  by eye; `[Input] UP` against the shot's line before reading a
-  screenshot of a drag. Transitions: `record-start/stop` + an ffmpeg
-  tile.
+- **It runs in WSL, on the host GPU.** The RDP display mode asks Mesa
+  for its D3D12 driver when `/dev/dxg` is there (Phase 40): the city
+  at 7–12 ms a frame on the box's Radeon 780M, against ~165 ms on
+  llvmpipe, seen through FreeRDP and through Windows' own Remote
+  Desktop client alike. `libc++1`/`libc++abi1` must be installed or
+  the renderer silently does not load (the .deb declares them; a bare
+  `dpkg -i --force-all` does not bring them).
+- **Driving it**: `~/tmp/filament/play.sh` starts the dev shell with the
+  city and turns 3D on (`play-default.sh` with no overrides —
+  what a login gets); `shell-drive` for input — one invocation per
+  gesture (`down`, moves, `up`; `click` on a brick opens its app; Alt
+  held across `key tab`s for the ring); `~/tmp/filament/lat/` for
+  keystroke-to-screen latency (a keyboard-only driver and the debugfs
+  fb-id oracle — check the idle-flip baseline first); the `[3D] bricks
+  settled:` log line for positions, checked pairwise for overlap by a
+  script, never by eye; `[Input] UP` against the shot's line before
+  reading a screenshot of a drag; `kill -USR1 <shell>` for a screenshot
+  that moves no pointer. WSL: `~/tmp/filament/wsl/` (run scripts as
+  FILES from `C:/dist`; hold the launching ssh open or the distro dies;
+  mstsc as a viewer only — never `SendKeys` on that live desktop).
 
-**Next**, in the order I would take it: day and night following the
-clock; an overview of every open window (Mission Control for the
-city); bricks and windows through buildings (nothing in the city is
-solid to them) and persisting brick positions; looking up and down;
-the room's walls read as concrete.
+**Next**, in the order I would take it: the city idles at ~13% CPU in
+WSL where the flat desktop idles at 0 (a dozen engine threads at 1%
+each — find the pump); the WSL gate should fail on unmet dependencies
+instead of forcing the install; day and night following the clock;
+bricks and windows through buildings (nothing in the city is solid to
+them) and persisting brick positions; reaching the dock with a window
+in front without stepping aside; looking up and down; the room's walls
+read as concrete.
 
 ## How it is built
 
