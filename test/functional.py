@@ -656,7 +656,10 @@ def check_real_remove() -> None:
                             capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, \
         f"app-install --flatpak --remove {REAL_APP_FLATPAK} failed: {result.stderr.strip()[-200:]}"
-    wait_for(lambda: not apps()[REAL_APP]["installed"],
+    # Gone from the list altogether, not merely marked uninstalled: a
+    # Flathub app has no catalog record to keep a row for, so the launcher
+    # drops it — and indexing it then raised KeyError on the 0.5.0 gate.
+    wait_for(lambda: not apps().get(REAL_APP, {}).get("installed"),
              f"the shell to drop {REAL_APP} from the launcher")
     records = Path(os.environ.get("STARLING_APP_RECORDS",
                                   "/var/lib/starling/installed.d"))
