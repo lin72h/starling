@@ -648,10 +648,14 @@ def check_real_remove() -> None:
     assert not apps()[REAL_APP]["process"], \
         f"{REAL_APP} is still running — removal must refuse, not proceed"
 
-    result = subprocess.run(["sudo", str(APP_INSTALL), "--remove", REAL_APP],
+    # The Flathub path, as the store's Remove button spells it: the Flatpak
+    # id under --flatpak. The registry id (`flatpak-<id>`) under a bare
+    # --remove is the catalog-era command, which refuses for want of a
+    # catalog record — and that is what this check ran until 0.5.0's gate.
+    result = subprocess.run(["sudo", str(APP_INSTALL), "--flatpak", "--remove", REAL_APP_FLATPAK],
                             capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, \
-        f"app-install --remove {REAL_APP} failed: {result.stderr.strip()[-200:]}"
+        f"app-install --flatpak --remove {REAL_APP_FLATPAK} failed: {result.stderr.strip()[-200:]}"
     wait_for(lambda: not apps()[REAL_APP]["installed"],
              f"the shell to drop {REAL_APP} from the launcher")
     records = Path(os.environ.get("STARLING_APP_RECORDS",
