@@ -1503,19 +1503,10 @@ extension _DesktopShellState {
         // are laid out round them.
         let windows = windowManager.visibleWindows.filter { !$0.isFullscreen && $0.pose3D.placed && _desktop3DIsShown($0) }
         var labels: [SceneLabel] = []
-        var groups: [String: [(x: Double, y: Double, z: Double, top: Double)]] = [:]
-        for win in windows {
-            let p = win.pose3D
-            groups[_desktop3DAppId(of: win), default: []].append((p.x, p.y, p.z, p.y + win.rect.height * s * p.scale / 2))
-        }
-        for (app, ps) in groups {
-            guard let tex = _desktop3DAppLabelTexture(app) else { continue }
-            let cx = ps.map { $0.x }.reduce(0, +) / Double(ps.count)
-            let cz = ps.map { $0.z }.reduce(0, +) / Double(ps.count)
-            let top = ps.map { $0.top }.max() ?? 0
-            // Read from across the square: a metre wide.
-            labels.append(SceneLabel(id: tex, texture: tex, x: cx, y: top + 0.7, z: cz, width: 1.0, height: 1.17))
-        }
+        // No nameplate over a window: its title bar names it, and with one
+        // window on screen (or the ring, where each is read at once) the
+        // icon and name floating over the roof said nothing more (user:
+        // "I think it's unnecessary"). A hovered brick still wears its name.
         // Each window's title bar, in the scene on its pane — where a brick
         // in front of the window covers it, as it covers the picture.
         let titleH = shellMetrics.titleBarHeight

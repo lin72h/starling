@@ -1815,6 +1815,14 @@ user's laptop and they are AT it. Five step-ups with no key in the
 drive script were a held Space at the real keyboard, not a bug — the
 log's `step up:` burst at key-repeat rate is the tell.
 
+### Phase 37 — no nameplates over windows (2026-09-18)
+
+"Do we need to show the text of each app on the top? I think it's
+unnecessary." Gone: the icon-and-name that floated over each window's
+roof (it dated from the arc, where windows were read from across the
+square). The block title bar names the window, and on the ring each
+window is read at once. A hovered brick still wears its name.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.
