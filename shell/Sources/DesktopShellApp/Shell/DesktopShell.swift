@@ -721,6 +721,8 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DBrickClick: (app: String, at: Double)? = nil
     /// The one window the city shows (Desktop3D, "One window on screen").
     var _desktop3DShownWindowId: String? = nil
+    /// The shown window's flat size when its pane was last aimed.
+    var _desktop3DShownSize: (Double, Double)? = nil
     /// The city's window switcher while Alt+Tab holds it open: the windows
     /// in their order round the ring, which is chosen, and where each stood
     /// before — to go back to on Escape (Desktop3D, "The switcher").

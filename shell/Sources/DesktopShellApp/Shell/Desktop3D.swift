@@ -487,10 +487,26 @@ extension _DesktopShellState {
             shown = candidates.max { $0.zIndex < $1.zIndex }
         }
         guard let win = shown else { _desktop3DShownWindowId = nil; return }
-        guard win.id != _desktop3DShownWindowId else { return }
+        // The pane in front of the viewer is aimed from the window's FLAT
+        // rect — its offset from the screen's centre — so a window that
+        // changes size after it was placed is re-aimed: Firefox maps as a
+        // zero-width strip at the top-left corner and grows to the whole
+        // screen a frame later, and the pane aimed at the strip stood
+        // 2.4 m left and 1.3 m up, mostly off screen. Same window, new
+        // size: aim again. (A move alone does not re-aim: the pane's own
+        // place is where the window is in the room.)
+        let sizeKey = (win.rect.width, win.rect.height)
+        let resized = win.id == _desktop3DShownWindowId
+            && _desktop3DShownSize.map { $0 != sizeKey } ?? false
+        guard win.id != _desktop3DShownWindowId || resized else { return }
+        if resized { _desktop3DLog("shown \(win.title): resized to \(sizeKey), re-aiming") }
         _desktop3DShownWindowId = win.id
-        _desktop3DLog("shown: \(win.title)")
-        guard _desktop3DPoseTweens[win.id] == nil, let w = _desktop3DWorld else { return }
+        _desktop3DShownSize = sizeKey
+        if !resized { _desktop3DLog("shown: \(win.title)") }
+        // A glide already under way is left alone — unless the window just
+        // changed size, in which case it is gliding to the wrong spot and
+        // is re-targeted from wherever it has got to.
+        guard resized || _desktop3DPoseTweens[win.id] == nil, let w = _desktop3DWorld else { return }
         let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
         let target = _desktop3DPoseInFront(rect: win.rect, host: host, w: w)
         let p = win.pose3D
