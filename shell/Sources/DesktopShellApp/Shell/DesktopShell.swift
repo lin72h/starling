@@ -693,6 +693,10 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     var _desktop3DHoveredSign: String? = nil
     /// Per app, the texture its block in the sculpture wears (Desktop3D).
     var _appFaceTextures: [String: Int64] = [:]
+    /// Apps' own icons, decoded for the city's nameplates and brick faces
+    /// (Desktop3D._desktop3DIconImage), and which decodes have been started.
+    var _desktop3DIconImages: [String: Image] = [:]
+    var _desktop3DIconDecodes = Set<String>()
     /// A brick of the building under the pointer's button: the app, where
     /// the button went down, where the pointer is, and whether it has
     /// moved far enough to be a drag rather than a click (Desktop3D).

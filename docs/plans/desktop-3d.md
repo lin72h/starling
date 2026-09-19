@@ -86,9 +86,8 @@ they said.
 **Next**, in the order I would take it: day and night following the
 clock; an overview of every open window (Mission Control for the
 city); bricks and windows through buildings (nothing in the city is
-solid to them) and persisting brick positions; real icons for
-third-party apps on their bricks; looking up and down; the room's
-walls read as concrete.
+solid to them) and persisting brick positions; looking up and down;
+the room's walls read as concrete.
 
 ## How it is built
 
@@ -1720,6 +1719,31 @@ always faces the viewer, so it loses nothing. And do not reach for
 `RenderableManager::Builder::culling(true)` for this: that is FRUSTUM
 culling, on by default for everything else — back faces are the
 material's.
+
+### Phase 34 — a third-party app in the city (2026-09-18)
+
+"Test launch an app in 3D world" — "Launch chrome." Calculator from its
+brick popped up in front as designed. Chrome, started through
+`app-run` (it has no brick until it runs), arrived on the arc and a
+click walked up to it, page readable and live — but its nameplate
+read **"wayland-13"** over a generic glyph. The city grouped windows
+by `win.appId`, the synthetic id a Wayland client gets, where the dock
+resolves the OWNER through the registry (`_appOwning`: app_id, then
+window class, then title). `_desktop3DAppId(of:)` does that now for
+the nameplates, the brick's "bring its window to me" and the pop-up
+match, so Chrome's pane says Chrome and its brick finds it.
+
+And the bricks and nameplates of apps that have an icon file now wear
+it: `_desktop3DIconImage` decodes the record's PNG once (the same file
+the dock's tiles use, but as an image a canvas can draw rather than a
+flipped GL texture), drops that app's glyph textures when it lands and
+rebuilds, so the next build paints the icon. Chrome's brick — it drops
+onto the pile the moment Chrome runs, as any running app does — and
+the App Store's got theirs at once; first-party apps without a file
+keep the catalog glyph. Dropping a texture and registering a new one
+is safe HERE because the label's and block's scene ids are the texture
+id, so the renderer sees a new entity — the clock's faces have fixed
+ids, which is why they could not do this (Phase 33).
 
 ### Still open
 

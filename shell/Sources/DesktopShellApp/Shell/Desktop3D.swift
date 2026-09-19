@@ -285,7 +285,7 @@ extension _DesktopShellState {
             // the flat desktop.
             var taken = windowManager.visibleWindows.filter { $0.pose3D.placed }.count
             for win in fresh {
-                if _desktop3DPopUp == win.appId {
+                if _desktop3DPopUp == _desktop3DAppId(of: win) {
                     _desktop3DPopUp = nil
                     _desktop3DPopUpWindow(win, host: host, w: w)
                     let id = win.id
@@ -411,6 +411,14 @@ extension _DesktopShellState {
         _desktop3DLog("pop up \(win.title): \(pile.count) behind")
     }
 
+    /// The app a window belongs to, for the city: a third-party window
+    /// arrives with a synthetic id (`wayland-N`), and its owner is resolved
+    /// through the registry the way the dock does it — else Chrome's pane
+    /// wore the nameplate "wayland-13" and its brick could not find it.
+    func _desktop3DAppId(of win: WindowInfo) -> String {
+        _appOwning(win)?.id ?? win.appId
+    }
+
     /// A brick was clicked (a press that never became a drag): its app
     /// opens, the way one click on the dock opens an app. The second click
     /// of a double-click — the same brick again within half a second — is
@@ -434,7 +442,7 @@ extension _DesktopShellState {
         _desktop3DLog("open \(app)")
         guard let w = _desktop3DWorld else { return }
         let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
-        if let win = windowManager.visibleWindows.last(where: { $0.appId == app && !$0.isFullscreen }) {
+        if let win = windowManager.visibleWindows.last(where: { _desktop3DAppId(of: $0) == app && !$0.isFullscreen }) {
             setState {
                 _desktop3DPopUpWindow(win, host: host, w: w)
                 windowManager.bringToFront(win.id)
@@ -1286,7 +1294,7 @@ extension _DesktopShellState {
         var groups: [String: [(x: Double, y: Double, z: Double, top: Double)]] = [:]
         for win in windows {
             let p = win.pose3D
-            groups[win.appId, default: []].append((p.x, p.y, p.z, p.y + win.rect.height * s * p.scale / 2))
+            groups[_desktop3DAppId(of: win), default: []].append((p.x, p.y, p.z, p.y + win.rect.height * s * p.scale / 2))
         }
         for (app, ps) in groups {
             guard let tex = _desktop3DAppLabelTexture(app) else { continue }
@@ -2030,6 +2038,49 @@ extension _DesktopShellState {
     /// the tile with no rounded corners, since a block has none. Hovered:
     /// lighter, with a white rim, so the pointer's brick shows without
     /// moving.
+    /// An app's own icon as a decoded image, for the nameplates and brick
+    /// faces of apps that have one (third-party apps, whose registry
+    /// record points at a PNG): nil until it has been decoded, and the
+    /// caller paints the catalog glyph meanwhile. The first ask starts the
+    /// decode; when it lands, that app's textures are dropped and the
+    /// shell rebuilt, so the next build paints them again with the icon.
+    /// The dock decodes the same file for its tiles (_loadIconTexture),
+    /// but flipped for the GL path, and into a texture rather than an
+    /// image a canvas can draw.
+    func _desktop3DIconImage(_ appId: String) -> Image? {
+        #if os(Linux)
+        if let img = _desktop3DIconImages[appId] { return img }
+        guard !_desktop3DIconDecodes.contains(appId),
+              let path = AppRegistry.shared.app(id: appId)?.iconPath,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        _desktop3DIconDecodes.insert(appId)
+        Task { @MainActor in
+            guard let codec = try? await FlutterSwiftBridge.instantiateImageCodec([UInt8](data)),
+                  let frame = try? await codec.getNextFrame() else { return }
+            codec.dispose()
+            guard let shell = _shellState else { frame.image.dispose(); return }
+            shell._desktop3DIconImages[appId] = frame.image
+            // The glyph versions go; a new texture id means a new label or
+            // block in the scene, which is what makes the renderer pick the
+            // fresh picture up.
+            if let registry = drmTextureRegistry, let wl = waylandIntegration {
+                for key in [appId, appId + "#hover"] {
+                    if let old = shell._appFaceTextures.removeValue(forKey: key) {
+                        registry.unregisterTexture(engine: wl.engine, id: old)
+                    }
+                }
+                if let old = shell._appLabelTextures.removeValue(forKey: appId) {
+                    registry.unregisterTexture(engine: wl.engine, id: old)
+                }
+            }
+            shell.setState {}
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
     func _desktop3DAppFaceTexture(_ appId: String, hovered: Bool = false) -> Int64? {
         #if os(Linux)
         let key = hovered ? appId + "#hover" : appId
@@ -2052,10 +2103,15 @@ extension _DesktopShellState {
         let inset = hovered ? 4.0 : 2.5
         canvas.drawRect(Rect.fromLTWH(inset, inset, Double(s) - 2 * inset, Double(s) - 2 * inset), paint)
         paint.style = .fill
-        canvas.save()
-        canvas.translate(24, 24)
-        IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(80, 80))
-        canvas.restore()
+        if let icon = _desktop3DIconImage(appId) {
+            canvas.drawImageRect(icon, Rect.fromLTWH(0, 0, Double(icon.width), Double(icon.height)),
+                                 Rect.fromLTWH(20, 20, Double(s) - 40, Double(s) - 40), Paint())
+        } else {
+            canvas.save()
+            canvas.translate(24, 24)
+            IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(80, 80))
+            canvas.restore()
+        }
         let picture = recorder.endRecording()
         guard let image = picture.toImageSync(width: s, height: s) else { return nil }
         defer { image.dispose() }
@@ -2343,10 +2399,17 @@ extension _DesktopShellState {
         canvas.drawRRect(RRect(left: tile.left, top: tile.top, right: tile.right, bottom: tile.bottom,
                                tlRadiusX: 36, tlRadiusY: 36, trRadiusX: 36, trRadiusY: 36,
                                brRadiusX: 36, brRadiusY: 36, blRadiusX: 36, blRadiusY: 36), paint)
-        canvas.save()
-        canvas.translate(tile.left + 32, tile.top + 32)
-        IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(96, 96))
-        canvas.restore()
+        if let icon = _desktop3DIconImage(appId) {
+            // The app's own icon, over its tile: host icons bring their
+            // own shape, so they get the tile's room rather than the glyph's.
+            canvas.drawImageRect(icon, Rect.fromLTWH(0, 0, Double(icon.width), Double(icon.height)),
+                                 tile.deflate(8), Paint())
+        } else {
+            canvas.save()
+            canvas.translate(tile.left + 32, tile.top + 32)
+            IconPainter(_iconType(for: appId), color: Color(0xFFFFFFFF)).paint(canvas, Size(96, 96))
+            canvas.restore()
+        }
         let pb = NativeParagraphBuilder(ParagraphStyle(textAlign: .center, fontSize: 30,
                                                        fontWeight: .w600))
         pb.pushStyle(TextStyle(color: Color(0xFFFFFFFF), fontWeight: .w600, fontSize: 30))
