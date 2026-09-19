@@ -46,6 +46,14 @@ they said.
   across the square is walked up to (a 380 ms glide, the click kept
   from the app). Fullscreen works there (emerald block; the top-edge
   reveal shows the bar alone, no status bar).
+- **Alt+Tab swings the open windows round you.** Hold Alt and press
+  Tab: every open window glides onto a ring round where you stand, at
+  eye height, facing in, the one you had before straight ahead and a
+  little nearer; each Tab turns the ring one place (Shift+Tab back);
+  let go of Alt and the chosen window flies up to the front at 1:1
+  with the keyboard while the rest go back where they stood; Escape
+  puts everything back. Windows have pose tweens now
+  (`_desktop3DTween`), so the ring turns rather than cuts.
 - **The dock is a small building of bricks in the pool**, each app a
   lit block with its colour and glyph. Hover lights one and names it;
   a click opens its app, whose window pops up in front of you (or
@@ -1744,6 +1752,33 @@ keep the catalog glyph. Dropping a texture and registering a new one
 is safe HERE because the label's and block's scene ids are the texture
 id, so the renderer sees a new entity — the clock's faces have fixed
 ids, which is why they could not do this (Phase 33).
+
+### Phase 35 — switching apps: the ring (2026-09-18)
+
+"How to switch between apps in 3D mode? We'd better have some 3D
+effects to switch." There was no switcher — not in the city, and none
+on the flat desktop to borrow. Now Alt+Tab (Alt is already the room's
+key) opens a RING: every open window glides onto a circle round the
+viewer (`k3DSwitchRadius` 3.8 m, 30° between neighbours, each scaled
+to at most 1.7 m wide so a browser and a calculator read as one thing
+each), the one you had before straight ahead and nearer (2.8 m), all
+facing in. Tab turns the ring a place; Shift+Tab the other way; Alt
+up commits — the chosen window flies to the pop-up spot with the
+keyboard and the others go back where they stood, the pile stepping
+back behind it as a pop-up does (destinations are worked out on the
+windows' OLD places, then everything tweens from the ring); Escape
+puts all back. The handler sits ahead of everything else in the key
+router so no keystroke leaks to an app mid-switch, and Alt+Escape
+while the ring is up cancels rather than leaving the world.
+
+For it, windows can MOVE: `_desktop3DTween` glides a pose to another
+over 260 ms on a ticker (easeInOutCubic, yaw the short way round),
+and everything that reads poses — the panes, the widgets' transforms,
+the nameplates — follows, because the tween just writes `pose3D`.
+Instant pose writes elsewhere are untouched.
+
+Harness: `keydown alt`, `key tab` … `keyup alt` in ONE shell-drive
+invocation; `[3D] switcher open/select/commit/cancel` in the log.
 
 ### Still open
 

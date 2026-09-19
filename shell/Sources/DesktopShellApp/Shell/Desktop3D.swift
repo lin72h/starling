@@ -455,6 +455,167 @@ extension _DesktopShellState {
         _launchOrFocusApp(app)
     }
 
+    // MARK: Windows on the move
+
+    /// Send a window gliding to `pose` rather than cutting: the switcher's
+    /// ring turning, a chosen window flying forward. Instant pose writes
+    /// elsewhere are untouched. A tween already in flight for the window
+    /// restarts from wherever it has got to; the yaw turns the short way.
+    func _desktop3DTween(_ win: WindowInfo, to pose: WindowPose3D, ms: Double = k3DSwitchMs) {
+        var from = win.pose3D, to = pose
+        from.placed = true; to.placed = true
+        let d = to.yaw - from.yaw
+        to.yaw = from.yaw + atan2(sin(d), cos(d))
+        _desktop3DPoseTweens[win.id] = (from, to, Date.timeIntervalSinceReferenceDate, ms)
+        if _poseTicker == nil {
+            _poseTicker = createTicker { [weak self] _ in
+                guard let self else { return }
+                let now = Date.timeIntervalSinceReferenceDate
+                var done: [String] = []
+                for (id, t) in self._desktop3DPoseTweens {
+                    guard let w = self.windowManager.windows.first(where: { $0.id == id }) else {
+                        done.append(id); continue
+                    }
+                    let k = min(1.0, max(0.0, (now - t.start) / (t.ms / 1000)))
+                    // easeInOutCubic, like the camera's glide.
+                    let e = k < 0.5 ? 4 * k * k * k : 1 - pow(-2 * k + 2, 3) / 2
+                    w.pose3D = WindowPose3D(
+                        x: t.from.x + (t.to.x - t.from.x) * e, y: t.from.y + (t.to.y - t.from.y) * e,
+                        z: t.from.z + (t.to.z - t.from.z) * e, yaw: t.from.yaw + (t.to.yaw - t.from.yaw) * e,
+                        scale: t.from.scale + (t.to.scale - t.from.scale) * e, placed: true)
+                    if k >= 1 { done.append(id) }
+                }
+                for id in done { self._desktop3DPoseTweens[id] = nil }
+                if self._desktop3DPoseTweens.isEmpty { self._poseTicker?.stop() }
+                self.setState {}
+            }
+        }
+        if !(_poseTicker?.isActive ?? false) { _ = _poseTicker?.start() }
+    }
+
+    // MARK: The switcher — Alt+Tab swings the windows round the viewer
+
+    /// The ring the windows stand on while you choose, and how close the
+    /// chosen one comes; the angle between neighbours; the widest a
+    /// window is let be on the ring (bigger ones are scaled down, so a
+    /// browser and a calculator both read as one thing each); how long
+    /// every move takes.
+    static let k3DSwitchRadius = 3.8
+    static let k3DSwitchNearRadius = 2.8
+    static let k3DSwitchStepDeg = 30.0
+    static let k3DSwitchMaxWidth = 1.7
+    static let k3DSwitchMs = 260.0
+
+    /// Alt+Tab and what follows it, in the city. Tab with Alt held opens
+    /// the ring — or, open, moves the choice on (Shift: back); Alt up
+    /// settles on the chosen window; Escape puts everything back. True
+    /// when the key was the switcher's and must go no further.
+    func _desktop3DSwitcherKey(_ key: KeyData, shift: Bool) -> Bool {
+        let phys = Int(key.physical)
+        let isAlt = phys == 0xE2 || phys == 0xE6
+        if _desktop3DSwitcher != nil {
+            if isAlt, key.type == .up { _desktop3DSwitcherCommit(); return true }
+            if key.type == .up { return false }
+            if phys == 0x29 { _desktop3DSwitcherCancel(); return true }              // Escape
+            if phys == 0x2B { _desktop3DSwitcherMove(shift ? -1 : 1); return true }   // Tab
+            // Anything else pressed while the ring is up is the ring's:
+            // a keystroke mid-switch belongs to no app.
+            return !isAlt && phys != 0xE1 && phys != 0xE5
+        }
+        guard phys == 0x2B, key.type == .down, _altPressed, _desktop3DVoxel, _desktop3DT >= 1 else { return false }
+        _desktop3DSwitcherOpen()
+        return true
+    }
+
+    func _desktop3DSwitcherOpen() {
+        // Most recent first, as every switcher orders them, and the first
+        // press means "the one before this".
+        let wins = windowManager.visibleWindows
+            .filter { !$0.isFullscreen && $0.pose3D.placed }
+            .sorted { $0.zIndex > $1.zIndex }
+        guard !wins.isEmpty else { return }
+        var before: [String: WindowPose3D] = [:]
+        for w in wins { before[w.id] = w.pose3D }
+        _desktop3DSwitcher = (wins.map { $0.id }, wins.count > 1 ? 1 : 0, before)
+        _desktop3DLog("switcher open: \(wins.map { $0.title })")
+        _desktop3DSwitcherLayout()
+    }
+
+    func _desktop3DSwitcherMove(_ by: Int) {
+        guard var sw = _desktop3DSwitcher, !sw.ids.isEmpty else { return }
+        sw.selected = (sw.selected + by + sw.ids.count) % sw.ids.count
+        _desktop3DSwitcher = sw
+        if let w = windowManager.windows.first(where: { $0.id == sw.ids[sw.selected] }) {
+            _desktop3DLog("switcher select \(w.title)")
+        }
+        _desktop3DSwitcherLayout()
+    }
+
+    /// The ring: the chosen window straight ahead and a little nearer,
+    /// the rest round the viewer at even steps to either side, all at eye
+    /// height, all facing in, each scaled to fit its slot — and every
+    /// window glides to its place, so a Tab reads as the ring turning.
+    func _desktop3DSwitcherLayout() {
+        guard let sw = _desktop3DSwitcher, let world = _desktop3DWorld else { return }
+        let c = _camera3D
+        let s = Self.k3DMetresPerPx
+        let step = Self.k3DSwitchStepDeg * Double.pi / 180
+        for (i, id) in sw.ids.enumerated() {
+            guard let w = windowManager.windows.first(where: { $0.id == id }) else { continue }
+            let chosen = i == sw.selected
+            let a = c.yaw + Double(i - sw.selected) * step
+            let r = chosen ? Self.k3DSwitchNearRadius : Self.k3DSwitchRadius
+            let scale = min(1.0, Self.k3DSwitchMaxWidth / max(0.1, w.rect.width * s))
+            let x = c.x + sin(a) * r, z = c.z - cos(a) * r
+            let y = max(c.y, world.ground(x, z) + w.rect.height * s * scale / 2 + 0.05)
+            _desktop3DTween(w, to: WindowPose3D(x: x, y: y, z: z, yaw: -a, scale: scale, placed: true))
+        }
+    }
+
+    /// Alt up: the chosen window flies up to the front, 1:1, with the
+    /// keyboard, and the rest go back where they stood — with whatever
+    /// was already at the front stepping back behind the chosen one, as a
+    /// pop-up does. Destinations are worked out on the windows' OLD places,
+    /// not the ring, so the pile settles where it belongs.
+    func _desktop3DSwitcherCommit() {
+        guard let sw = _desktop3DSwitcher else { return }
+        _desktop3DSwitcher = nil
+        let chosenId = sw.ids[sw.selected]
+        func find(_ id: String) -> WindowInfo? { windowManager.windows.first(where: { $0.id == id }) }
+        var ring: [String: WindowPose3D] = [:]
+        for id in sw.ids {
+            guard let w = find(id) else { continue }
+            ring[id] = w.pose3D
+            if let b = sw.before[id] { w.pose3D = b }
+        }
+        guard let win = find(chosenId), let world = _desktop3DWorld else { return }
+        let host = displayLayout?.host.logicalRect ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight)
+        _desktop3DPopUpWindow(win, host: host, w: world)
+        for id in sw.ids {
+            guard let w = find(id), let from = ring[id] else { continue }
+            let to = w.pose3D
+            w.pose3D = from
+            _desktop3DTween(w, to: to)
+        }
+        _desktop3DLog("switcher commit \(win.title)")
+        setState {
+            windowManager.bringToFront(win.id)
+            windowManager.focusedWindowId = win.id
+        }
+        _desktop3DPublishCamera()
+    }
+
+    /// Escape: nothing chosen, everything back where it stood.
+    func _desktop3DSwitcherCancel() {
+        guard let sw = _desktop3DSwitcher else { return }
+        _desktop3DSwitcher = nil
+        for (id, pose) in sw.before {
+            if let w = windowManager.windows.first(where: { $0.id == id }) { _desktop3DTween(w, to: pose) }
+        }
+        _desktop3DLog("switcher cancel")
+        setState {}
+    }
+
     // MARK: The camera
 
     var _camera3D: Camera3D {

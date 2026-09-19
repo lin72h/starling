@@ -713,6 +713,13 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
     /// The last click on a brick, so the second click of a double-click
     /// does not open the app twice.
     var _desktop3DBrickClick: (app: String, at: Double)? = nil
+    /// The city's window switcher while Alt+Tab holds it open: the windows
+    /// in their order round the ring, which is chosen, and where each stood
+    /// before — to go back to on Escape (Desktop3D, "The switcher").
+    var _desktop3DSwitcher: (ids: [String], selected: Int, before: [String: WindowPose3D])? = nil
+    /// Windows gliding to new places in the city, by window id.
+    var _desktop3DPoseTweens: [String: (from: WindowPose3D, to: WindowPose3D, start: Double, ms: Double)] = [:]
+    var _poseTicker: Ticker? = nil
     /// The clock tower's face: the minute it shows and which of its two
     /// textures holds it (Desktop3D._desktop3DClockTexture).
     var _clockFace: (minute: Int, which: Int)? = nil
@@ -2475,6 +2482,12 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
                 }
                 return true
             }
+
+            // The city's window switcher: Alt+Tab swings the open windows
+            // round the viewer, Tab again turns the ring, Alt up settles on
+            // the chosen one. Ahead of everything below, so nothing leaks
+            // to an app while the ring is up.
+            if self._desktop3DSwitcherKey(keyData, shift: self._shiftPressed) { return true }
 
             // A layer surface holding the keyboard (a launcher, a lock
             // screen — exclusive interactivity, or on-demand after a click)
