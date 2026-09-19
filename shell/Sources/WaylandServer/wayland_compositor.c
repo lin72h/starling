@@ -101,8 +101,14 @@ static void surface_set_input_region(struct wl_client* client,
                                      struct wl_resource* resource,
                                      struct wl_resource* region) {
     (void)client;
-    (void)resource;
-    (void)region;
+    /* Only whether the region is EMPTY is kept: a subsurface with one is
+     * drawn but never gets the pointer (see input_accepts). A null region
+     * is the protocol's "the whole surface". */
+    struct WaylandSurface* surface = wl_resource_get_user_data(resource);
+    if (!surface) return;
+    struct WaylandRegion* reg = region ? wl_resource_get_user_data(region) : NULL;
+    surface->pending_input_accepts = (region == NULL) || !reg || reg->count > 0;
+    surface->input_accepts_set = 1;
 }
 
 /* Listener: if the client destroys a wl_buffer while it's our committed_buffer,
@@ -197,6 +203,10 @@ static void surface_apply(struct WaylandSurface* surface) {
     if (surface->pending.buffer_scale_set) {
         surface->buffer_scale = surface->pending.buffer_scale;
         surface->pending.buffer_scale_set = 0;
+    }
+    if (surface->input_accepts_set) {
+        surface->input_accepts = surface->pending_input_accepts;
+        surface->input_accepts_set = 0;
     }
 
     /* Apply pending window geometry (double-buffered per xdg-shell spec). */
@@ -376,14 +386,17 @@ static void surface_apply(struct WaylandSurface* surface) {
             int z = sub_rank_walk(top, surface, &counter);
             if (z < 0) z = 0;
             if (!surface->sub_placed || surface->sub_placed_x != off_x ||
-                surface->sub_placed_y != off_y || surface->sub_placed_z != z) {
+                surface->sub_placed_y != off_y || surface->sub_placed_z != z ||
+                surface->sub_placed_input != surface->input_accepts) {
                 surface->sub_placed = 1;
                 surface->sub_placed_x = off_x;
                 surface->sub_placed_y = off_y;
                 surface->sub_placed_z = z;
+                surface->sub_placed_input = surface->input_accepts;
                 if (server->cb.on_subsurface_placed) {
                     server->cb.on_subsurface_placed(server->cb_ctx, surface->id,
-                                                    top->id, off_x, off_y, z);
+                                                    top->id, off_x, off_y, z,
+                                                    surface->input_accepts);
                 }
             }
         } else if (surface->sub_placed) {
@@ -512,7 +525,8 @@ static void sub_restack_walk(struct WaylandServer* server, struct WaylandSurface
             c->sub_placed_z = z;
             if (server->cb.on_subsurface_placed) {
                 server->cb.on_subsurface_placed(server->cb_ctx, c->id, top->id,
-                                                c->sub_placed_x, c->sub_placed_y, z);
+                                                c->sub_placed_x, c->sub_placed_y, z,
+                                                c->sub_placed_input);
             }
         }
         sub_restack_walk(server, top, c, counter);
@@ -784,6 +798,8 @@ static void compositor_create_surface(struct wl_client* client,
     surface->pending.buffer_scale = 1;
     surface->pending.buffer_scale_set = 0;
     surface->buffer_scale = 1;
+    surface->input_accepts = 1;
+    surface->pending_input_accepts = 1;
     surface->committed_buffer = NULL;
     surface->frame_callback = NULL;
     surface->alpha = 1.0;

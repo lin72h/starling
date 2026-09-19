@@ -2289,12 +2289,25 @@ class _DesktopShellState: State<StatefulWidget>, TickerProvider {
         // A subsurface drawn inside its window's content (a video, a hover
         // card), like an X11 child surface. Only placement changes come
         // through here; frames update the texture directly.
-        wayland.onSubsurfaceChanged = { [weak self] (windowId: String, surfaceId: UInt32, textureId: Int, rect: Rect, z: Int) in
+        wayland.onSubsurfaceChanged = { [weak self] (windowId: String, surfaceId: UInt32, textureId: Int, rect: Rect, z: Int, acceptsInput: Bool) in
             guard let self = self,
                   let win = self.windowManager.windows.first(where: { $0.id == windowId }) else { return }
             self.setState {
-                let surface = ChildSurface(x11WindowId: surfaceId, textureId: textureId,
+                var surface = ChildSurface(x11WindowId: surfaceId, textureId: textureId,
                                            flipY: true, logicalRect: rect, z: z)
+                if acceptsInput {
+                    // The pointer over it is the subsurface's: sent under
+                    // its own id, in its own coordinates, and the client
+                    // hears enter/leave between it and the window.
+                    surface.onPointerEvent = { (phase: Int32, x: Double, y: Double, buttons: Int64) -> Void in
+                        guard let wl = waylandIntegration else { return }
+                        wl.sendPointerEvent(surfaceId: surfaceId, phase: phase, x: x, y: y, buttons: buttons)
+                    }
+                    surface.onScrollEvent = { (x: Double, y: Double, dx: Double, dy: Double) -> Void in
+                        guard let wl = waylandIntegration else { return }
+                        wl.sendScrollEvent(surfaceId: surfaceId, x: x, y: y, scrollDeltaX: dx, scrollDeltaY: dy)
+                    }
+                }
                 if let i = win.childSurfaces.firstIndex(where: { $0.x11WindowId == surfaceId }) {
                     win.childSurfaces[i] = surface
                 } else {

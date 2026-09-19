@@ -63,6 +63,46 @@ class DesktopWindow: StatelessWidget {
                 let r = cs.logicalRect ?? Rect.fromLTWH(
                     Double(cs.offsetXPhys) / dpi, Double(cs.offsetYPhys) / dpi,
                     Double(cs.widthPhys) / dpi, Double(cs.heightPhys) / dpi)
+                // A subsurface that takes the pointer gets it under its own
+                // id, in its own coordinates. The window's listener below
+                // sees the same events (it is an ancestor) and steps aside
+                // for them — by position for a press, hover or scroll, and
+                // by `childSurfaceOwnsPointer` for the moves and release
+                // of a press that began here, which Flutter keeps routing
+                // to this listener wherever the pointer goes.
+                if let fwd = cs.onPointerEvent {
+                    let scroll = cs.onScrollEvent
+                    let walkUp = walkUpOnClick
+                    surf = Listener(
+                        onPointerDown: { [windowInfo] event in
+                            if walkUp { return }
+                            windowInfo.childSurfaceOwnsPointer = true
+                            fwd(2, event.localPosition.dx, event.localPosition.dy,
+                                Int64(event.buttons))
+                        },
+                        onPointerMove: { event in
+                            if walkUp { return }
+                            fwd(3, event.localPosition.dx, event.localPosition.dy,
+                                Int64(event.buttons))
+                        },
+                        onPointerUp: { event in
+                            if walkUp { return }
+                            fwd(1, event.localPosition.dx, event.localPosition.dy, 0)
+                        },
+                        onPointerHover: { event in
+                            if walkUp { return }
+                            fwd(6, event.localPosition.dx, event.localPosition.dy, 0)
+                        },
+                        onPointerSignal: { event in
+                            if walkUp { return }
+                            if let s = event as? PointerScrollEvent {
+                                scroll?(s.localPosition.dx, s.localPosition.dy,
+                                        s.scrollDelta.dx, s.scrollDelta.dy)
+                            }
+                        },
+                        behavior: .opaque,
+                        child: surf)
+                }
                 layers.append(Positioned(
                     left: r.left, top: r.top, width: r.width, height: r.height,
                     child: surf
@@ -105,14 +145,24 @@ class DesktopWindow: StatelessWidget {
         // behavior: .opaque ensures hit-testing succeeds even though TextureWidget
         // (a LeafRenderObjectWidget) doesn't report hits by default.
         let walkUp = walkUpOnClick
+        // Whether a point of the content is a child surface's to take (see
+        // the child listeners above): the window's listener leaves those.
+        let inputChildren = windowInfo.childSurfaces.compactMap {
+            $0.onPointerEvent != nil ? $0.logicalRect : nil
+        }
+        func childTakes(_ p: Offset) -> Bool {
+            inputChildren.contains { $0.contains(p) }
+        }
         return Listener(
             onPointerDown: { event in
                 if walkUp { return }
+                if childTakes(event.localPosition) { return }
                 forward(2, event.localPosition.dx, event.localPosition.dy,
                         Int64(event.buttons))
             },
             onPointerMove: { [self, windowInfo] event in
                 if walkUp { return }
+                if windowInfo.childSurfaceOwnsPointer { return }
                 // Client-initiated interactive move/resize (xdg_toplevel.move/
                 // resize): the compositor owns the rest of this drag. Divert
                 // motion into window move/resize; the client stops receiving
@@ -135,6 +185,10 @@ class DesktopWindow: StatelessWidget {
             },
             onPointerUp: { [windowInfo] event in
                 if walkUp { return }
+                if windowInfo.childSurfaceOwnsPointer {
+                    windowInfo.childSurfaceOwnsPointer = false
+                    return
+                }
                 // End of a client-initiated move/resize: clear the grab and,
                 // for resize, force-send the final configure (same contract
                 // as the shell's own resize handles).
@@ -155,10 +209,12 @@ class DesktopWindow: StatelessWidget {
             },
             onPointerHover: { event in
                 DesktopCursor.setShape(.default)
+                if childTakes(event.localPosition) { return }
                 forward(6, event.localPosition.dx, event.localPosition.dy, 0)
             },
             onPointerSignal: { [windowInfo] event in
                 if let scroll = event as? PointerScrollEvent {
+                    if childTakes(scroll.localPosition) { return }
                     windowInfo.onScrollEvent?(
                         scroll.localPosition.dx,
                         scroll.localPosition.dy,

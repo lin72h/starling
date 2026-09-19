@@ -66,6 +66,16 @@ struct WaylandSurface {
     int32_t sub_placed_x, sub_placed_y;
     int sub_placed;
     int sub_placed_z;                     // its rank among the window's subsurfaces
+    /* wl_surface.set_input_region, reduced to the one bit the shell routes
+     * by: 0 once the client set an EMPTY region (the pointer passes through
+     * to whatever is under it — Chrome's video overlay subsurfaces), 1 for
+     * a null region or one with rects (Chrome's bubbles). Double-buffered
+     * like the rest of the surface state. `sub_placed_input` is what the
+     * shell was last told. */
+    int input_accepts;
+    int pending_input_accepts;
+    int input_accepts_set;
+    int sub_placed_input;
     /* Stacking: this surface's subsurfaces, bottom to top, and this
      * surface's own link in its parent's list (initialised empty). */
     struct wl_list sub_children;
@@ -533,7 +543,7 @@ struct WaylandServer {
          * its own id, and again whenever the offset moves. */
         void (*on_subsurface_placed)(void* ctx, uint32_t surface_id,
                                      uint32_t toplevel_id, int32_t x, int32_t y,
-                                     int32_t z);
+                                     int32_t z, int accepts_input);
         /* The subsurface has nothing to draw any more (null buffer, role or
          * surface gone, or its content became the window's own). */
         void (*on_subsurface_unmapped)(void* ctx, uint32_t surface_id);

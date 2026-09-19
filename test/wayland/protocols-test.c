@@ -172,7 +172,7 @@ static struct {
     uint32_t outcfg_id; double outcfg_scale; int outcfg_count;
     uint32_t hints_surface; int32_t min_w, min_h, max_w, max_h; int hints_count;
     uint32_t popup_id; int popup_count;
-    uint32_t sub_id, sub_top; int32_t sub_x, sub_y, sub_z; int sub_placed;
+    uint32_t sub_id, sub_top; int32_t sub_x, sub_y, sub_z; int sub_input; int sub_placed;
     uint32_t watch_shm_sid; int watch_shm_count;
     uint32_t sub_unmapped_id; int sub_unmapped;
     uint32_t parent_child, parent_parent; int parent_count;
@@ -191,10 +191,11 @@ static void cb_new_popup(void* ctx, uint32_t sid, uint32_t parent, int x, int y,
     (void)ctx; (void)parent; (void)x; (void)y; (void)w; (void)h;
     LOCKED(seen.popup_id = sid; seen.popup_count++);
 }
-static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int32_t y, int32_t z) {
+static void cb_sub_placed(void* ctx, uint32_t sid, uint32_t top, int32_t x, int32_t y, int32_t z,
+                          int accepts_input) {
     (void)ctx;
     LOCKED(seen.sub_id = sid; seen.sub_top = top; seen.sub_x = x; seen.sub_y = y; seen.sub_z = z;
-           seen.sub_placed++);
+           seen.sub_input = accepts_input; seen.sub_placed++);
 }
 static void cb_sub_unmapped(void* ctx, uint32_t sid) {
     (void)ctx;
@@ -2018,6 +2019,7 @@ static void test_subsurface(void) {
     CHECK(seen.shm_surface == seen.sub_id, "under the subsurface's own id");
     CHECK(seen.shm_w == 200 && seen.shm_h == 100, "at its own size %dx%d", seen.shm_w, seen.shm_h);
     CHECK(seen.shm_keep_alpha, "with its alpha kept (a hover card is see-through)");
+    CHECK(seen.sub_input == 1, "and the pointer over it is its own by default");
 
     /* A frame at the same place: no new placement. */
     wl_surface_attach(s, small, 0, 0);
@@ -2035,6 +2037,40 @@ static void test_subsurface(void) {
     CHECK(placed == placed0 + 2 && seen.sub_x == 50 && seen.sub_y == 60,
           "moving it re-places it (%d at %d,%d)", placed - placed0, seen.sub_x, seen.sub_y);
 
+    /* Input region: an EMPTY one (Chrome's video overlays) hands the
+     * pointer through to the window; a region with rects, or none at
+     * all, keeps it (Chrome's bubbles). Each change re-places it. */
+    struct wl_region* none = wl_compositor_create_region(compositor);
+    wl_surface_set_input_region(s, none);
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(placed = seen.sub_placed);
+    CHECK(placed == placed0 + 3 && seen.sub_input == 0,
+          "an empty input region re-places it as pass-through (%d, input %d)",
+          placed - placed0, seen.sub_input);
+    struct wl_region* some = wl_compositor_create_region(compositor);
+    wl_region_add(some, 0, 0, 200, 100);
+    wl_surface_set_input_region(s, some);
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(placed = seen.sub_placed);
+    CHECK(placed == placed0 + 4 && seen.sub_input == 1,
+          "a region with rects gives it the pointer back (%d, input %d)",
+          placed - placed0, seen.sub_input);
+    wl_surface_set_input_region(s, none);
+    wl_surface_set_input_region(s, NULL);
+    wl_surface_attach(s, small, 0, 0);
+    wl_surface_commit(s);
+    wl_display_roundtrip(dpy);
+    LOCKED(placed = seen.sub_placed);
+    CHECK(placed == placed0 + 4 && seen.sub_input == 1,
+          "a null region is the whole surface, and the last set before a commit wins (%d)",
+          placed - placed0);
+    wl_region_destroy(none);
+    wl_region_destroy(some);
+
     /* The window's content (Waydroid's full-size subsurface over a dummy
      * toplevel): routes up to the window, and the child is unmapped. */
     struct wl_buffer* big = make_buffer(2000, 1500, WL_SHM_FORMAT_XRGB8888, NULL);
@@ -2050,7 +2086,7 @@ static void test_subsurface(void) {
     wl_surface_commit(s);
     wl_display_roundtrip(dpy);
     LOCKED(placed = seen.sub_placed);
-    CHECK(placed == placed0 + 3, "a small buffer places it again");
+    CHECK(placed == placed0 + 5, "a small buffer places it again");
     wl_surface_attach(s, NULL, 0, 0);
     wl_surface_commit(s);
     wl_display_roundtrip(dpy);

@@ -175,10 +175,14 @@ void wayland_server_on_toplevel_size_hints(WaylandServer* server,
  * among the window's subsurfaces (0 = bottom). Fired before the
  * subsurface's first buffer arrives through on_surface_commit /
  * on_shm_surface_commit under the subsurface's own id, and again when the
- * offset or the rank changes. `unmapped`: nothing to draw any more. */
+ * offset, the rank or `accepts_input` changes. `accepts_input` is 0 when
+ * the client gave the subsurface an EMPTY wl_surface input region — the
+ * pointer passes through it to the window (Chrome's video overlays) — and
+ * 1 otherwise, when the pointer over it is the subsurface's own (Chrome's
+ * bubbles). `unmapped`: nothing to draw any more. */
 void wayland_server_on_subsurface_placed(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id, uint32_t toplevel_id,
-               int32_t x, int32_t y, int32_t z), void* ctx);
+               int32_t x, int32_t y, int32_t z, int accepts_input), void* ctx);
 void wayland_server_on_subsurface_unmapped(WaylandServer* server,
     void (*cb)(void* ctx, uint32_t surface_id), void* ctx);
 

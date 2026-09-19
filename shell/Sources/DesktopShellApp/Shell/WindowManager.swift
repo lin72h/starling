@@ -28,12 +28,25 @@ struct ChildSurface {
     var logicalRect: Rect? = nil
     /// Stacking among the window's children (0 = bottom); drawn in order.
     var z: Int = 0
+    /// Set for a Wayland subsurface whose input region takes the pointer:
+    /// events over it go to the subsurface itself, under its own id, the
+    /// way a compositor's hit test would send them — Chrome's "Restore
+    /// pages?" bubble is one, and never closed while every click on it
+    /// went to the window beneath. Nil for an X11 child (the X server
+    /// routes within its own tree) and for a subsurface with an EMPTY
+    /// input region (Chrome's video overlays), where the window gets it.
+    var onPointerEvent: ((Int32, Double, Double, Int64) -> Void)? = nil
+    var onScrollEvent: ((Double, Double, Double, Double) -> Void)? = nil
 }
 
 class WindowInfo {
     let id: String
     /// Nested native subwindows composited inside this window's content.
     var childSurfaces: [ChildSurface] = []
+    /// The button went down on a child surface that takes input, so the
+    /// moves and the release of that press are its too — the window's own
+    /// listener, which sees the same events, stays out of them.
+    var childSurfaceOwnsPointer = false
     /// The window this one is a dialog for (X11 WM_TRANSIENT_FOR), as a
     /// shell window id. Raising the parent raises it too.
     var transientFor: String? = nil
