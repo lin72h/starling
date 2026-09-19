@@ -1864,6 +1864,46 @@ check the baseline first; and shell-drive's `main()` creates a mouse
 on every invocation, which moves the pointer — a keyboard-only test
 needs its own driver.
 
+### Phase 39 — the city on WSL, and who has the keyboard on arrival (2026-09-18)
+
+"Can you test in that remote Windows machine's WSL." Done on the
+physical box (`starling@192.168.68.56`, WSL2 Ubuntu 26.04, no
+`/dev/dri`, llvmpipe behind surfaceless EGL), with the shipped
+launcher in RDP display mode and a real `xfreerdp3` on our own Xvfb,
+driven by `xdotool`: `~/tmp/filament/wsl/wsl-3d.sh` (install, start,
+connect, Terminal from the dock, enter, type, leave; shots to
+`C:/dist/wsl3d-*.png`; `ask.py` beside it for the broker).
+
+- **The city runs there.** Filament starts on llvmpipe: first frame
+  0.7–4.4 s (shader compile), then ~165 ms a frame at 1280x800, the
+  shell at ~390% CPU while it redraws. Slow, and correct: the
+  building, the clock, the Terminal in its brick frame, typing shown.
+- **Without `libc++1`/`libc++abi1` the renderer silently does not
+  load** and the shell falls back to the GL living room — which on
+  llvmpipe runs its scene ticker at sixty frames a second: **655%
+  CPU.** The .deb declares both (dpkg-shlibdeps found them), so
+  `apt install ./starling.deb` brings them; a bare `dpkg -i` does
+  not, and `test/wsl/gate.sh`'s `dpkg -i || dpkg -i --force-all`
+  installs over the unmet dependency and grades a PASS. `ldd
+  libstarling_room.so | grep "not found"` is the check.
+- **Typed text did not appear at first — the keys went to the
+  camera.** Entering a walking world handed the keyboard to the camera
+  (Phase 22-era: windows stood far off on the arc, and a focused app
+  would have swallowed the first arrow). Now the window that had the
+  keyboard is shown in front at full size, so it keeps the keyboard;
+  "hello" on arrival walked the viewer (`e` turns right — the two
+  shots differ by exactly that). Removed: the focused window stays
+  focused on entry, the camera gets the keys only when nothing is
+  focused, and Alt still drives it regardless. Verified on both boxes.
+
+Harness notes for that machine: run scripts as FILES from
+`/mnt/c/dist` (nested quoting through `wsl -- bash -c` fails with
+"The system cannot find the path specified"); the broker socket is
+`/tmp/xdg-starling-1000/…` after the launcher's re-exec, and a stale
+root socket from a killed dev shell makes `ask.py` refuse the
+connection — delete it; `xdotool mousemove --window <freerdp window>`
+takes the dock's logical coordinates 1:1 at 1280x800.
+
 ### Still open
 
 - The room reads a little brown and dim; there is nothing on the walls.

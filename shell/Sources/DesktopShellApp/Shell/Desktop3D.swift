@@ -1304,11 +1304,13 @@ extension _DesktopShellState {
             _camera3D = _desktop3DHomeCamera(displayLayout?.host.logicalRect
                 ?? Rect.fromLTWH(0, 0, screenWidth, screenHeight))
             _desktop3DPlaceWindows()
-            // A walking world is entered on foot: the keys are the
-            // camera's until a window is clicked. Whatever app had the
-            // keyboard on the flat desktop would otherwise swallow the
-            // first arrow pressed, and nothing shows why.
-            if _desktop3DVoxel { windowManager.focusedWindowId = nil }
+            // The window that had the keyboard on the flat desktop keeps
+            // it: the city shows it in front at full size, so the keys
+            // plainly belong to it (Alt + the walking keys still drive the
+            // camera). This used to hand the keys to the camera on entry —
+            // right when windows stood far off on the arc, and wrong now:
+            // "hello" typed on arrival walked the viewer instead. With no
+            // window focused the keys are the camera's, as before.
         }
         if !animated {
             setState { _desktop3DT = on ? 1 : 0 }
